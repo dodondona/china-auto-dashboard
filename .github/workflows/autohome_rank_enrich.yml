@@ -7,7 +7,7 @@ on:
         description: "Target month (YYYY-MM), e.g., 2025-08"
         required: false
   schedule:
-    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTC（任意）
+    - cron: "0 3 5 * *"  # 毎月5日 03:00 UTC（任意）
 
 jobs:
   autohome-rank-enrich:
@@ -73,7 +73,7 @@ jobs:
             --tile-overlap 220 \
             --out "data/autohome_raw_${TARGET_MONTH}.csv"
 
-      # タイル一覧HTML（安全な heredoc）
+      # タイル一覧HTML（Heredocで安全に生成）
       - name: Build tiles index (safe heredoc)
         shell: bash
         run: |
@@ -105,9 +105,19 @@ HTML
             echo "no tiles/ directory found"
           fi
 
-      # ★ 条件付きでタイルを Artifact にアップロード（空ならスキップ）
+      # ▼▼ ここから：存在チェック → 条件付きアップロード（式を使わない） ▼▼
+      - name: Check tiles existence
+        id: check_tiles
+        shell: bash
+        run: |
+          if compgen -G "tiles/*" > /dev/null; then
+            echo "has=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=no" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload tiles as artifact
-        if: ${{ always() && hashFiles('tiles/*') != '' }}
+        if: ${{ always() && steps.check_tiles.outputs.has == 'yes' }}
         uses: actions/upload-artifact@v4
         with:
           name: autohome-tiles-${{ env.TARGET_MONTH }}
@@ -118,8 +128,8 @@ HTML
             tiles/index.html
           if-no-files-found: ignore
           retention-days: 14
+      # ▲▲ ここまで：タイルの条件付きアップロード ▲▲
 
-      # brand 列付与（後処理）
       - name: Enrich brand column (new CSV)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -130,9 +140,19 @@ HTML
             --out "data/autohome_rank_${TARGET_MONTH}.csv" \
             --no-llm
 
-      # ★ 条件付きで CSV も Artifact にアップロード（空ならスキップ）
+      # ▼ CSV も同様に条件付き（原始的にチェック）
+      - name: Check CSVs existence
+        id: check_csvs
+        shell: bash
+        run: |
+          if [ -f "data/autohome_raw_${TARGET_MONTH}.csv" ] || [ -f "data/autohome_rank_${TARGET_MONTH}.csv" ]; then
+            echo "has=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=no" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload CSVs as artifact (optional)
-        if: ${{ always() && hashFiles(format('data/autohome_*_{0}.csv', env.TARGET_MONTH)) != '' }}
+        if: ${{ always() && steps.check_csvs.outputs.has == 'yes' }}
         uses: actions/upload-artifact@v4
         with:
           name: autohome-csvs-${{ env.TARGET_MONTH }}
@@ -141,6 +161,7 @@ HTML
             data/autohome_rank_${{ env.TARGET_MONTH }}.csv
           if-no-files-found: ignore
           retention-days: 30
+      # ▲ CSV の条件付きアップロード ここまで ▲
 
       - name: Commit CSVs
         shell: bash
