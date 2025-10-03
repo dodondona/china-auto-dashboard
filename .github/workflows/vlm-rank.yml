@@ -8,7 +8,7 @@ on:
         required: true
         default: "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html"
   schedule:
-    - cron: "0 6 10 * *"   # 毎月10日 06:00(UTC) = 北京時間14:00頃
+    - cron: "0 6 10 * *"   # 毎月10日 06:00 UTC (北京時間14:00)
 
 jobs:
   capture:
@@ -18,11 +18,9 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
           cache: "pip"
@@ -35,35 +33,25 @@ jobs:
 
       - name: Run vlm_rank_reader.py
         run: |
-          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
-            echo "ERROR: OPENAI_API_KEY secret is missing."
-            exit 1
-          fi
-          echo "::add-mask::${{ secrets.OPENAI_API_KEY }}"
-
           URL="${{ github.event.inputs.url || 'https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html' }}"
-python vlm_rank_reader.py \
-  --from-url "$URL" \
-  --fullpage-split \
-  --tile-height 1200 \
-  --provider openai \
-  --model gpt-4o \        # ← miniではなく、ここを明示
-  --openai-api-key "${{ secrets.OPENAI_API_KEY }}" \
-  --max-side 1600 \
-  --jpeg-quality 80 \
-  --throttle-ms 1000 \    # ← 600から1秒に延長
-  --csv result.csv
+          python vlm_rank_reader.py \
+            --from-url "$URL" \
+            --fullpage-split \
+            --tile-height 1200 \
+            --provider openai \
+            --model gpt-4o \
+            --openai-api-key "${{ secrets.OPENAI_API_KEY }}" \
+            --max-side 1600 \
+            --jpeg-quality 80 \
+            --csv result.csv
 
-
-      - name: Upload CSV artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: autohome-rank-csv
           path: result.csv
           retention-days: 30
 
-      - name: Upload screenshots
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: autohome-rank-tiles
           path: tiles/
