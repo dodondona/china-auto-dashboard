@@ -23,9 +23,9 @@ jobs:
 
       # ← v5 ではなく v4 を使う（ここがポイント）
       - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
+  uses: actions/setup-python@v4
+  with:
+    python-version: "3.11"
 
       - name: Install dependencies
   run: |
