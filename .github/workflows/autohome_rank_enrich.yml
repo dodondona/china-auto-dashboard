@@ -86,3 +86,9 @@ jobs:
           git add "data/autohome_raw_${TARGET_MONTH}.csv" "data/autohome_rank_${TARGET_MONTH}.csv" || true
           git commit -m "autohome rank CSV (raw & brand) for ${TARGET_MONTH}" || echo "no changes"
           git push
+
+          - name: Upload tiles as artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: autohome-tiles-${{ env.TARGET_MONTH }}
+    path: tiles/*.jpg
