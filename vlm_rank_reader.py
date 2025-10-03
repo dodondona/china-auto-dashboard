@@ -4,44 +4,30 @@
 vlm_rank_reader.py
 URL からのフルページスクショ取得（Playwright）→ VLM（AI目視）で「順位/車名/台数」を抽出 → CSV に出力。
 
-- OCRは使いません。人の“目視”に近い Vision-Language Model (VLM) を使って表から値を読み取ります。
-- OpenAI (gpt-4o-mini 推奨) を標準、Gemini も選択可。
-- --from-url でURLを渡すと、全自動でスクショ→抽出→CSVまで行います。
-- 既存の tiles/*.png を直接読ませることも可能 (--input)。
+- OCRは使いません。Vision-Language Model (VLM) に画像を送り、表を読み取ります。
+- 既定は OpenAI gpt-4o。 --provider gemini で Gemini も可。
+- --from-url なら全自動でスクショ→抽出→CSV まで行います。 --input で既存画像からでもOK。
 
-インストール例:
-  pip install --upgrade openai pillow playwright
-  playwright install chromium
-  # （Gemini利用時のみ）
-  pip install --upgrade google-generativeai
-
-実行例:
-  # URLから一発
-  python vlm_rank_reader.py ^
-    --from-url "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html" ^
-    --csv result.csv
-
-  # 既存の画像から
-  python vlm_rank_reader.py ^
-    --input "tiles/tile_*.png" ^
+例:
+  python vlm_rank_reader.py \
+    --from-url "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html" \
     --csv result.csv
 """
 
 import os, io, re, glob, csv, time, json, base64, argparse
 from typing import List, Dict, Tuple, Optional
-from PIL import Image, ImageDraw
+from PIL import Image
 
 # ----------------------------- 画像取得（Playwright） -----------------------------
 def grab_fullpage_to(out_dir: str, url: str, viewport_w: int, viewport_h: int,
                      device_scale_factor: float, split: bool, tile_height: int) -> List[str]:
-    """
-    URL を開いてフルページでスクショ。split=True なら縦方向にタイル分割して保存。
-    戻り値は処理対象とする画像ファイルパスのリスト。
-    """
+    """URL を開いてフルページスクショ。split=True なら縦方向にタイル分割して保存。"""
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
-        raise RuntimeError("Playwright が見つかりません。`pip install playwright && playwright install chromium` を実行してください。") from e
+        raise RuntimeError(
+            "Playwright が見つかりません。`pip install playwright && playwright install chromium` を実行してください。"
+        ) from e
 
     os.makedirs(out_dir, exist_ok=True)
     full_path = os.path.join(out_dir, "_page_full.png")
@@ -77,9 +63,9 @@ def split_full_image(full_path: str, out_dir: str, tile_height: int) -> List[str
     return paths
 
 # ----------------------------- 画像 → VLM 入力整形 -----------------------------
-def load_and_downscale_for_vlm(path: str, max_side: int = 2200, jpeg_quality: int = 85) -> Tuple[str, Tuple[int,int]]:
+def load_and_downscale_for_vlm(path: str, max_side: int = 1600, jpeg_quality: int = 80) -> Tuple[str, Tuple[int,int]]:
     """
-    VLMのトークン/コスト節約のため、長辺 max_side に収めて JPEG 化。Data URL (base64) を返す。
+    VLMのトークン/コスト節約のため、長辺 max_side に収めて JPEG 化。Data URL を返す。
     """
     im = Image.open(path).convert("RGB")
     w, h = im.size
@@ -105,13 +91,10 @@ def strict_json_from_text(txt: str) -> dict:
     m = re.search(r"(\[[\s\S]*\])", txt)
     if m:
         return {"rows": json.loads(m.group(1))}
-    # 最後の手段
     return json.loads(txt)
 
 def rows_from_payload(payload) -> List[dict]:
-    """
-    payload -> rows 正規化。 {"rows":[{rank,name,count},...]} を想定し、方言を許容。
-    """
+    """payload -> rows 正規化。 {"rows":[{rank,name,count},...]} 想定で方言許容。"""
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict):
@@ -130,13 +113,12 @@ def rows_from_payload(payload) -> List[dict]:
             cnt = int(t) if t.isdigit() else None
         if isinstance(cnt, float):
             cnt = int(cnt)
-        norm.append({"rank": rank, "name": name, "count": cnt})
+        if name:
+            norm.append({"rank": rank, "name": name, "count": cnt})
     return norm
 
 def merge_and_reindex(all_rows: List[dict]) -> List[dict]:
-    """
-    複数画像結果の結合と rank_seq の付与。rankがあるもの優先で昇順ソート。
-    """
+    """複数画像結果の結合と rank_seq の付与。rank付き優先で昇順ソート。"""
     with_rank = [r for r in all_rows if isinstance(r.get("rank"), int)]
     no_rank   = [r for r in all_rows if not isinstance(r.get("rank"), int)]
     out = sorted(with_rank, key=lambda x: x["rank"]) + no_rank
@@ -174,8 +156,8 @@ UIの飾り・ボタン・注釈（例: 查成交价、下载App 等）は無視
 def make_user_prompt(band_hints: Optional[Dict[str,str]] = None) -> str:
     if not band_hints:
         return "画像内のランキング表から、見えている行だけを正確に抽出して、JSONだけを返してください。"
-    return f"""画像内のランキング表から行を抽出し、JSONだけを返してください。
-（X帯ヒント: rank={band_hints['rank']} / name={band_hints['name']} / count={band_hints['count']}。UIノイズは無視）"""
+    return (f"画像内のランキング表から行を抽出し、JSONだけを返してください。"
+            f"（X帯ヒント: rank={band_hints['rank']} / name={band_hints['name']} / count={band_hints['count']}。UIノイズは無視）")
 
 # ----------------------------- クライアント実装 -----------------------------
 class OpenAIClient:
@@ -188,7 +170,7 @@ class OpenAIClient:
         self.client = OpenAI()
         self.model = model
 
-    def infer(self, data_urls: List[str], system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
+    def infer(self, data_urls: List[str], system_prompt: str, user_prompt: str, max_retries: int = 8) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": [
@@ -196,7 +178,7 @@ class OpenAIClient:
                 *[{"type":"image_url","image_url":{"url":u}} for u in data_urls]
             ]}
         ]
-        err = None
+        last_err = None
         for k in range(max_retries):
             try:
                 resp = self.client.chat.completions.create(
@@ -207,9 +189,23 @@ class OpenAIClient:
                 )
                 return resp.choices[0].message.content
             except Exception as e:
-                err = e
-                time.sleep(1.2*(k+1))
-        raise err
+                # レート制限(429)優先処理: Retry-After or "try again in XYZms" を拾う
+                wait = 1.2 * (k + 1)
+                txt = str(e)
+                m = re.search(r"try again in (\d+)\s*ms", txt)
+                if m:
+                    wait = max(wait, int(m.group(1)) / 1000.0)
+                try:
+                    ra = getattr(e, "response", None)
+                    if ra and hasattr(ra, "headers"):
+                        retry_after = ra.headers.get("retry-after")
+                        if retry_after:
+                            wait = max(wait, float(retry_after))
+                except Exception:
+                    pass
+                last_err = e
+                time.sleep(min(wait, 10.0))
+        raise last_err
 
 class GeminiClient:
     def __init__(self, model: str, api_key: str):
@@ -217,23 +213,22 @@ class GeminiClient:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model)
 
-    def infer(self, data_urls: List[str], system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
+    def infer(self, data_urls: List[str], system_prompt: str, user_prompt: str, max_retries: int = 5) -> str:
         import google.generativeai as genai
         parts = [system_prompt, "\n", user_prompt]
-        # data URL -> バイトに戻す
         for u in data_urls:
             header, b64 = u.split(",", 1)
             mime = header.split(";")[0].split(":")[1]
             parts.append(genai.upload_file(io.BytesIO(base64.b64decode(b64)), mime_type=mime))
-        err = None
+        last_err = None
         for k in range(max_retries):
             try:
                 resp = self.model.generate_content(parts)
                 return resp.text
             except Exception as e:
-                err = e
+                last_err = e
                 time.sleep(1.2*(k+1))
-        raise err
+        raise last_err
 
 # ----------------------------- メイン -----------------------------
 def main():
@@ -251,20 +246,24 @@ def main():
 
     # VLM設定
     ap.add_argument("--provider", choices=["openai","gemini"], default="openai")
-    ap.add_argument("--model", default="gpt-4o-mini")  # OpenAI
+    ap.add_argument("--model", default="gpt-4o")  # 既定を gpt-4o
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
-    ap.add_argument("--openai-base-url", default=os.getenv("OPENAI_BASE_URL"))  # Azure/OpenRouterなど使う場合
+    ap.add_argument("--openai-base-url", default=os.getenv("OPENAI_BASE_URL"))
     ap.add_argument("--gemini-model", default="gemini-1.5-flash")
     ap.add_argument("--gemini-api-key", default=os.getenv("GEMINI_API_KEY"))
 
     # 送信前の縮小・画質（コスト/安定性チューニング）
-    ap.add_argument("--max-side", type=int, default=2200, help="VLMへ送る前に長辺をこのpxに縮小")
-    ap.add_argument("--jpeg-quality", type=int, default=85)
+    ap.add_argument("--max-side", type=int, default=1600, help="VLMへ送る前に長辺をこのpxに縮小")
+    ap.add_argument("--jpeg-quality", type=int, default=80)
 
     # （任意）帯ヒント
     ap.add_argument("--rank-x", default=None)
     ap.add_argument("--name-x", default=None)
     ap.add_argument("--count-x", default=None)
+
+    # スロットル/制御
+    ap.add_argument("--throttle-ms", type=int, default=600, help="各タイル送信の間隔[ms]")
+    ap.add_argument("--limit-tiles", type=int, default=0, help="先頭Nタイルだけ処理(0=無制限)")
 
     # 出力
     ap.add_argument("--csv", default="result.csv")
@@ -272,7 +271,7 @@ def main():
 
     # 画像の準備
     image_paths: List[str] = []
-    if args.from_url:
+    if args.from-url := getattr(args, "from_url"):
         image_paths = grab_fullpage_to(
             out_dir=args.out_dir,
             url=args.from_url,
@@ -286,6 +285,8 @@ def main():
         image_paths.extend(sorted(glob.glob(args.input)))
 
     image_paths = sorted(dict.fromkeys(image_paths))
+    if args.limit_tiles and image_paths:
+        image_paths = image_paths[: args.limit_tiles]
     if not image_paths:
         print("[WARN] 画像が見つかりません。--from-url または --input を指定してください。")
         return
@@ -306,8 +307,9 @@ def main():
     user_prompt = make_user_prompt(band_hints)
 
     all_rows: List[dict] = []
-    for p in image_paths:
+    for idx, p in enumerate(image_paths, start=1):
         data_url, _ = load_and_downscale_for_vlm(p, max_side=args.max_side, jpeg_quality=args.jpeg_quality)
+        print(f"[INFO] Processing tile {idx}/{len(image_paths)}: {os.path.basename(p)}")
         txt = client.infer([data_url], SYSTEM_PROMPT, user_prompt)
         try:
             payload = strict_json_from_text(txt)
@@ -321,6 +323,7 @@ def main():
             r["_image"] = os.path.basename(p)
         print(f"[INFO] {os.path.basename(p)} -> {len(rows)} rows")
         all_rows.extend(rows)
+        time.sleep(max(0, args.throttle_ms) / 1000.0)
 
     merged = merge_and_reindex(all_rows)
 
