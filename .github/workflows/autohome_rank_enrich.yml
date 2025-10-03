@@ -1,0 +1,88 @@
+name: Autohome Rank Enrich (brand column)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_month:
+        description: "Target month (YYYY-MM), e.g., 2025-08"
+        required: true
+  schedule:
+    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTCに実行（任意）
+
+jobs:
+  autohome-rank-enrich:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      TARGET_MONTH: ${{ inputs.target_month }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set TARGET_MONTH if empty (fallback to previous month)
+        id: setmonth
+        run: |
+          if [ -z "${TARGET_MONTH}" ]; then
+            TARGET_MONTH=$(date -u -d "$(date +%Y-%m-15) -1 month" +%Y-%m)
+            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
+          else
+            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
+          fi
+          echo "Using TARGET_MONTH=${TARGET_MONTH}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # 後処理スクリプトは標準ライブラリ + openai のみ
+          pip install openai
+
+      - name: Install Playwright Chromium (if needed by existing pipeline)
+        run: |
+          python - <<'PY'
+          import sys, subprocess, os
+          # 既存で Playwright を使っていない場合はスキップしてもOK
+          try:
+              import playwright # noqa
+              subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+          except Exception:
+              print("playwright not installed; skipping.")
+          PY
+
+      - name: Run existing VLM pipeline to produce the raw CSV
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          mkdir -p data
+          # 既存の実行コマンドに合わせてください。例：
+          python vlm_rank_reader.py \
+            --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
+            --fullpage-split \
+            --tile-height 1200 \
+            --tile-overlap 220 \
+            --out "data/autohome_raw_${TARGET_MONTH}.csv"
+
+      - name: Enrich brand column (new CSV)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/enrich_brand_llm.py \
+            --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
+            --out "data/autohome_rank_${TARGET_MONTH}.csv"
+
+      - name: Commit CSVs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "data/autohome_raw_${TARGET_MONTH}.csv" "data/autohome_rank_${TARGET_MONTH}.csv" || true
+          git commit -m "autohome rank CSV (raw & brand) for ${TARGET_MONTH}" || echo "no changes"
+          git push
