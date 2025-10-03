@@ -7,7 +7,7 @@ on:
         description: "Target month (YYYY-MM), e.g., 2025-08"
         required: false
   schedule:
-    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTCに実行（任意）
+    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTC（任意）
 
 jobs:
   autohome-rank-enrich:
@@ -27,6 +27,7 @@ jobs:
       # 1) 月指定が無ければ先月にフォールバック
       - name: Set TARGET_MONTH if empty (fallback to previous month)
         id: setmonth
+        shell: bash
         run: |
           if [ -z "${TARGET_MONTH}" ]; then
             TARGET_MONTH=$(date -u -d "$(date +%Y-%m-15) -1 month" +%Y-%m)
@@ -44,6 +45,7 @@ jobs:
 
       # 3) 依存インストール（既存requirements + openai）
       - name: Install deps
+        shell: bash
         run: |
           python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
@@ -51,6 +53,7 @@ jobs:
 
       # 4) Playwright Chromium（既存パイプラインが使う場合）
       - name: Install Playwright Chromium (if needed by existing pipeline)
+        shell: bash
         run: |
           python - <<'PY'
           import sys, subprocess
@@ -61,45 +64,57 @@ jobs:
               print("playwright not installed; skipping.")
           PY
 
-      # 5) 既存のVLMパイプラインで一次CSVを作る（★ここはあなたの既存コマンドに合わせる）
+      # 5) 既存のVLMパイプラインで一次CSVを作る
       - name: Run existing VLM pipeline to produce the raw CSV
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
         run: |
           mkdir -p data
-          # 例：PC版URL。既存の引数に合わせてください（変更したくなければ既存そのままでOK）
+          # ←ここはあなたの既存の実行コマンドそのままでOK
           python vlm_rank_reader.py \
             --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
             --fullpage-split \
             --tile-height 1200 \
             --tile-overlap 220 \
             --out "data/autohome_raw_${TARGET_MONTH}.csv"
-          # ↑ 上の実行で tiles/ ディレクトリ（tile_00.jpg など）が作られる想定
+          # ↑ この実行で tiles/ に tile_00.jpg ... が作られる想定
 
-      # 6) タイル画像のインデックスHTMLを作成（見やすさ用・任意）
-      - name: Build tiles index (optional but useful)
+      # 6) タイル画像のインデックスHTMLを安全に生成（Heredoc版）
+      - name: Build tiles index (safe heredoc)
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -d tiles ]; then
-            {
-              echo '<!doctype html><meta charset="utf-8"><title>Tiles Preview</title>'
-              echo '<style>body{font-family:system-ui,sans-serif;padding:24px;background:#111;color:#eee}'
-              echo '.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}'
-              echo 'figure{margin:0;background:#222;padding:8px;border-radius:8px}'
-              echo 'figcaption{font-size:12px;margin-top:6px;color:#ccc;word-break:break-all}'
-              echo 'img{max-width:100%;height:auto;display:block;border-radius:4px}'
-              echo '</style><h1>Autohome tiles</h1><div class="grid">'
-              for f in tiles/*.jpg tiles/*.jpeg tiles/*.png 2>/dev/null; do
-                [ -f "$f" ] || continue
-                bn=$(basename "$f")
-                echo "<figure><img src=\"$bn\" alt=\"$bn\"><figcaption>$bn</figcaption></figure>"
-              done
-              echo '</div>'
-            } > tiles/index.html
+            # CSS/HTMLのヘッダ部分
+            cat > tiles/index.html <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<title>Tiles Preview</title>
+<style>
+  :root{color-scheme:dark light}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       padding:24px;background:#111;color:#eee}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+  figure{margin:0;background:#222;padding:8px;border-radius:8px}
+  figcaption{font-size:12px;margin-top:6px;color:#ccc;word-break:break-all}
+  img{max-width:100%;height:auto;display:block;border-radius:4px}
+</style>
+<h1>Autohome tiles</h1>
+<div class="grid">
+HTML
+            # 画像サムネを並べる
+            shopt -s nullglob
+            for f in tiles/*.jpg tiles/*.jpeg tiles/*.png; do
+              bn="$(basename "$f")"
+              printf '<figure><img src="%s" alt="%s"><figcaption>%s</figcaption></figure>\n' "$bn" "$bn" "$bn" >> tiles/index.html
+            done
+            echo '</div>' >> tiles/index.html
           else
             echo "no tiles/ directory found"
           fi
 
-      # 7) タイル画像をArtifactsへ（★ここが「方法1」）
+      # 7) タイル画像をArtifactsへ（方法1の本体）
       - name: Upload tiles as artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -113,18 +128,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # 8) brand列付与の後処理（あなたの tools/enrich_brand_llm.py を使用）
+      # 8) brand列付与の後処理（tools/enrich_brand_llm.py）
       - name: Enrich brand column (new CSV)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
         run: |
           python tools/enrich_brand_llm.py \
             --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
             --out "data/autohome_rank_${TARGET_MONTH}.csv" \
             --no-llm
-          # ↑ まずは --no-llm で安全運用。必要なら外して LLM で補完
 
-      # 9) CSVもArtifactsに入れておくと比較が楽（任意）
+      # 9) CSVもArtifactsに入れておく（任意）
       - name: Upload CSVs as artifact (optional)
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -138,6 +153,7 @@ jobs:
 
       # 10) リポジトリへCSVをコミット（既存運用を維持）
       - name: Commit CSVs
+        shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
