@@ -7,6 +7,18 @@ on:
         description: "ランキングページURL"
         required: true
         default: "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html"
+      split:
+        description: "フルページをタイル分割する？ (true/false)"
+        required: false
+        default: "true"
+      tile_height:
+        description: "タイル高さ(px)"
+        required: false
+        default: "1200"
+      tile_overlap:
+        description: "上下オーバーラップ(px)"
+        required: false
+        default: "220"
   schedule:
     - cron: "0 6 10 * *"   # 毎月10日 06:00(UTC) = 北京時間14:00
 
@@ -38,20 +50,34 @@ jobs:
         shell: bash
         run: |
           set -e
+
+          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "ERROR: OPENAI_API_KEY secret is missing."
+            exit 1
+          fi
+          echo "::add-mask::${{ secrets.OPENAI_API_KEY }}"
+
           URL="${{ github.event.inputs.url || 'https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html' }}"
+          SPLIT="${{ github.event.inputs.split || 'true' }}"
+          TILE_H="${{ github.event.inputs.tile_height || '1200' }}"
+          OVERLAP="${{ github.event.inputs.tile_overlap || '220' }}"
+
+          # --fullpage-split はフラグなので true のときだけ付与
+          SPLIT_FLAG=""
+          if [ "$SPLIT" = "true" ] || [ "$SPLIT" = "True" ]; then
+            SPLIT_FLAG="--fullpage-split"
+          fi
+
           for i in 1 2 3; do
             echo "Attempt $i/3 ..."
             if python vlm_rank_reader.py \
               --from-url "$URL" \
-              --fullpage-split \
-              --tile-height 1200 \
-              --tile-overlap 240 \
-              --provider openai \
+              $SPLIT_FLAG \
+              --tile-height "$TILE_H" \
+              --tile-overlap "$OVERLAP" \
               --model gpt-4o \
               --openai-api-key "${{ secrets.OPENAI_API_KEY }}" \
-              --max-side 1800 \
-              --jpeg-quality 82 \
-              --csv result.csv ; then
+              --out result.csv ; then
               break
             fi
             if [ $i -lt 3 ]; then
