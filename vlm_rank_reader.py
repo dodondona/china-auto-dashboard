@@ -1,177 +1,118 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-vlm_rank_reader.py
-URL → フルページスクショ → タイル（オーバーラップ付き）→ VLMで行抽出 → CSV
+Autohome ランキングページをスクレイピングし、
+車種・ブランド・販売台数を取得し、さらに LLM で日本語列を補完するスクリプト。
+
+出力CSVには以下を含む:
+- rank_seq: ランキング順序
+- rank: ランク番号
+- model: 車種名（元の中国語）
+- brand: ブランド名（中国語, LLM補完）
+- count: 販売台数
+- brand_jp: ブランド名（日本語表記, LLM補完）
+- model_jp: 車種名（日本語または簡体字を日本語に直したもの, LLM補完）
+- link: 車種詳細ページへのURL
 """
 
-import os, io, re, sys, csv, json, time, base64, argparse
+import os, csv, json
 from pathlib import Path
-from typing import List, Dict
-from PIL import Image
 from playwright.sync_api import sync_playwright
-from openai import OpenAI
 from bs4 import BeautifulSoup
-import requests
+from openai import OpenAI
 
-# ----------------------------- プロンプト -----------------------------
-SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
-画像は中国の自動車販売ランキングのリストです。
-UIの飾りやボタン（例: 查成交价、下载App）や広告は無視してください。
-出力は JSON のみ。構造:
-{
-  "rows": [
-    {"rank": <int|null>, "name": "<string>", "count": <int|null>}
-  ]
-}
-ルール:
-- 1行につき {"rank","name","count"} を出力。見えている行だけでよい。
-- count は数字（销量等）。カンマや空白は取り除いた整数。
-- ブランド行も省略せず残す。
-- JSON 以外は出力しない。
+# OpenAIクライアント
+client = OpenAI()
+
+def llm_enrich(model_name: str, href: str):
+    """
+    モデル名とリンクを渡して、ブランド名と日本語表記をLLMで補完。
+    """
+    prompt = f"""
+以下の車両データについて、ブランド名と日本語表記を補完してください。
+
+- モデル名: {model_name}
+- リンク: {href}
+
+必ず次のJSON形式で返してください:
+{{
+  "brand": "ブランド名（中国語）",
+  "brand_jp": "ブランド名（日本語表記）",
+  "model_jp": "モデル名（日本語表記または簡体字を日本語に直したもの）"
+}}
 """
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    txt = resp.choices[0].message.content.strip()
+    try:
+        data = json.loads(txt)
+    except Exception:
+        data = {"brand": "未知", "brand_jp": "", "model_jp": model_name}
+    return data
 
-USER_PROMPT = "この画像に見えている全ての行（rank/name/count）をJSONだけで返してください。"
-
-# ----------------------------- 画像分割（overlap付き） -----------------------------
-def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
-    im = Image.open(full_path).convert("RGB")
-    W, H = im.size
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    y, i = 0, 0
-    step = max(1, tile_height - overlap)
-    while y < H:
-        y2 = min(y + tile_height, H)
-        tile = im.crop((0, y, W, y2))
-        p = out_dir / f"tile_{i:02d}.jpg"
-        tile.save(p, "JPEG", quality=85, optimize=True)
-        paths.append(p)
-        i += 1
-        if y2 >= H:
-            break
-        y += step
-    print(f"[INFO] {len(paths)} tiles saved -> {out_dir}")
-    return paths
-
-def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    full_path = out_dir / "full.jpg"
+def scrape_and_parse(url: str, out_csv: str = "rank_output.csv"):
+    """
+    Autohomeのランキングページを取得し、CSVに保存。
+    """
+    # Playwrightでページを取得
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": viewport[0], "height": viewport[1]},
-            device_scale_factor=2,
-        )
-        page.goto(url, wait_until="networkidle", timeout=120000)
-        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
+        page = browser.new_page()
+        page.goto(url, timeout=60000)
+        html = page.content()
         browser.close()
-    return full_path
 
-# ----------------------------- OpenAI VLM -----------------------------
-class OpenAIVLM:
-    def __init__(self, model: str, api_key: str | None):
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY が未設定です。")
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+    # BeautifulSoupで解析
+    soup = BeautifulSoup(html, "html.parser")
+    rows = []
+    rank = 1
 
-    def infer_json(self, image_path: Path) -> dict:
-        b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            max_tokens=1200,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type":"text","text":USER_PROMPT},
-                    {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}
-                ]},
-            ],
-            response_format={"type": "json_object"},
-        )
-        txt = resp.choices[0].message.content
-        try:
-            return json.loads(txt)
-        except Exception:
-            return {"rows": []}
-
-# ----------------------------- マージ＆並べ替え -----------------------------
-def normalize_rows(rows_in: List[dict]) -> List[dict]:
-    out = []
-    for r in rows_in:
-        name = (r.get("name") or "").strip()
-        if not name:
+    # 各車両をパース
+    for item in soup.select("div.rank-list li"):
+        name_tag = item.select_one("p a")
+        if not name_tag:
             continue
+        model_name = name_tag.get_text(strip=True)
+        href = name_tag.get("href", "")
+        if href.startswith("//"):
+            link = f"https:{href}"
+        elif href.startswith("/"):
+            link = f"https://www.autohome.com.cn{href}"
+        else:
+            link = href
 
-        rank = r.get("rank")
-        if isinstance(rank, float):
-            rank = int(rank)
-        if not isinstance(rank, int):
-            rank = None
+        count_tag = item.select_one("p em")
+        count = count_tag.get_text(strip=True) if count_tag else ""
 
-        cnt = r.get("count")
-        if isinstance(cnt, str):
-            t = cnt.replace(",", "").replace(" ", "")
-            cnt = int(t) if t.isdigit() else None
-        if isinstance(cnt, float):
-            cnt = int(cnt)
+        # LLMでブランド名・日本語を補完
+        enriched = llm_enrich(model_name, link)
 
-        out.append({"rank": rank, "name": name, "count": cnt})
-    return out
+        rows.append({
+            "rank_seq": rank,
+            "rank": rank,
+            "model": model_name,
+            "brand": enriched.get("brand", "未知"),
+            "count": count,
+            "brand_jp": enriched.get("brand_jp", ""),
+            "model_jp": enriched.get("model_jp", model_name),
+            "link": link,
+        })
+        rank += 1
 
-def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
-    merged: List[dict] = []
-    seen = set()
-    for rows in list_of_rows:
-        for r in rows:
-            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
-            if key and key not in seen:
-                seen.add(key)
-                merged.append(r)
-
-    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
-    for i, r in enumerate(merged, 1):
-        r["rank_seq"] = i
-    return merged
-
-# ----------------------------- MAIN -----------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--from-url", required=True)
-    ap.add_argument("--tile-height", type=int, default=1200)
-    ap.add_argument("--tile-overlap", type=int, default=220)
-    ap.add_argument("--out", default="result.csv")
-    ap.add_argument("--provider", default="openai")
-    ap.add_argument("--model", default="gpt-4o")
-    ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
-    ap.add_argument("--fullpage-split", action="store_true")
-    args = ap.parse_args()
-
-    full_path = grab_fullpage_to(args.from_url, Path("tiles"))
-
-    if args.fullpage_split:
-        tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
+    # CSV出力
+    if rows:
+        with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"✅ CSV出力完了: {out_csv}")
     else:
-        tile_paths = [full_path]
-
-    vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
-    all_rows: List[List[dict]] = []
-    for p in tile_paths:
-        data = vlm.infer_json(p)
-        rows = normalize_rows(data.get("rows", []))
-        print(f"[INFO] {p.name}: {len(rows)} rows")
-        all_rows.append(rows)
-
-    merged = merge_dedupe_sort(all_rows)
-    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","count"])
-        w.writeheader()
-        for r in merged:
-            w.writerow(r)
-
-    print(f"[DONE] rows={len(merged)} -> {args.out}")
+        print("⚠️ データが抽出できませんでした。")
 
 if __name__ == "__main__":
-    main()
+    # 実行例: 2025年8月の月次ランキングページ
+    url = "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html"
+    scrape_and_parse(url, "rank_output.csv")
