@@ -186,6 +186,34 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
         browser.close()
         return full_path
 
+# ============================= ここから修正：JSON抽出ヘルパー =============================
+def _extract_json_object(text: str) -> str:
+    """
+    - ```json ... ``` や ``` ... ``` を剥がす
+    - 前置き文のあとに出てくる最初の { ... } を抽出
+    - 取れなければ空文字を返す
+    """
+    if not text:
+        return ""
+    s = text.strip()
+
+    # コードフェンス除去
+    if s.startswith("```"):
+        s = s.strip("`")
+        # 先頭の "json" や言語名を取り除く
+        s = re.sub(r"^\s*json\s*", "", s, flags=re.I)
+
+    # すでにJSONっぽいならそのまま
+    if s.startswith("{") and s.endswith("}"):
+        return s
+
+    # テキストの中から最初の { ... } を探す（貪欲すぎないよう最短マッチ）
+    m = re.search(r"\{[\s\S]*\}", s)
+    if m:
+        return m.group(0).strip()
+
+    return ""
+
 # ----------------------------- VLMクラス -----------------------------
 class OpenAIVLM:
     def __init__(self, model: str, api_key: str):
@@ -204,11 +232,12 @@ class OpenAIVLM:
                 ]}
             ]
         )
-        text = (resp.output_text or "").strip()
-        if not text.startswith("{"):
+        raw = (resp.output_text or "").strip()
+        js = _extract_json_object(raw)
+        if not js:
             return {"rows":[]}
         try:
-            return json.loads(text)
+            return json.loads(js)
         except Exception:
             return {"rows":[]}
 
@@ -220,11 +249,12 @@ class OpenAIVLM:
                 {"role":"user","content":name}
             ]
         )
-        text = (resp.output_text or "").strip()
-        if not text.startswith("{"):
+        raw = (resp.output_text or "").strip()
+        js = _extract_json_object(raw)
+        if not js:
             return {"brand":"未知","model":name}
         try:
-            return json.loads(text)
+            return json.loads(js)
         except Exception:
             return {"brand":"未知","model":name}
 
