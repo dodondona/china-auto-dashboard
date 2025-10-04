@@ -1,149 +1,92 @@
-name: Autohome Rank Enrich (brand column + tiles artifacts)
+name: autohome-rank-enrich
 
 on:
+  schedule:
+    # 毎月5日 01:20 UTC（北京朝9:20）に前月分を取得
+    - cron: '20 1 5 * *'
   workflow_dispatch:
     inputs:
-      target_month:
-        description: "Target month (YYYY-MM), e.g., 2025-08"
+      month:
+        description: 'ターゲット月 (YYYY-MM)。未指定なら前月を自動計算'
         required: false
-  schedule:
-    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTCに実行（任意）
+        default: ''
+
+env:
+  PYTHON_VERSION: '3.11'
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
 jobs:
-  autohome-rank-enrich:
+  run:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
-    env:
-      TARGET_MONTH: ${{ inputs.target_month }}
-
     steps:
-      # 0) チェックアウト
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) 月指定が無ければ先月にフォールバック
-      - name: Set TARGET_MONTH if empty (fallback to previous month)
-        id: setmonth
-        run: |
-          if [ -z "${TARGET_MONTH}" ]; then
-            TARGET_MONTH=$(date -u -d "$(date +%Y-%m-15) -1 month" +%Y-%m)
-            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
-          else
-            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
-          fi
-          echo "Using TARGET_MONTH=${TARGET_MONTH}"
-
-      # 2) Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      # 3) 依存インストール（既存requirements + openai + bs4）
-      - name: Install deps
+      - name: Install deps (pip)
         run: |
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install openai beautifulsoup4
+          pip install -r requirements.txt
+          # tqdm/tenacity は enrich_brand_from_pages_vlm.py が参照
+          pip install tqdm tenacity
 
-      # 3.5) ★ CJKフォントを導入（豆腐対策・最小変更）
-      - name: Install Chinese CJK fonts for headless rendering
+      - name: Install Playwright Chromium (if needed)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
-          sudo fc-cache -fv
+          python -m playwright install chromium
 
-      # 4) Playwright Chromium（既存パイプラインが使う場合）
-      - name: Install Playwright Chromium (if needed by existing pipeline)
+      - name: Resolve MONTH (前月 or 手動指定)
+        shell: bash
         run: |
-          python - <<'PY'
-          import sys, subprocess
-          try:
-              import playwright  # noqa
-              subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-          except Exception:
-              print("playwright not installed; skipping.")
-          PY
+          if [[ -n "${{ github.event.inputs.month }}" ]]; then
+            MONTH="${{ github.event.inputs.month }}"
+          else
+            # 前月を計算（UbuntuランナーはGNU dateの -d が使えます）
+            MONTH=$(date -u -d "$(date +%Y-%m-01) -1 day" +'%Y-%m')
+          fi
+          echo "MONTH=$MONTH" >> $GITHUB_ENV
+          echo "Resolved MONTH=$MONTH"
 
-      # 5) 既存のVLMパイプラインで一次CSVを作る（そのまま）
-      - name: Run existing VLM pipeline to produce the raw CSV
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run VLM pipeline to produce RAW CSV
         run: |
           mkdir -p data
           python vlm_rank_reader.py \
-            --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
-            --fullpage-split \
-            --tile-height 1200 \
-            --tile-overlap 220 \
-            --out "data/autohome_raw_${TARGET_MONTH}.csv"
+            --url "https://www.autohome.com.cn/rank/1-3-1071-x/${{ env.MONTH }}.html" \
+            --out "data/autohome_raw_${{ env.MONTH }}.csv"
 
-      # 6) タイル画像のインデックスHTMLを作成（見やすさ用・そのまま）
-      - name: Build tiles index (optional but useful)
-        run: |
-          if [ -d tiles ]; then
-            {
-              echo '<!doctype html><meta charset="utf-8"><title>Tiles Preview</title>'
-              echo '<style>body{font-family:system-ui,sans-serif;padding:24px;background:#111;color:#eee}'
-              echo '.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}'
-              echo 'figure{margin:0;background:#222;padding:8px;border-radius:8px}'
-              echo 'figcaption{font-size:12px;margin-top:6px;color:#ccc;word-break:break-all}'
-              echo 'img{max-width:100%;height:auto;display:block;border-radius:4px}'
-              echo '</style><h1>Autohome tiles</h1><div class="grid">'
-              for f in tiles/*.jpg tiles/*.jpeg tiles/*.png; do
-                [ -e "$f" ] || continue
-                bn=$(basename "$f")
-                echo "<figure><img src=\"$bn\" alt=\"$bn\"><figcaption>$bn</figcaption></figure>"
-              done
-              echo '</div>'
-            } > tiles/index.html
-          else
-            echo "no tiles/ directory found"
-          fi
-
-      # 7) タイル画像をArtifactsへ（そのまま）
-      - name: Upload tiles as artifact
-        if: ${{ always() }}
+      - name: Upload tiles as artifact (optional)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-tiles-${{ env.TARGET_MONTH }}
+          name: tiles-${{ env.MONTH }}
           path: |
             tiles/*.jpg
             tiles/*.jpeg
             tiles/*.png
             tiles/index.html
-          if-no-files-found: warn
-          retention-days: 14
+          if-no-files-found: ignore
 
-      # 8) brand列付与の後処理（そのまま）
-      - name: Enrich brand column (new CSV)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Enrich brand column by VLM (2nd CSV)
         run: |
-          python tools/enrich_brand_llm.py \
-            --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
-            --out "data/autohome_rank_${TARGET_MONTH}.csv"
+          python tools/enrich_brand_from_pages_vlm.py \
+            --input "data/autohome_raw_${{ env.MONTH }}.csv" \
+            --output "data/autohome_rank_${{ env.MONTH }}.csv" \
+            --engine openai --model gpt-4o-mini
 
-      # 9) CSVもArtifactsに入れておく（そのまま）
-      - name: Upload CSVs as artifact (optional)
-        if: ${{ always() }}
+      - name: Upload CSVs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-csvs-${{ env.TARGET_MONTH }}
+          name: csv-${{ env.MONTH }}
           path: |
-            data/autohome_raw_${{ env.TARGET_MONTH }}.csv
-            data/autohome_rank_${{ env.TARGET_MONTH }}.csv
-          if-no-files-found: ignore
-          retention-days: 30
+            data/autohome_raw_${{ env.MONTH }}.csv
+            data/autohome_rank_${{ env.MONTH }}.csv
 
-      # 10) リポジトリへCSVをコミット（そのまま）
-      - name: Commit CSVs
+      - name: Commit CSVs back to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "data/autohome_raw_${TARGET_MONTH}.csv" "data/autohome_rank_${TARGET_MONTH}.csv" || true
-          git commit -m "autohome rank CSV (raw & brand) for ${TARGET_MONTH}" || echo "no changes"
+          git add data/autohome_raw_${{ env.MONTH }}.csv data/autohome_rank_${{ env.MONTH }}.csv
+          git commit -m "Add Autohome CSVs for ${{ env.MONTH }}" || echo "nothing to commit"
           git push
