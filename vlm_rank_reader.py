@@ -2,189 +2,154 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ → タイル（オーバーラップ付き）→ VLMで行抽出 → CSV
+ランキングページをキャプチャ＋VLMで順位/モデル/台数を抽出し、
+詳細ページをスクレイピングしてブランド名を補完する。
 
-改良点:
-- タイル分割に overlap を導入（境目での行欠落を防止）
-- ブランド行も除外せずそのまま残す
-- argparse の --fullpage-split を正しく args.fullpage_split に修正
-- 重複は「name」をキーに統一判定（空白・全角半角を除去）
+改良:
+- ブランド取得は <title> を優先、無ければ <div.subnav-title-name> を利用。
+- ブランド名が取れない場合は "未知" を入れる。
 """
 
-import os, io, re, sys, csv, json, time, base64, argparse
+import os, re, csv, json, base64, argparse, asyncio
 from pathlib import Path
 from typing import List, Dict
-from PIL import Image
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from openai import OpenAI
 
-# ----------------------------- プロンプト -----------------------------
-SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
-画像は中国の自動車販売ランキングのリストです。
-UIの飾りやボタン（例: 查成交价、下载App）や広告は無視してください。
-出力は JSON のみ。構造:
-{
-  "rows": [
-    {"rank": <int|null>, "name": "<string>", "count": <int|null>}
-  ]
-}
-ルール:
-- 1行につき {"rank","name","count"} を出力。見えている行だけでよい。
-- count は“销量”等の数字。カンマや空白は取り除いた整数。
-- ブランド名（メーカー名）も省略せず残す。
-- JSON 以外は出力しない。
+# ------------------- VLM PROMPT -------------------
+SYSTEM_PROMPT = """あなたは表の読み取りに特化したアシスタントです。
+画像は中国の自動車販売ランキングです。
+UIや広告は無視し、順位/車名/販売台数 を抽出してください。
 """
+USER_PROMPT = "画像から rank, model, sales を CSV形式で返してください。"
 
-USER_PROMPT = "この画像に見えている全ての行（rank/name/count）をJSONだけで返してください。"
+# ------------------- VLM 呼び出し -------------------
+def call_vlm(image_path: Path, api_key: str, model="gpt-4o-mini"):
+    client = OpenAI(api_key=api_key)
+    b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
 
-# ----------------------------- 画像分割（overlap付き） -----------------------------
-def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
-    im = Image.open(full_path).convert("RGB")
-    W, H = im.size
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    y, i = 0, 0
-    step = max(1, tile_height - overlap)
-    while y < H:
-        y2 = min(y + tile_height, H)
-        tile = im.crop((0, y, W, y2))
-        p = out_dir / f"tile_{i:02d}.jpg"
-        tile.save(p, "JPEG", quality=85, optimize=True)
-        paths.append(p)
-        i += 1
-        if y2 >= H:
-            break
-        y += step
-    print(f"[INFO] {len(paths)} tiles saved -> {out_dir}")
-    return paths
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": USER_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]},
+        ],
+    )
+    text = resp.choices[0].message.content.strip()
+    rows = []
+    for line in text.splitlines():
+        parts = [c.strip() for c in line.split(",")]
+        if len(parts) >= 3 and parts[0].isdigit():
+            try:
+                rows.append({
+                    "rank": int(parts[0]),
+                    "model": parts[1],
+                    "sales": int(parts[2].replace(",", "")),
+                })
+            except Exception:
+                continue
+    return rows
 
-def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    full_path = out_dir / "full.jpg"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": viewport[0], "height": viewport[1]},
-            device_scale_factor=2,
+# ------------------- Playwright: スクショ -------------------
+async def capture_fullpage(url: str, out_path: Path, viewport=(1380, 2400)):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+        await page.goto(url, timeout=60000)
+        await page.wait_for_timeout(3000)
+        await page.screenshot(path=str(out_path), full_page=True)
+        await browser.close()
+
+# ------------------- ブランド取得 -------------------
+async def fetch_brand_map(rank_url: str) -> Dict[str, str]:
+    """
+    ランキングページから各モデルの詳細リンクを辿り、ブランド名を取得。
+    - <title> を優先
+    - 無ければ <div.subnav-title-name> を利用
+    """
+    brand_map = {}
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(rank_url, timeout=60000)
+
+        # 車系リンクを取得
+        links = await page.eval_on_selector_all(
+            "a[href*='/']",
+            "els => els.map(e => e.href)"
         )
-        # 強めに待機（タイムアウト90秒）
-        page.goto(url, wait_until="networkidle", timeout=90000)
-        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
-        browser.close()
-    return full_path
+        car_links = [l for l in links if re.match(r"https://www.autohome.com.cn/\\d+/", l)]
 
-# ----------------------------- OpenAI VLM -----------------------------
-class OpenAIVLM:
-    def __init__(self, model: str, api_key: str | None):
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY が未設定です。")
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+        for link in car_links:
+            try:
+                sub = await browser.new_page()
+                await sub.goto(link, timeout=30000)
 
-    def infer_json(self, image_path: Path) -> dict:
-        b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            max_tokens=1200,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type":"text","text":USER_PROMPT},
-                    {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}
-                ]},
-            ],
-            response_format={"type": "json_object"},
-        )
-        txt = resp.choices[0].message.content
-        try:
-            return json.loads(txt)
-        except Exception:
-            return {"rows": []}
+                # 1) title から取得
+                title = await sub.title()
+                brand, model = None, None
+                if "-" in title:
+                    brand, model = title.split("-", 1)
+                    brand, model = brand.strip(), model.strip()
+                else:
+                    # 2) fallback: div.subnav-title-name
+                    try:
+                        txt = await sub.inner_text("div.subnav-title-name")
+                        if "-" in txt:
+                            brand, model = txt.split("-", 1)
+                            brand, model = brand.strip(), model.strip()
+                    except:
+                        pass
 
-# ----------------------------- マージ＆並べ替え -----------------------------
-def normalize_rows(rows_in: List[dict]) -> List[dict]:
-    out = []
-    for r in rows_in:
-        name = (r.get("name") or "").strip()
-        if not name:
-            continue
+                if brand and model:
+                    brand_map[model] = brand
 
-        rank = r.get("rank")
-        if isinstance(rank, float):
-            rank = int(rank)
-        if not isinstance(rank, int):
-            rank = None
+                await sub.close()
+            except Exception as e:
+                print(f"[WARN] brand fetch failed: {link} {e}")
+        await browser.close()
+    return brand_map
 
-        cnt = r.get("count")
-        if isinstance(cnt, str):
-            t = cnt.replace(",", "").replace(" ", "")
-            cnt = int(t) if t.isdigit() else None
-        if isinstance(cnt, float):
-            cnt = int(cnt)
-
-        out.append({"rank": rank, "name": name, "count": cnt})
-    return out
-
-def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
-    merged: List[dict] = []
-    seen = set()
-    for rows in list_of_rows:
-        for r in rows:
-            # 名前だけで判定（全角・半角スペースを除去）
-            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
-            if key and key not in seen:
-                seen.add(key)
-                merged.append(r)
-
-    # count 降順で並べ替え
-    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
-
-    # rank_seq で連番付与
-    for i, r in enumerate(merged, 1):
-        r["rank_seq"] = i
-    return merged
-
-# ----------------------------- MAIN -----------------------------
+# ------------------- MAIN -------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--from-url", required=True)
-    ap.add_argument("--tile-height", type=int, default=1200)
-    ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
-    ap.add_argument("--provider", default="openai")
-    ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
-    ap.add_argument("--fullpage-split", action="store_true", help="フルページをタイル分割する")
     args = ap.parse_args()
 
-    # 1) フルページ撮影
-    full_path = grab_fullpage_to(args.from_url, Path("tiles"))
+    tiles_dir = Path("tiles")
+    tiles_dir.mkdir(exist_ok=True)
+    full_path = tiles_dir / "full.jpg"
 
-    # 2) 分割
-    if args.fullpage_split:
-        tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
-    else:
-        tile_paths = [full_path]
+    # 1) ランキングページをスクショ
+    asyncio.run(capture_fullpage(args.from_url, full_path))
 
-    # 3) タイルごとに VLM 読み取り
-    vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
-    all_rows: List[List[dict]] = []
-    for p in tile_paths:
-        data = vlm.infer_json(p)
-        rows = normalize_rows(data.get("rows", []))
-        print(f"[INFO] {p.name}: {len(rows)} rows")
-        all_rows.append(rows)
+    # 2) VLMで順位/車名/台数を抽出
+    rows = call_vlm(full_path, args.openai_api_key)
 
-    # 4) マージ & CSV
-    merged = merge_dedupe_sort(all_rows)
+    # 3) ブランド補完
+    brand_map = asyncio.run(fetch_brand_map(args.from_url))
+    for r in rows:
+        # モデル名で一致検索（部分一致も検討）
+        brand = None
+        for k, v in brand_map.items():
+            if r["model"].startswith(k) or k.startswith(r["model"]):
+                brand = v
+                break
+        r["brand"] = brand if brand else "未知"
+
+    # 4) CSV出力
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","count"])
+        w = csv.DictWriter(f, fieldnames=["rank","model","brand","sales"])
         w.writeheader()
-        for r in merged:
+        for r in rows:
             w.writerow(r)
-
-    print(f"[DONE] rows={len(merged)} -> {args.out}")
+    print(f"[DONE] {len(rows)} rows -> {args.out}")
 
 if __name__ == "__main__":
     main()
