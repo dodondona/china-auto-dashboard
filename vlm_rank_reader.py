@@ -2,43 +2,40 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ → タイル（オーバーラップ付き）→ VLMで行抽出 → CSV
+URL → フルページスクショ → タイル分割（overlap付き）→ VLMで行抽出 → CSV
 
-改良点:
-- タイル分割に overlap を導入（境目での行欠落を防止）
-- ブランド行も除外せずそのまま残す
-- argparse の --fullpage-split を正しく args.fullpage_split に修正
-- 重複は「name」をキーに統一判定（空白・全角半角を除去）
-- Playwright の page.goto タイムアウト回避（リトライ・UA指定）
+修正点:
+- Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
+- LLMで brand と model を推定 (brand列追加)
 """
 
-import os, csv, json, base64, argparse, time
+import os, csv, json, base64, argparse
 from pathlib import Path
 from typing import List
 from PIL import Image
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
 # ----------------------------- プロンプト -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
-画像は中国の自動車販売ランキングのリストです。
-UIの飾りやボタン（例: 查成交价、下载App）や広告は無視してください。
+画像は中国の自動車販売ランキングです。
+UI部品や広告は無視してください。
 出力は JSON のみ。構造:
 {
   "rows": [
     {"rank": <int|null>, "name": "<string>", "count": <int|null>}
   ]
 }
-ルール:
-- 1行につき {"rank","name","count"} を出力。見えている行だけでよい。
-- count は“销量”等の数字。カンマや空白は取り除いた整数。
-- ブランド名（メーカー名）も省略せず残す。
-- JSON 以外は出力しない。
 """
 
-USER_PROMPT = "この画像に見えている全ての行（rank/name/count）をJSONだけで返してください。"
+USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
 
-# ----------------------------- 画像分割（overlap付き） -----------------------------
+BRAND_PROMPT = """次の車名からブランド名とモデル名を分離してください。
+出力は JSON のみ。構造:
+{"brand":"<string>","model":"<string>"}
+"""
+
+# ----------------------------- 画像分割 -----------------------------
 def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
     im = Image.open(full_path).convert("RGB")
     W, H = im.size
@@ -50,83 +47,47 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
         y2 = min(y + tile_height, H)
         tile = im.crop((0, y, W, y2))
         p = out_dir / f"tile_{i:02d}.jpg"
-        tile.save(p, "JPEG", quality=85, optimize=True)
+        tile.save(p, "JPEG", quality=90, optimize=True)
         paths.append(p)
         i += 1
         if y2 >= H:
             break
         y += step
-    print(f"[INFO] {len(paths)} tiles saved -> {out_dir}")
     return paths
 
-# ----------------------------- スクショ取得 -----------------------------
 def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
-    """
-    改良版:
-    - goto の timeout を180秒に延長
-    - wait_until="domcontentloaded" に緩和
-    - UA/locale を指定
-    - 3回までリトライ
-    """
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
-
-    MAX_RETRY = 3
-    for attempt in range(1, MAX_RETRY + 1):
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport={"width": viewport[0], "height": viewport[1]},
-                device_scale_factor=2,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                locale="zh-CN",
-            )
-            page = ctx.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=180000)
-
-                # 本文が出るまで待機（最大60秒）
-                SELECTORS = ["table", ".rank-list", ".content", "body"]
-                for sel in SELECTORS:
-                    try:
-                        page.wait_for_selector(sel, timeout=60000)
-                        break
-                    except PwTimeout:
-                        continue
-
-                # ネットワーク安定まで軽く待つ
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except PwTimeout:
-                    pass
-
-                page.wait_for_timeout(1500)
-                page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
-                browser.close()
-                return full_path
-            except PwTimeout:
-                browser.close()
-                if attempt == MAX_RETRY:
-                    raise
-                time.sleep(2 * attempt)  # バックオフして再試行
-                continue
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            viewport={"width": viewport[0], "height": viewport[1]},
+            device_scale_factor=2,
+        )
+        # フォント強制（豆腐防止）
+        page.add_init_script("""
+            const style = document.createElement('style');
+            style.innerHTML = '* { font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif !important; }';
+            document.head.appendChild(style);
+        """)
+        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.wait_for_timeout(3000)
+        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=90)
+        browser.close()
+    return full_path
 
 # ----------------------------- OpenAI VLM -----------------------------
 class OpenAIVLM:
     def __init__(self, model: str, api_key: str | None):
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY が未設定です。")
+            raise RuntimeError("OPENAI_API_KEY 未設定")
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
     def infer_json(self, image_path: Path) -> dict:
         b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
         resp = self.client.chat.completions.create(
-            model=self.model,  # ★ gpt-4o デフォルト
+            model=self.model,
             temperature=0,
             max_tokens=1200,
             messages=[
@@ -138,13 +99,27 @@ class OpenAIVLM:
             ],
             response_format={"type": "json_object"},
         )
-        txt = resp.choices[0].message.content
         try:
-            return json.loads(txt)
+            return json.loads(resp.choices[0].message.content)
         except Exception:
-            return {"rows": []}
+            return {"rows":[]}
 
-# ----------------------------- 正規化 & 重複排除 -----------------------------
+    def split_brand_model(self, name: str) -> dict:
+        prompt = BRAND_PROMPT + f"\n車名: {name}"
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            temperature=0,
+            max_tokens=200,
+            messages=[{"role":"system","content":"ブランド名とモデルを識別するアシスタントです。"},
+                      {"role":"user","content":prompt}],
+            response_format={"type":"json_object"}
+        )
+        try:
+            return json.loads(resp.choices[0].message.content)
+        except Exception:
+            return {"brand":"","model":name}
+
+# ----------------------------- 正規化 & マージ -----------------------------
 def normalize_rows(rows_in: List[dict]) -> List[dict]:
     out = []
     for r in rows_in:
@@ -152,16 +127,10 @@ def normalize_rows(rows_in: List[dict]) -> List[dict]:
         if not name:
             continue
         rank = r.get("rank")
-        if isinstance(rank, float):
-            rank = int(rank)
-        if not isinstance(rank, int):
-            rank = None
         cnt = r.get("count")
         if isinstance(cnt, str):
             t = cnt.replace(",", "").replace(" ", "")
             cnt = int(t) if t.isdigit() else None
-        if isinstance(cnt, float):
-            cnt = int(cnt)
         out.append({"rank": rank, "name": name, "count": cnt})
     return out
 
@@ -170,7 +139,7 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     seen = set()
     for rows in list_of_rows:
         for r in rows:
-            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
+            key = (r.get("name") or "").replace(" ", "").replace("\u3000","")
             if key and key not in seen:
                 seen.add(key)
                 merged.append(r)
@@ -186,18 +155,21 @@ def main():
     ap.add_argument("--tile-height", type=int, default=1200)
     ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
-    ap.add_argument("--provider", default="openai")
-    ap.add_argument("--model", default="gpt-4o")  # miniは使わない
+    ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
-    ap.add_argument("--fullpage-split", action="store_true", help="フルページをタイル分割する")
+    ap.add_argument("--fullpage-split", action="store_true")
     args = ap.parse_args()
 
+    # 1) フルページキャプチャ
     full_path = grab_fullpage_to(args.from_url, Path("tiles"))
+
+    # 2) 分割
     if args.fullpage_split:
         tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
     else:
         tile_paths = [full_path]
 
+    # 3) VLM読み取り
     vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
     all_rows: List[List[dict]] = []
     for p in tile_paths:
@@ -206,9 +178,16 @@ def main():
         print(f"[INFO] {p.name}: {len(rows)} rows")
         all_rows.append(rows)
 
+    # 4) マージ & ブランド分解
     merged = merge_dedupe_sort(all_rows)
+    for r in merged:
+        bm = vlm.split_brand_model(r["name"])
+        r["brand"] = bm.get("brand","")
+        r["model"] = bm.get("model", r["name"])
+
+    # 5) CSV出力
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","count"])
+        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","brand","model","count"])
         w.writeheader()
         for r in merged:
             w.writerow(r)
