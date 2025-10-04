@@ -67,7 +67,6 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
             viewport={"width": viewport[0], "height": viewport[1]},
             device_scale_factor=2,
         )
-        # 強めに待機（タイムアウト90秒）
         page.goto(url, wait_until="networkidle", timeout=90000)
         page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
         browser.close()
@@ -102,27 +101,24 @@ class OpenAIVLM:
         except Exception:
             return {"rows": []}
 
-# ----------------------------- マージ＆並べ替え -----------------------------
+# ----------------------------- 正規化 & 重複排除 -----------------------------
 def normalize_rows(rows_in: List[dict]) -> List[dict]:
     out = []
     for r in rows_in:
         name = (r.get("name") or "").strip()
         if not name:
             continue
-
         rank = r.get("rank")
         if isinstance(rank, float):
             rank = int(rank)
         if not isinstance(rank, int):
             rank = None
-
         cnt = r.get("count")
         if isinstance(cnt, str):
             t = cnt.replace(",", "").replace(" ", "")
             cnt = int(t) if t.isdigit() else None
         if isinstance(cnt, float):
             cnt = int(cnt)
-
         out.append({"rank": rank, "name": name, "count": cnt})
     return out
 
@@ -131,16 +127,11 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     seen = set()
     for rows in list_of_rows:
         for r in rows:
-            # 名前だけで判定（全角・半角スペースを除去）
             key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
             if key and key not in seen:
                 seen.add(key)
                 merged.append(r)
-
-    # count 降順で並べ替え
     merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
-
-    # rank_seq で連番付与
     for i, r in enumerate(merged, 1):
         r["rank_seq"] = i
     return merged
@@ -153,21 +144,17 @@ def main():
     ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
     ap.add_argument("--provider", default="openai")
-    ap.add_argument("--model", default="gpt-4o")
+    ap.add_argument("--model", default="gpt-4o")  # ★ miniは使わない
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
     ap.add_argument("--fullpage-split", action="store_true", help="フルページをタイル分割する")
     args = ap.parse_args()
 
-    # 1) フルページ撮影
     full_path = grab_fullpage_to(args.from_url, Path("tiles"))
-
-    # 2) 分割
     if args.fullpage_split:
         tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
     else:
         tile_paths = [full_path]
 
-    # 3) タイルごとに VLM 読み取り
     vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
     all_rows: List[List[dict]] = []
     for p in tile_paths:
@@ -176,7 +163,6 @@ def main():
         print(f"[INFO] {p.name}: {len(rows)} rows")
         all_rows.append(rows)
 
-    # 4) マージ & CSV
     merged = merge_dedupe_sort(all_rows)
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","count"])
