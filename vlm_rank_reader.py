@@ -2,13 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ（オーバーラップ付き）→ VLMで rank/brand/model/count 抽出
-さらに HTML 解析で model ごとのリンクを取得し、CSVに統合
-
-改良点:
-- brand は辞書マッピングで日本語表記に統一
-- model は LLM で日本語翻訳列を追加
-- 各モデルの Autohome 詳細ページ URL を追加
+URL → フルページスクショ → タイル（オーバーラップ付き）→ VLMで行抽出 → CSV
 """
 
 import os, io, re, sys, csv, json, time, base64, argparse
@@ -18,47 +12,49 @@ from PIL import Image
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
 from bs4 import BeautifulSoup
-
-# ----------------------------- ブランド辞書 -----------------------------
-BRAND_MAP = {
-    "比亚迪": "BYD",
-    "吉利": "吉利",
-    "奇瑞": "奇瑞",
-    "长安": "長安",
-    "上汽通用五菱": "五菱",
-    "上汽通用别克": "別克",
-    "大众": "フォルクスワーゲン",
-    "丰田": "トヨタ",
-    "日产": "日産",
-    "本田": "ホンダ",
-    "特斯拉": "Tesla",
-    "小米": "小米",
-    "赛力斯": "賽力斯",
-    "理想": "理想",
-    "蔚来": "蔚来",
-    # 必要に応じて追加
-}
+import requests
 
 # ----------------------------- プロンプト -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
 画像は中国の自動車販売ランキングのリストです。
+UIの飾りやボタン（例: 查成交价、下载App）や広告は無視してください。
 出力は JSON のみ。構造:
 {
   "rows": [
-    {"rank": <int|null>, "brand": "<string|null>", "model": "<string>", "count": <int|null>}
+    {"rank": <int|null>, "name": "<string>", "count": <int|null>}
   ]
 }
 ルール:
-- 1行につき {"rank","brand","model","count"} を出力。
-- brand が分からない場合は null。
-- count は数字。
+- 1行につき {"rank","name","count"} を出力。見えている行だけでよい。
+- count は数字（销量等）。カンマや空白は取り除いた整数。
+- ブランド行も省略せず残す。
 - JSON 以外は出力しない。
 """
 
-USER_PROMPT = "この画像に見えている全ての行（rank/brand/model/count）をJSONだけで返してください。"
+USER_PROMPT = "この画像に見えている全ての行（rank/name/count）をJSONだけで返してください。"
 
-# ----------------------------- スクショ＆HTML -----------------------------
-def grab_fullpage_and_html(url: str, out_dir: Path, viewport=(1380, 2400)) -> tuple[Path, str]:
+# ----------------------------- 画像分割（overlap付き） -----------------------------
+def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
+    im = Image.open(full_path).convert("RGB")
+    W, H = im.size
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Path] = []
+    y, i = 0, 0
+    step = max(1, tile_height - overlap)
+    while y < H:
+        y2 = min(y + tile_height, H)
+        tile = im.crop((0, y, W, y2))
+        p = out_dir / f"tile_{i:02d}.jpg"
+        tile.save(p, "JPEG", quality=85, optimize=True)
+        paths.append(p)
+        i += 1
+        if y2 >= H:
+            break
+        y += step
+    print(f"[INFO] {len(paths)} tiles saved -> {out_dir}")
+    return paths
+
+def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
     with sync_playwright() as p:
@@ -67,11 +63,10 @@ def grab_fullpage_and_html(url: str, out_dir: Path, viewport=(1380, 2400)) -> tu
             viewport={"width": viewport[0], "height": viewport[1]},
             device_scale_factor=2,
         )
-        page.goto(url, wait_until="networkidle", timeout=90000)
-        html = page.content()
+        page.goto(url, wait_until="networkidle", timeout=120000)
         page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
         browser.close()
-    return full_path, html
+    return full_path
 
 # ----------------------------- OpenAI VLM -----------------------------
 class OpenAIVLM:
@@ -86,7 +81,7 @@ class OpenAIVLM:
         resp = self.client.chat.completions.create(
             model=self.model,
             temperature=0,
-            max_tokens=1500,
+            max_tokens=1200,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [
@@ -102,53 +97,28 @@ class OpenAIVLM:
         except Exception:
             return {"rows": []}
 
-    def translate_model_jp(self, name: str) -> str:
-        if not name:
-            return ""
-        prompt = f"次の中国語車種名を自然な日本語に翻訳してください。\n{name}\n出力は日本語名のみ。"
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            max_tokens=100,
-            messages=[
-                {"role": "system", "content": "あなたは中国語の自動車モデル名を日本語に翻訳するアシスタントです。"},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        return resp.choices[0].message.content.strip()
-
-# ----------------------------- 正規化・マージ -----------------------------
-def normalize_rows(rows_in: List[dict], vlm: OpenAIVLM, url_map: dict) -> List[dict]:
+# ----------------------------- マージ＆並べ替え -----------------------------
+def normalize_rows(rows_in: List[dict]) -> List[dict]:
     out = []
     for r in rows_in:
-        model = (r.get("model") or "").strip()
-        brand = (r.get("brand") or "").strip()
-        count = r.get("count")
+        name = (r.get("name") or "").strip()
+        if not name:
+            continue
 
-        # ブランド日本語化
-        brand_jp = BRAND_MAP.get(brand, brand)
+        rank = r.get("rank")
+        if isinstance(rank, float):
+            rank = int(rank)
+        if not isinstance(rank, int):
+            rank = None
 
-        # モデル翻訳
-        model_jp = vlm.translate_model_jp(model) if model else ""
+        cnt = r.get("count")
+        if isinstance(cnt, str):
+            t = cnt.replace(",", "").replace(" ", "")
+            cnt = int(t) if t.isdigit() else None
+        if isinstance(cnt, float):
+            cnt = int(cnt)
 
-        # URLリンク付与（model名で突合）
-        link = url_map.get(model, "")
-
-        # 数字整形
-        if isinstance(count, str):
-            t = count.replace(",", "").replace(" ", "")
-            count = int(t) if t.isdigit() else None
-        if isinstance(count, float):
-            count = int(count)
-
-        out.append({
-            "rank": r.get("rank"),
-            "brand": brand_jp,
-            "model": model,
-            "model_jp": model_jp,
-            "count": count,
-            "url": link
-        })
+        out.append({"rank": rank, "name": name, "count": cnt})
     return out
 
 def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
@@ -156,28 +126,15 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     seen = set()
     for rows in list_of_rows:
         for r in rows:
-            key = (r.get("brand"), r.get("model"))
-            if key not in seen:
+            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
+            if key and key not in seen:
                 seen.add(key)
                 merged.append(r)
 
-    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("brand"), r.get("model")))
+    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
     for i, r in enumerate(merged, 1):
         r["rank_seq"] = i
     return merged
-
-# ----------------------------- HTML解析でURL取得 -----------------------------
-def extract_model_links(html: str) -> dict:
-    soup = BeautifulSoup(html, "html.parser")
-    url_map = {}
-    for a in soup.select("a"):
-        href = a.get("href", "")
-        text = (a.get_text() or "").strip()
-        if href and re.search(r"/\d+/", href) and text:
-            if not href.startswith("http"):
-                href = "https://www.autohome.com.cn" + href
-            url_map[text] = href
-    return url_map
 
 # ----------------------------- MAIN -----------------------------
 def main():
@@ -186,34 +143,30 @@ def main():
     ap.add_argument("--tile-height", type=int, default=1200)
     ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
+    ap.add_argument("--provider", default="openai")
     ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
     ap.add_argument("--fullpage-split", action="store_true")
     args = ap.parse_args()
 
-    # スクショとHTML
-    full_path, html = grab_fullpage_and_html(args.from_url, Path("tiles"))
-    url_map = extract_model_links(html)
+    full_path = grab_fullpage_to(args.from_url, Path("tiles"))
 
-    # 分割
     if args.fullpage_split:
         tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
     else:
         tile_paths = [full_path]
 
-    # VLM
     vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
     all_rows: List[List[dict]] = []
     for p in tile_paths:
         data = vlm.infer_json(p)
-        rows = normalize_rows(data.get("rows", []), vlm, url_map)
+        rows = normalize_rows(data.get("rows", []))
         print(f"[INFO] {p.name}: {len(rows)} rows")
         all_rows.append(rows)
 
-    # マージ & CSV
     merged = merge_dedupe_sort(all_rows)
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","brand","model","model_jp","count","url"])
+        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","count"])
         w.writeheader()
         for r in merged:
             w.writerow(r)
