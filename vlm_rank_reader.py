@@ -32,27 +32,27 @@ SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシス�
 """
 USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
 
-# ----------------------------- ブランド分離プロンプト（辞書不要・シリーズ壊さない） -----------------------------
+# ----------------------------- ブランド分離プロンプト -----------------------------
 BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”或图片片段，请输出对应的【品牌/厂商】与【车型名】。
 
 数据来源与验证顺序（务必遵守）：
 1) 必须优先在 汽车之家（autohome.com.cn） 查询并核对：先用“site:autohome.com.cn <车型/车系名>”检索；打开最相关的“车系”或“参数配置/图片/报价”页面。
-2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样（示例：比亚迪-秦PLUS / 上汽通用五菱-宏光MINIEV），据此判定品牌/厂商与车型名。
+2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样（示例：比亚迪-秦PLUS / 上汽通用五菱-宏光MINIEV）。
 3) 如在汽车之家未找到完全匹配，请：
-   a. 回看输入图片/文本，检查是否有误読（相似名、后缀如“Pro”“MAX”“L”“PLUS”等）。
+   a. 回看输入图片/文本，检查是否有误読。
    b. 结合常见别名/缩写再次在汽车之家检索 1 次。
-4) 仍无法在汽车之家确认时，才可短暂参考第二来源（如：易车 yiche.com），但若信息与汽车之家冲突，以汽车之家为准；无法确认则返回“brand":"未知"。
+4) 仍无法在汽车之家确认时，才可短暂参考第二来源（如：易车 yiche.com）。
 
 命名规则：
-- 不要仅按第一个词硬拆。像“宏光MINIEV”“秦PLUS”“宋PLUS”“汉L”等是完整车系名，不能把“宏光”“秦”“宋”“汉”単独当作品牌。
-- 尽可能输出厂商（例如“上汽通用五菱”“比亚迪”“大众”“吉利”“特斯拉”等）。
-- 车型名请保留完整的车系名（含后缀，如 PLUS / Pro / MAX / L）。
+- 不要仅按第一个词硬拆。
+- 厂商はできるだけ正式名称。
+- 车型名は後継記号を含めて完全形。
 
-只输出 JSON，结构严格如下：
+只输出 JSON：
 {"brand":"<string>","model":"<string>"}
 """
 
-# ----------------------------- AutoHome/Yiche 参照（スクレイプ&検索） -----------------------------
+# ----------------------------- AutoHome/Yiche 参照 -----------------------------
 HEADERS_WEB = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -168,28 +168,23 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
 
-    MAX_RETRY = 3
-    for attempt in range(1, MAX_RETRY + 1):
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport={"width": viewport[0], "height": viewport[1]},
-                device_scale_factor=2,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                locale="zh-CN",
-                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-            )
-            page = ctx.new_page()
-            page.goto(url, timeout=60000)
-            page.wait_for_timeout(4000)
-            page.screenshot(path=str(full_path), full_page=True)
-            browser.close()
-            return full_path
-    return full_path
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            viewport={"width": viewport[0], "height": viewport[1]},
+            device_scale_factor=2,
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
+            locale="zh-CN",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+        )
+        page = ctx.new_page()
+        page.goto(url, timeout=60000)
+        page.wait_for_timeout(4000)
+        page.screenshot(path=str(full_path), full_page=True)
+        browser.close()
+        return full_path
 
 # ----------------------------- VLMクラス -----------------------------
 class OpenAIVLM:
@@ -209,7 +204,13 @@ class OpenAIVLM:
                 ]}
             ]
         )
-        return json.loads(resp.output_text) if resp.output_text else {}
+        text = (resp.output_text or "").strip()
+        if not text.startswith("{"):
+            return {"rows":[]}
+        try:
+            return json.loads(text)
+        except Exception:
+            return {"rows":[]}
 
     def split_brand_model_llm(self, name: str) -> dict:
         resp = self.client.responses.create(
@@ -219,8 +220,11 @@ class OpenAIVLM:
                 {"role":"user","content":name}
             ]
         )
+        text = (resp.output_text or "").strip()
+        if not text.startswith("{"):
+            return {"brand":"未知","model":name}
         try:
-            return json.loads(resp.output_text)
+            return json.loads(text)
         except Exception:
             return {"brand":"未知","model":name}
 
