@@ -7,12 +7,11 @@ on:
         description: "Target month (YYYY-MM), e.g., 2025-08"
         required: false
   schedule:
-    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTCに実行（任意）
+    - cron: "0 3 5 * *"
 
 jobs:
   autohome-rank-enrich:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
 
@@ -23,7 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set TARGET_MONTH if empty (fallback to previous month)
+      - name: Set TARGET_MONTH if empty
         id: setmonth
         run: |
           if [ -z "${TARGET_MONTH}" ]; then
@@ -45,25 +44,17 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install openai
 
-      # ← ここが豆腐対策（変更はこの1ステップだけ追加でした）
-      - name: Install Chinese CJK fonts for headless rendering
+      - name: Install Chinese fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
           sudo fc-cache -fv
 
-      - name: Install Playwright Chromium (if needed by existing pipeline)
+      - name: Install Playwright Chromium
         run: |
-          python - <<'PY'
-          import sys, subprocess
-          try:
-              import playwright  # noqa
-              subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-          except Exception:
-              print("playwright not installed; skipping.")
-          PY
+          python -m playwright install chromium
 
-      - name: Run existing VLM pipeline to produce the raw CSV
+      - name: Run VLM pipeline
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -75,7 +66,7 @@ jobs:
             --tile-overlap 220 \
             --out "data/autohome_raw_${TARGET_MONTH}.csv"
 
-      - name: Build tiles index (optional but useful)
+      - name: Build tiles index
         run: |
           if [ -d tiles ]; then
             {
@@ -93,11 +84,9 @@ jobs:
               done
               echo '</div>'
             } > tiles/index.html
-          else
-            echo "no tiles/ directory found"
           fi
 
-      - name: Upload tiles as artifact
+      - name: Upload tiles artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
@@ -110,7 +99,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Enrich brand column (new CSV)
+      - name: Enrich brand column
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -119,7 +108,7 @@ jobs:
             --out "data/autohome_rank_${TARGET_MONTH}.csv" \
             --no-llm
 
-      - name: Upload CSVs as artifact (optional)
+      - name: Upload CSVs
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
