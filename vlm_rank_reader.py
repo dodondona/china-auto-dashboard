@@ -75,7 +75,6 @@ def parse_series_title(title: str):
     if m:
         model = m.group(1).strip()
         rest = m.group(2)
-        # rest内にブランド名が含まれている場合を探す
         m2 = re.search(r"(比亚迪|上汽通用五菱|上汽大众|一汽大众|广汽丰田|长安汽车|吉利汽车|宝马|奥迪|本田|红旗|奇瑞|小鹏汽车|赛力斯|特斯拉|丰田|日产|奔驰|五菱|别克|长城|哈弗)", rest)
         if m2:
             brand = m2.group(1)
@@ -194,7 +193,7 @@ class BrandResolver:
         self._save()
         return bm
 
-# ----------------------------- その他ヘルパー -----------------------------
+# ----------------------------- normalize / merge -----------------------------
 def normalize_rows(rows: List[dict]) -> List[dict]:
     return [{"rank":r.get("rank"),"name":(r.get("name") or "").strip(),"count":r.get("count")} for r in rows]
 
@@ -209,6 +208,43 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     for i,r in enumerate(merged,1): r["rank_seq"]=i
     return merged
 
+# ----------------------------- screenshot + split -----------------------------
+def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    full_path = out_dir / "full.jpg"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            viewport={"width": viewport[0], "height": viewport[1]},
+            device_scale_factor=2,
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
+            locale="zh-CN",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+        )
+        page = ctx.new_page()
+        page.goto(url, timeout=60000)
+        page.wait_for_timeout(4000)
+        page.screenshot(path=str(full_path), full_page=True)
+        browser.close()
+        return full_path
+
+def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
+    im = Image.open(full_path).convert("RGB")
+    W, H = im.size
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths=[]; y=0; i=0; step=max(1,tile_height-overlap)
+    while y<H:
+        y2=min(y+tile_height,H)
+        tile=im.crop((0,y,W,y2))
+        p=out_dir/f"tile_{i:02d}.jpg"
+        tile.save(p,"JPEG",quality=90,optimize=True)
+        paths.append(p); i+=1
+        if y2>=H: break
+        y+=step
+    return paths
+
 # ----------------------------- main -----------------------------
 def main():
     ap=argparse.ArgumentParser()
@@ -218,12 +254,16 @@ def main():
     ap.add_argument("--out",default="result.csv")
     ap.add_argument("--model",default="gpt-4o")
     ap.add_argument("--openai-api-key",default=os.getenv("OPENAI_API_KEY"))
+    ap.add_argument("--fullpage-split", action="store_true")  # ← 復活
     args=ap.parse_args()
 
     series_map=collect_series_links_from_rank(args.from_url)
 
     full_path=grab_fullpage_to(args.from_url, Path("tiles"))
-    tile_paths=[full_path]
+    if args.fullpage_split:
+        tile_paths=split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
+    else:
+        tile_paths=[full_path]
 
     vlm=OpenAIVLM(model=args.model, api_key=args.openai_api_key)
     all_rows=[]
