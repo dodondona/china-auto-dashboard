@@ -110,7 +110,7 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
                 time.sleep(2)
 
 # ----------------------------- OpenAI 呼び出し -----------------------------
-def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
+def vlm_extract_rows(image_path: Path, model="gpt-4o") -> List[Dict]:
     client = OpenAI()
     b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
     msgs = [
@@ -120,7 +120,7 @@ def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
             {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
         ]}
     ]
-    # ★ 修正: messages → input
+    # messages → input に修正済み
     resp = client.responses.create(model=model, input=msgs, temperature=0)
     out = resp.output_text
     try:
@@ -129,7 +129,7 @@ def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
     except Exception:
         return []
 
-def vlm_split_brand(name: str, model="gpt-4o-mini") -> Dict[str, str]:
+def vlm_split_brand(name: str, model="gpt-4o") -> Dict[str, str]:
     client = OpenAI()
     msgs = [
         {"role": "system", "content": BRAND_PROMPT},
@@ -169,7 +169,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--tile-height", type=int, default=900)
     ap.add_argument("--overlap", type=int, default=120)
-    ap.add_argument("--model", default="gpt-4o-mini")
+    ap.add_argument("--model", default="gpt-4o")   # ★ デフォルトを gpt-4o に変更
     args = ap.parse_args()
 
     url = args.url
