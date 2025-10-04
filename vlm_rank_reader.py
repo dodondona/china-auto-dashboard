@@ -7,16 +7,17 @@ URL → フルページスクショ → タイル分割（overlap付き）→ VL
 修正点:
 - Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
 - LLMで brand と model を推定 (brand列追加)
+- CSV出力前に name を除去（fieldnames 不一致エラー対応）
 """
 
-import os, csv, json, base64, argparse
+import os, csv, json, base64, argparse, time
 from pathlib import Path
 from typing import List
 from PIL import Image
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from openai import OpenAI
 
-# ----------------------------- プロンプト -----------------------------
+# ----------------------------- VLM プロンプト -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
 画像は中国の自動車販売ランキングです。
 UI部品や広告は無視してください。
@@ -27,7 +28,6 @@ UI部品や広告は無視してください。
   ]
 }
 """
-
 USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
 
 BRAND_PROMPT = """次の車名からブランド名とモデル名を分離してください。
@@ -35,7 +35,7 @@ BRAND_PROMPT = """次の車名からブランド名とモデル名を分離し�
 {"brand":"<string>","model":"<string>"}
 """
 
-# ----------------------------- 画像分割 -----------------------------
+# ----------------------------- タイル分割 -----------------------------
 def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
     im = Image.open(full_path).convert("RGB")
     W, H = im.size
@@ -55,26 +55,74 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
         y += step
     return paths
 
+# ----------------------------- スクショ（HTMLは読まない） -----------------------------
 def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": viewport[0], "height": viewport[1]},
-            device_scale_factor=2,
-        )
-        # フォント強制（豆腐防止）
-        page.add_init_script("""
-            const style = document.createElement('style');
-            style.innerHTML = '* { font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif !important; }';
-            document.head.appendChild(style);
-        """)
-        page.goto(url, wait_until="networkidle", timeout=90000)
-        page.wait_for_timeout(3000)
-        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=90)
-        browser.close()
-    return full_path
+
+    MAX_RETRY = 3
+    for attempt in range(1, MAX_RETRY + 1):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                viewport={"width": viewport[0], "height": viewport[1]},
+                device_scale_factor=2,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+            page = ctx.new_page()
+
+            # 豆腐防止：CJKフォント強制（WorkflowでCJKフォント導入済み前提）
+            page.add_init_script("""
+              try {
+                const style = document.createElement('style');
+                style.setAttribute('data-screenshot-font-patch','1');
+                style.textContent = `
+                  * { font-family:
+                      "Noto Sans CJK SC","WenQuanYi Zen Hei","Noto Sans CJK JP",
+                      "Noto Sans","Microsoft YaHei","PingFang SC",sans-serif !important; }
+                `;
+                document.documentElement.appendChild(style);
+              } catch(e){}
+            """)
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=180000)
+                # 本文らしき要素を緩く待機
+                for sel in ["table", ".rank-list", ".content", "body"]:
+                    try:
+                        page.wait_for_selector(sel, timeout=60000)
+                        break
+                    except PwTimeout:
+                        continue
+                # Webフォント読み込みをできるだけ待つ
+                try:
+                    page.evaluate("return document.fonts && document.fonts.ready.then(()=>true)")
+                except Exception:
+                    pass
+                page.wait_for_timeout(800)
+                # ベストエフォートで安定
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except PwTimeout:
+                    pass
+                page.wait_for_timeout(500)
+
+                page.screenshot(path=full_path, full_page=True, type="jpeg", quality=90)
+                browser.close()
+                return full_path
+
+            except PwTimeout:
+                browser.close()
+                if attempt == MAX_RETRY:
+                    raise
+                time.sleep(1.5 * attempt)
+                continue
 
 # ----------------------------- OpenAI VLM -----------------------------
 class OpenAIVLM:
@@ -87,7 +135,7 @@ class OpenAIVLM:
     def infer_json(self, image_path: Path) -> dict:
         b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
         resp = self.client.chat.completions.create(
-            model=self.model,
+            model=self.model,  # 例: gpt-4o
             temperature=0,
             max_tokens=1200,
             messages=[
@@ -107,19 +155,21 @@ class OpenAIVLM:
     def split_brand_model(self, name: str) -> dict:
         prompt = BRAND_PROMPT + f"\n車名: {name}"
         resp = self.client.chat.completions.create(
-            model=self.model,
+            model=self.model,  # 同じモデルでOK（テキストだけ）
             temperature=0,
             max_tokens=200,
-            messages=[{"role":"system","content":"ブランド名とモデルを識別するアシスタントです。"},
-                      {"role":"user","content":prompt}],
-            response_format={"type":"json_object"}
+            messages=[
+                {"role":"system","content":"ブランド名とモデルを識別するアシスタントです。"},
+                {"role":"user","content":prompt},
+            ],
+            response_format={"type":"json_object"},
         )
         try:
             return json.loads(resp.choices[0].message.content)
         except Exception:
-            return {"brand":"","model":name}
+            return {"brand":"", "model":name}
 
-# ----------------------------- 正規化 & マージ -----------------------------
+# ----------------------------- 正規化 & 重複排除 -----------------------------
 def normalize_rows(rows_in: List[dict]) -> List[dict]:
     out = []
     for r in rows_in:
@@ -184,6 +234,7 @@ def main():
         bm = vlm.split_brand_model(r["name"])
         r["brand"] = bm.get("brand","")
         r["model"] = bm.get("model", r["name"])
+        r.pop("name", None)   # ★ ここを追加：name を削除してCSV項目に一致させる
 
     # 5) CSV出力
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
