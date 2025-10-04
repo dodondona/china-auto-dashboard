@@ -29,32 +29,18 @@ SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシス�
 """
 USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
 
-# ----------------------------- ブランド分離プロンプト（辞書不要・シリーズ壊さない） -----------------------------
+# ----------------------------- ブランド分離プロンプト -----------------------------
 BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”或图片片段，请输出对应的【品牌/厂商】与【车型名】。
 
 数据来源与验证顺序（务必遵守）：
 1) 必须优先在 汽车之家（autohome.com.cn） 查询并核对：先用“site:autohome.com.cn <车型/车系名>”检索；打开最相关的“车系”或“参数配置/图片/报价”页面。
-2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样（示例：比亚迪-秦PLUS / 上汽通用五菱-宏光MINIEV），据此判定品牌/厂商与车型名。
-3) 如在汽车之家未找到完全匹配，请：
-   a. 回看输入图片/文本，检查是否有误读（相似名、后缀如“Pro”“MAX”“L”“PLUS”等）。
-   b. 结合常见别名/缩写再次在汽车之家检索 1 次。
-4) 仍无法在汽车之家确认时，才可短暂参考第二来源（如：易车 yiche.com），但若信息与汽车之家冲突，以汽车之家为准；无法确认则返回“brand":"未知"。
+2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样。
+3) 如在汽车之家未找到完全匹配，请回看输入名，结合常见别名/缩写再次检索。
+4) 仍无法确认时，可参考易车等，但以汽车之家为准；无法确认则 brand=未知。
 
 命名规则：
-- 不要仅按第一个词硬拆。像“宏光MINIEV”“秦PLUS”“宋PLUS”“汉L”等是完整车系名，不能把“宏光”“秦”“宋”“汉”单独当作品牌。
-- 尽可能输出厂商（例如“五菱”“比亚迪”“大众”“吉利”“特斯拉”等）；如果确实没有厂商信息，则输出常用品牌名。
-- 车型名请保留完整的车系名（含后缀，如 PLUS / Pro / MAX / L）。
-
-只输出 JSON，结构严格如下（不要多余文字）：
-{"brand":"<string>","model":"<string>"}
-
-示例（务必模仿）：
-- 输入：宏光MINIEV → {"brand":"五菱","model":"宏光MINIEV"}
-- 输入：秦PLUS → {"brand":"比亚迪","model":"秦PLUS"}
-- 输入：Model Y → {"brand":"特斯拉","model":"Model Y"}
-- 输入：朗逸 → {"brand":"大众","model":"朗逸"}
-- 输入：博越L → {"brand":"吉利","model":"博越L"}
-
+- 不要仅按第一个词硬拆。“宏光MINIEV”“秦PLUS”などは完全な車系名。
+- 出力は JSON のみ。{"brand":"<string>","model":"<string>"}
 """
 
 # ----------------------------- タイル分割 -----------------------------
@@ -77,7 +63,7 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
         y += step
     return paths
 
-# ----------------------------- スクショ（HTMLは改変しない / 豆腐防止CSS注入） -----------------------------
+# ----------------------------- スクショ -----------------------------
 def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
@@ -89,21 +75,14 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
             ctx = browser.new_context(
                 viewport={"width": viewport[0], "height": viewport[1]},
                 device_scale_factor=2,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36",
                 locale="zh-CN",
                 extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
             )
             page = ctx.new_page()
-
-            # 豆腐防止：CJKフォントを強制（Workflow で CJK フォント導入済み前提）
             page.add_init_script("""
               try {
                 const style = document.createElement('style');
-                style.setAttribute('data-screenshot-font-patch','1');
                 style.textContent = `
                   * { font-family:
                       "Noto Sans CJK SC","WenQuanYi Zen Hei","Noto Sans CJK JP",
@@ -112,17 +91,14 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
                 document.documentElement.appendChild(style);
               } catch(e){}
             """)
-
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=180000)
-                # 緩く本文待ち
                 for sel in ["table", ".rank-list", ".content", "body"]:
                     try:
                         page.wait_for_selector(sel, state="visible", timeout=5000)
                         break
                     except PwTimeout:
                         pass
-
                 time.sleep(2.5)
                 page.screenshot(path=str(full_path), full_page=True)
                 browser.close()
@@ -141,10 +117,11 @@ def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": [
             {"type": "input_text", "text": USER_PROMPT},
-            {"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            # ★ 修正済み：image_url は文字列で渡す
+            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
         ]}
     ]
-    resp = client.responses.create(model=model, input=msgs, temperature=0)
+    resp = client.responses.create(model=model, messages=msgs, temperature=0)
     out = resp.output_text
     try:
         data = json.loads(out)
@@ -171,7 +148,7 @@ def vlm_split_brand(name: str, model="gpt-4o-mini") -> Dict[str, str]:
     except Exception:
         return {"brand": "未知", "model": name}
 
-# ----------------------------- CSV 読み書き -----------------------------
+# ----------------------------- CSV -----------------------------
 def write_csv(path: Path, rows: List[Dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -211,7 +188,6 @@ def main():
             count = r.get("count")
             if not name:
                 continue
-            # ブランド分割
             bm = vlm_split_brand(name, model=args.model)
             brand = bm.get("brand","未知")
             model_name = bm.get("model", name)
