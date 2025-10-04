@@ -9,13 +9,14 @@ URL → フルページスクショ → タイル（オーバーラップ付き�
 - ブランド行も除外せずそのまま残す
 - argparse の --fullpage-split を正しく args.fullpage_split に修正
 - 重複は「name」をキーに統一判定（空白・全角半角を除去）
+- Playwright の page.goto タイムアウト回避（リトライ・UA指定）
 """
 
-import os, io, re, sys, csv, json, time, base64, argparse
+import os, csv, json, base64, argparse, time
 from pathlib import Path
-from typing import List, Dict
+from typing import List
 from PIL import Image
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from openai import OpenAI
 
 # ----------------------------- プロンプト -----------------------------
@@ -58,19 +59,61 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
     print(f"[INFO] {len(paths)} tiles saved -> {out_dir}")
     return paths
 
+# ----------------------------- スクショ取得 -----------------------------
 def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
+    """
+    改良版:
+    - goto の timeout を180秒に延長
+    - wait_until="domcontentloaded" に緩和
+    - UA/locale を指定
+    - 3回までリトライ
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": viewport[0], "height": viewport[1]},
-            device_scale_factor=2,
-        )
-        page.goto(url, wait_until="networkidle", timeout=90000)
-        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
-        browser.close()
-    return full_path
+
+    MAX_RETRY = 3
+    for attempt in range(1, MAX_RETRY + 1):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                viewport={"width": viewport[0], "height": viewport[1]},
+                device_scale_factor=2,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+            )
+            page = ctx.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=180000)
+
+                # 本文が出るまで待機（最大60秒）
+                SELECTORS = ["table", ".rank-list", ".content", "body"]
+                for sel in SELECTORS:
+                    try:
+                        page.wait_for_selector(sel, timeout=60000)
+                        break
+                    except PwTimeout:
+                        continue
+
+                # ネットワーク安定まで軽く待つ
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except PwTimeout:
+                    pass
+
+                page.wait_for_timeout(1500)
+                page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
+                browser.close()
+                return full_path
+            except PwTimeout:
+                browser.close()
+                if attempt == MAX_RETRY:
+                    raise
+                time.sleep(2 * attempt)  # バックオフして再試行
+                continue
 
 # ----------------------------- OpenAI VLM -----------------------------
 class OpenAIVLM:
@@ -83,7 +126,7 @@ class OpenAIVLM:
     def infer_json(self, image_path: Path) -> dict:
         b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
         resp = self.client.chat.completions.create(
-            model=self.model,
+            model=self.model,  # ★ gpt-4o デフォルト
             temperature=0,
             max_tokens=1200,
             messages=[
@@ -144,7 +187,7 @@ def main():
     ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
     ap.add_argument("--provider", default="openai")
-    ap.add_argument("--model", default="gpt-4o")  # ★ miniは使わない
+    ap.add_argument("--model", default="gpt-4o")  # miniは使わない
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
     ap.add_argument("--fullpage-split", action="store_true", help="フルページをタイル分割する")
     args = ap.parse_args()
