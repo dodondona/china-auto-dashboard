@@ -49,6 +49,13 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install openai
 
+      # 3.5) ★ CJKフォントを導入（豆腐対策・最小変更）
+      - name: Install Chinese CJK fonts for headless rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
+          sudo fc-cache -fv
+
       # 4) Playwright Chromium（既存パイプラインが使う場合）
       - name: Install Playwright Chromium (if needed by existing pipeline)
         run: |
@@ -61,20 +68,22 @@ jobs:
               print("playwright not installed; skipping.")
           PY
 
-      # 5) 既存のVLMパイプラインで一次CSVを作る
+      # 5) 既存のVLMパイプラインで一次CSVを作る（そのまま）
       - name: Run existing VLM pipeline to produce the raw CSV
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p data
+          # 例：PC版URL。既存の引数に合わせてください（変更したくなければ既存そのままでOK）
           python vlm_rank_reader.py \
             --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
             --fullpage-split \
             --tile-height 1200 \
             --tile-overlap 220 \
             --out "data/autohome_raw_${TARGET_MONTH}.csv"
+          # ↑ 上の実行で tiles/ ディレクトリ（tile_00.jpg など）が作られる想定
 
-      # 6) タイル画像のインデックスHTMLを作成
+      # 6) タイル画像のインデックスHTMLを作成（見やすさ用・そのまま）
       - name: Build tiles index (optional but useful)
         run: |
           if [ -d tiles ]; then
@@ -97,7 +106,7 @@ jobs:
             echo "no tiles/ directory found"
           fi
 
-      # 7) タイル画像をArtifactsへ
+      # 7) タイル画像をArtifactsへ（そのまま）
       - name: Upload tiles as artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -111,7 +120,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # 8) brand列付与の後処理
+      # 8) brand列付与の後処理（そのまま）
       - name: Enrich brand column (new CSV)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -120,8 +129,9 @@ jobs:
             --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
             --out "data/autohome_rank_${TARGET_MONTH}.csv" \
             --no-llm
+          # ↑ まずは --no-llm で安全運用。必要なら外して LLM で補完
 
-      # 9) CSVもArtifactsに入れておく
+      # 9) CSVもArtifactsに入れておく（そのまま）
       - name: Upload CSVs as artifact (optional)
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -133,7 +143,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # 10) リポジトリへCSVをコミット
+      # 10) リポジトリへCSVをコミット（そのまま）
       - name: Commit CSVs
         run: |
           git config user.name  "github-actions[bot]"
