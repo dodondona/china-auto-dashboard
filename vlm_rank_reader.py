@@ -8,6 +8,7 @@ URL → フルページスクショ → タイル（オーバーラップ付き�
 - タイル分割に overlap を導入（境目での行欠落を防止）
 - ブランド行も除外せずそのまま残す
 - argparse の --fullpage-split を正しく args.fullpage_split に修正
+- 重複は「name」をキーに統一判定（空白・全角半角を除去）
 """
 
 import os, io, re, sys, csv, json, time, base64, argparse
@@ -130,15 +131,16 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     seen = set()
     for rows in list_of_rows:
         for r in rows:
-            key = (r.get("name"), r.get("count"))
-            if r.get("name") and key not in seen:
+            # 名前だけで判定（全角・半角スペースを除去）
+            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
+            if key and key not in seen:
                 seen.add(key)
                 merged.append(r)
 
     # count 降順で並べ替え
     merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
 
-    # 連番採番
+    # rank_seq で連番付与
     for i, r in enumerate(merged, 1):
         r["rank_seq"] = i
     return merged
