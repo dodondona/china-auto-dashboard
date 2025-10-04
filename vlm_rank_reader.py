@@ -2,151 +2,91 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ → タイル分割（overlap付き）→ VLMで行抽出 → CSV
+URL → フルページスクショ（オーバーラップ付き）→ VLMで rank/brand/model/count 抽出
+さらに HTML 解析で model ごとのリンクを取得し、CSVに統合
 
-ポイント:
-- Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
-- LLMで brand と model を推定（辞書不要）
-- 判定結果を data/brand_cache.json に永続キャッシュ（同じ車名は次回以降無課金・高速）
+改良点:
+- brand は辞書マッピングで日本語表記に統一
+- model は LLM で日本語翻訳列を追加
+- 各モデルの Autohome 詳細ページ URL を追加
 """
 
-import os, csv, json, base64, argparse, time
+import os, io, re, sys, csv, json, time, base64, argparse
 from pathlib import Path
 from typing import List, Dict
 from PIL import Image
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright.sync_api import sync_playwright
 from openai import OpenAI
+from bs4 import BeautifulSoup
 
-# ----------------------------- VLM（表読み取り）プロンプト -----------------------------
+# ----------------------------- ブランド辞書 -----------------------------
+BRAND_MAP = {
+    "比亚迪": "BYD",
+    "吉利": "吉利",
+    "奇瑞": "奇瑞",
+    "长安": "長安",
+    "上汽通用五菱": "五菱",
+    "上汽通用别克": "別克",
+    "大众": "フォルクスワーゲン",
+    "丰田": "トヨタ",
+    "日产": "日産",
+    "本田": "ホンダ",
+    "特斯拉": "Tesla",
+    "小米": "小米",
+    "赛力斯": "賽力斯",
+    "理想": "理想",
+    "蔚来": "蔚来",
+    # 必要に応じて追加
+}
+
+# ----------------------------- プロンプト -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
-画像は中国の自動車販売ランキングです。UI部品や広告は無視してください。
+画像は中国の自動車販売ランキングのリストです。
 出力は JSON のみ。構造:
 {
   "rows": [
-    {"rank": <int|null>, "name": "<string>", "count": <int|null>}
+    {"rank": <int|null>, "brand": "<string|null>", "model": "<string>", "count": <int|null>}
   ]
 }
-"""
-USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
-
-# ----------------------------- ブランド分離プロンプト（辞書不要・シリーズ壊さない） -----------------------------
-BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”，请输出对应的【品牌/厂商】与【车型名】。
-要求：
-- 不要仅按第一个词硬拆。像“宏光MINIEV”“秦PLUS”“宋PLUS”“汉L”等是完整车系名，不能把“宏光”“秦”“宋”“汉”单独当作品牌。
-- 尽可能输出厂商（例如“上汽通用五菱”“比亚迪”“大众”“吉利”“特斯拉”等）；如果确实没有厂商信息，则输出常用品牌名。
-- 只输出 JSON，结构：
-{"brand":"<string>","model":"<string>"}
-
-示例（务必模仿）：
-- 输入：宏光MINIEV → {"brand":"上汽通用五菱","model":"宏光MINIEV"}
-- 输入：秦PLUS → {"brand":"比亚迪","model":"秦PLUS"}
-- 输入：Model Y → {"brand":"特斯拉","model":"Model Y"}
-- 输入：朗逸 → {"brand":"大众","model":"朗逸"}
-- 输入：博越L → {"brand":"吉利","model":"博越L"}
+ルール:
+- 1行につき {"rank","brand","model","count"} を出力。
+- brand が分からない場合は null。
+- count は数字。
+- JSON 以外は出力しない。
 """
 
-# ----------------------------- タイル分割 -----------------------------
-def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
-    im = Image.open(full_path).convert("RGB")
-    W, H = im.size
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    y, i = 0, 0
-    step = max(1, tile_height - overlap)
-    while y < H:
-        y2 = min(y + tile_height, H)
-        tile = im.crop((0, y, W, y2))
-        p = out_dir / f"tile_{i:02d}.jpg"
-        tile.save(p, "JPEG", quality=90, optimize=True)
-        paths.append(p)
-        i += 1
-        if y2 >= H:
-            break
-        y += step
-    return paths
+USER_PROMPT = "この画像に見えている全ての行（rank/brand/model/count）をJSONだけで返してください。"
 
-# ----------------------------- スクショ（HTMLは改変しない / 豆腐防止CSS注入） -----------------------------
-def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
+# ----------------------------- スクショ＆HTML -----------------------------
+def grab_fullpage_and_html(url: str, out_dir: Path, viewport=(1380, 2400)) -> tuple[Path, str]:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            viewport={"width": viewport[0], "height": viewport[1]},
+            device_scale_factor=2,
+        )
+        page.goto(url, wait_until="networkidle", timeout=90000)
+        html = page.content()
+        page.screenshot(path=full_path, full_page=True, type="jpeg", quality=85)
+        browser.close()
+    return full_path, html
 
-    MAX_RETRY = 3
-    for attempt in range(1, MAX_RETRY + 1):
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport={"width": viewport[0], "height": viewport[1]},
-                device_scale_factor=2,
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                locale="zh-CN",
-                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-            )
-            page = ctx.new_page()
-
-            # 豆腐防止：CJKフォントを強制（Workflow で CJK フォント導入済み前提）
-            page.add_init_script("""
-              try {
-                const style = document.createElement('style');
-                style.setAttribute('data-screenshot-font-patch','1');
-                style.textContent = `
-                  * { font-family:
-                      "Noto Sans CJK SC","WenQuanYi Zen Hei","Noto Sans CJK JP",
-                      "Noto Sans","Microsoft YaHei","PingFang SC",sans-serif !important; }
-                `;
-                document.documentElement.appendChild(style);
-              } catch(e){}
-            """)
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=180000)
-                # 緩く本文待ち
-                for sel in ["table", ".rank-list", ".content", "body"]:
-                    try:
-                        page.wait_for_selector(sel, timeout=60000)
-                        break
-                    except PwTimeout:
-                        continue
-                # Webフォント準備（可能なら）
-                try:
-                    page.evaluate("return document.fonts && document.fonts.ready.then(()=>true)")
-                except Exception:
-                    pass
-                page.wait_for_timeout(800)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                except PwTimeout:
-                    pass
-                page.wait_for_timeout(500)
-
-                page.screenshot(path=full_path, full_page=True, type="jpeg", quality=90)
-                browser.close()
-                return full_path
-
-            except PwTimeout:
-                browser.close()
-                if attempt == MAX_RETRY:
-                    raise
-                time.sleep(1.5 * attempt)
-                continue
-
-# ----------------------------- OpenAI クライアント -----------------------------
+# ----------------------------- OpenAI VLM -----------------------------
 class OpenAIVLM:
     def __init__(self, model: str, api_key: str | None):
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY 未設定")
+            raise RuntimeError("OPENAI_API_KEY が未設定です。")
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def infer_table(self, image_path: Path) -> dict:
+    def infer_json(self, image_path: Path) -> dict:
         b64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
         resp = self.client.chat.completions.create(
-            model=self.model,  # 例: gpt-4o
+            model=self.model,
             temperature=0,
-            max_tokens=1200,
+            max_tokens=1500,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": [
@@ -156,44 +96,59 @@ class OpenAIVLM:
             ],
             response_format={"type": "json_object"},
         )
+        txt = resp.choices[0].message.content
         try:
-            return json.loads(resp.choices[0].message.content)
+            return json.loads(txt)
         except Exception:
-            return {"rows":[]}
+            return {"rows": []}
 
-    def split_brand_model_llm(self, name: str) -> dict:
-        prompt = BRAND_PROMPT + f"\n待解析：{name}\n只输出JSON。"
+    def translate_model_jp(self, name: str) -> str:
+        if not name:
+            return ""
+        prompt = f"次の中国語車種名を自然な日本語に翻訳してください。\n{name}\n出力は日本語名のみ。"
         resp = self.client.chat.completions.create(
-            model=self.model,   # 同じモデルでOK（テキストのみ）
+            model=self.model,
             temperature=0,
-            max_tokens=200,
+            max_tokens=100,
             messages=[
-                {"role":"system","content":"你是品牌/厂商与车系名识别助手，只输出JSON。"},
-                {"role":"user","content":prompt},
+                {"role": "system", "content": "あなたは中国語の自動車モデル名を日本語に翻訳するアシスタントです。"},
+                {"role": "user", "content": prompt},
             ],
-            response_format={"type":"json_object"},
         )
-        try:
-            data = json.loads(resp.choices[0].message.content)
-            brand = (data.get("brand") or "").strip()
-            model = (data.get("model") or "").strip() or name
-            return {"brand": brand, "model": model}
-        except Exception:
-            return {"brand":"", "model":name}
+        return resp.choices[0].message.content.strip()
 
-# ----------------------------- 正規化 & 重複排除 -----------------------------
-def normalize_rows(rows_in: List[dict]) -> List[dict]:
+# ----------------------------- 正規化・マージ -----------------------------
+def normalize_rows(rows_in: List[dict], vlm: OpenAIVLM, url_map: dict) -> List[dict]:
     out = []
     for r in rows_in:
-        name = (r.get("name") or "").strip()
-        if not name:
-            continue
-        rank = r.get("rank")
-        cnt = r.get("count")
-        if isinstance(cnt, str):
-            t = cnt.replace(",", "").replace(" ", "")
-            cnt = int(t) if t.isdigit() else None
-        out.append({"rank": rank, "name": name, "count": cnt})
+        model = (r.get("model") or "").strip()
+        brand = (r.get("brand") or "").strip()
+        count = r.get("count")
+
+        # ブランド日本語化
+        brand_jp = BRAND_MAP.get(brand, brand)
+
+        # モデル翻訳
+        model_jp = vlm.translate_model_jp(model) if model else ""
+
+        # URLリンク付与（model名で突合）
+        link = url_map.get(model, "")
+
+        # 数字整形
+        if isinstance(count, str):
+            t = count.replace(",", "").replace(" ", "")
+            count = int(t) if t.isdigit() else None
+        if isinstance(count, float):
+            count = int(count)
+
+        out.append({
+            "rank": r.get("rank"),
+            "brand": brand_jp,
+            "model": model,
+            "model_jp": model_jp,
+            "count": count,
+            "url": link
+        })
     return out
 
 def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
@@ -201,53 +156,28 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
     seen = set()
     for rows in list_of_rows:
         for r in rows:
-            key = (r.get("name") or "").replace(" ", "").replace("\u3000","")
-            if key and key not in seen:
+            key = (r.get("brand"), r.get("model"))
+            if key not in seen:
                 seen.add(key)
                 merged.append(r)
-    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
+
+    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("brand"), r.get("model")))
     for i, r in enumerate(merged, 1):
         r["rank_seq"] = i
     return merged
 
-# ----------------------------- ブランド解決（LLM + 永続キャッシュ） -----------------------------
-class BrandResolver:
-    def __init__(self, vlm: OpenAIVLM, cache_path: Path = Path("data/brand_cache.json")):
-        self.vlm = vlm
-        self.cache_path = cache_path
-        self.cache: Dict[str, Dict[str,str]] = {}
-        self._load()
-
-    def _load(self):
-        try:
-            if self.cache_path.exists():
-                self.cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            self.cache = {}
-
-    def _save(self):
-        try:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(self.cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-    def resolve(self, raw_name: str) -> Dict[str,str]:
-        key = (raw_name or "").strip()
-        if not key:
-            return {"brand":"", "model":raw_name}
-
-        # キャッシュあれば即返す
-        hit = self.cache.get(key)
-        if hit and isinstance(hit, dict) and "brand" in hit and "model" in hit:
-            return hit
-
-        # LLMで分解（辞書不要）
-        bm = self.vlm.split_brand_model_llm(key)
-        # キャッシュ保存
-        self.cache[key] = {"brand": bm.get("brand",""), "model": bm.get("model", key)}
-        self._save()
-        return self.cache[key]
+# ----------------------------- HTML解析でURL取得 -----------------------------
+def extract_model_links(html: str) -> dict:
+    soup = BeautifulSoup(html, "html.parser")
+    url_map = {}
+    for a in soup.select("a"):
+        href = a.get("href", "")
+        text = (a.get_text() or "").strip()
+        if href and re.search(r"/\d+/", href) and text:
+            if not href.startswith("http"):
+                href = "https://www.autohome.com.cn" + href
+            url_map[text] = href
+    return url_map
 
 # ----------------------------- MAIN -----------------------------
 def main():
@@ -256,48 +186,39 @@ def main():
     ap.add_argument("--tile-height", type=int, default=1200)
     ap.add_argument("--tile-overlap", type=int, default=220)
     ap.add_argument("--out", default="result.csv")
-    ap.add_argument("--model", default="gpt-4o")  # 既定は gpt-4o。必要なら引数で変更
+    ap.add_argument("--model", default="gpt-4o")
     ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
     ap.add_argument("--fullpage-split", action="store_true")
     args = ap.parse_args()
 
-    # 1) フルページキャプチャ
-    full_path = grab_fullpage_to(args.from_url, Path("tiles"))
+    # スクショとHTML
+    full_path, html = grab_fullpage_and_html(args.from_url, Path("tiles"))
+    url_map = extract_model_links(html)
 
-    # 2) 分割
+    # 分割
     if args.fullpage_split:
         tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
     else:
         tile_paths = [full_path]
 
-    # 3) VLM読み取り
+    # VLM
     vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
     all_rows: List[List[dict]] = []
     for p in tile_paths:
-        data = vlm.infer_table(p)
-        rows = normalize_rows(data.get("rows", []))
+        data = vlm.infer_json(p)
+        rows = normalize_rows(data.get("rows", []), vlm, url_map)
         print(f"[INFO] {p.name}: {len(rows)} rows")
         all_rows.append(rows)
 
-    # 4) マージ & ブランド分離（LLM＋キャッシュ）
+    # マージ & CSV
     merged = merge_dedupe_sort(all_rows)
-    resolver = BrandResolver(vlm)
-    for r in merged:
-        bm = resolver.resolve(r["name"])
-        r["brand"] = bm.get("brand","")
-        r["model"] = bm.get("model", r["name"])
-        r.pop("name", None)  # CSVの項目に合わせる
-
-    # 5) CSV出力
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","brand","model","count"])
+    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","brand","model","model_jp","count","url"])
         w.writeheader()
         for r in merged:
             w.writerow(r)
 
-    print(f"[DONE] rows={len(merged)} -> {out}  (cache: data/brand_cache.json)")
+    print(f"[DONE] rows={len(merged)} -> {args.out}")
 
 if __name__ == "__main__":
     main()
