@@ -8,6 +8,7 @@ URL → フルページスクショ → タイル分割（overlap付き）→ VL
 - Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
 - LLMで brand と model を推定（辞書不要）
 - 判定結果を data/brand_cache.json に永続キャッシュ（同じ車名は次回以降無課金・高速）
+- 追加: ランキングの車名リンクから series URL を取得し、そのページ HTML を LLM に読ませて brand/model を確定
 """
 
 import os, csv, json, base64, argparse, time, re
@@ -52,7 +53,7 @@ BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/�
 {"brand":"<string>","model":"<string>"}
 """
 
-# ----------------------------- AutoHome/Yiche 参照 -----------------------------
+# ----------------------------- AutoHome/Yiche 参照（スクレイプ&検索） -----------------------------
 HEADERS_WEB = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -143,6 +144,127 @@ def resolve_brand_via_web(model_name: str):
             return b, u
     return None, None
 
+# ----------------------------- ランキングから series URL を集める（最小追加） -----------------------------
+def _norm_text(s: str) -> str:
+    return (s or "").strip().replace(" ", "").replace("\u3000", "")
+
+def collect_series_links_from_rank(rank_url: str) -> Dict[str, str]:
+    """
+    ランキングHTMLから「車名テキスト -> series URL」を作る。
+    セレクタ固定は避け、a[href] の走査 + URLパターンで判断する。
+    """
+    html = _fetch(rank_url)
+    if not html:
+        return {}
+    soup = BeautifulSoup(html, "lxml")
+    mapping: Dict[str, str] = {}
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        text = _norm_text(a.get_text(strip=True))
+        if not text or "javascript:" in href:
+            continue
+        # 絶対URLに補正
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
+            href = "https://www.autohome.com.cn" + href
+        # series URL 判定（例: https://www.autohome.com.cn/5966/ など）
+        if re.search(r"autohome\.com\.cn/(?:\d+/|diandongche/series-\d+\.html)", href):
+            # すでに同名があれば最初を優先（任意）
+            if text not in mapping:
+                mapping[text] = href
+    return mapping
+
+# ============================= ここから JSON抽出ヘルパー（既存+微修正） =============================
+def _extract_json_object(text: str) -> str:
+    """
+    - ```json ... ``` 優先で中身を抽出
+    - なければ最初の { ... } を抽出
+    """
+    if not text:
+        return ""
+    s = text.strip()
+
+    m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", s, re.I)
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"```([\s\S]*?)```", s)
+    if m:
+        inner = m.group(1).strip()
+        if inner.startswith("{") and inner.endswith("}"):
+            return inner
+
+    m = re.search(r"\{[\s\S]*\}", s)
+    if m:
+        return m.group(0).strip()
+
+    return ""
+
+# ----------------------------- 各 series ページを LLM に読ませて抽出（最小追加） -----------------------------
+SERIES_READ_SYSTEM = """你是“汽车之家 车系页面”解析助手。只基于给定页面文本判断，不要编造。
+优先依据：页面标题（<title>）、面包屑/大标题中的“品牌/厂商 + 车系”。
+输出 JSON：{"brand":"<string>","model":"<string>","source":"title|breadcrumb|heading|unknown"}"""
+
+def resolve_brand_via_series_llm(client: OpenAI, model: str, series_url: str) -> Dict[str, str]:
+    """
+    series_url の HTML を取得し、まず <title> だけ、ダメなら本文一部を LLM に渡して抽出。
+    """
+    html = _fetch(series_url)
+    if not html:
+        return {"brand":"未知","model":""}
+
+    soup = BeautifulSoup(html, "lxml")
+    title_txt = (soup.title.get_text(" ", strip=True) if soup.title else "")
+
+    # 1st try: タイトルだけ
+    resp = client.responses.create(
+        model=model,
+        input=[
+            {"role":"system","content":SERIES_READ_SYSTEM},
+            {"role":"user","content":[
+                {"type":"input_text","text":f"URL: {series_url}\n以下は<title>文字列です。ここから品牌/厂商と车系名だけを抽出してJSONで返してください。"},
+                {"type":"input_text","text":title_txt[:800]}
+            ]}
+        ],
+        temperature=0
+    )
+    raw = (resp.output_text or "").strip()
+    js = _extract_json_object(raw)
+    if js:
+        try:
+            obj = json.loads(js)
+            if obj.get("brand") and obj.get("model"):
+                return {"brand":obj["brand"], "model":obj["model"]}
+        except Exception:
+            pass
+
+    # 2nd try: 本文テキスト（先頭～一部だけ）を投入
+    body_text = soup.get_text("\n", strip=True)
+    body_head = body_text[:20000]  # トークン節約
+    resp2 = client.responses.create(
+        model=model,
+        input=[
+            {"role":"system","content":SERIES_READ_SYSTEM},
+            {"role":"user","content":[
+                {"type":"input_text","text":f"URL: {series_url}\n以下は页面文本の抜粋（先頭～）。見出し/面包屑/标题を最優先に、品牌/厂商と车系名をJSONで返してください。"},
+                {"type":"input_text","text":body_head}
+            ]}
+        ],
+        temperature=0
+    )
+    raw2 = (resp2.output_text or "").strip()
+    js2 = _extract_json_object(raw2)
+    if js2:
+        try:
+            obj = json.loads(js2)
+            if obj.get("brand") and obj.get("model"):
+                return {"brand":obj["brand"], "model":obj["model"]}
+        except Exception:
+            pass
+
+    return {"brand":"未知","model":""}
+
 # ----------------------------- タイル分割 -----------------------------
 def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
     im = Image.open(full_path).convert("RGB")
@@ -186,34 +308,6 @@ def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
         browser.close()
         return full_path
 
-# ============================= ここから修正：JSON抽出ヘルパー =============================
-def _extract_json_object(text: str) -> str:
-    """
-    - ```json ... ``` や ``` ... ``` を剥がす
-    - 前置き文のあとに出てくる最初の { ... } を抽出
-    - 取れなければ空文字を返す
-    """
-    if not text:
-        return ""
-    s = text.strip()
-
-    # コードフェンス除去
-    if s.startswith("```"):
-        s = s.strip("`")
-        # 先頭の "json" や言語名を取り除く
-        s = re.sub(r"^\s*json\s*", "", s, flags=re.I)
-
-    # すでにJSONっぽいならそのまま
-    if s.startswith("{") and s.endswith("}"):
-        return s
-
-    # テキストの中から最初の { ... } を探す（貪欲すぎないよう最短マッチ）
-    m = re.search(r"\{[\s\S]*\}", s)
-    if m:
-        return m.group(0).strip()
-
-    return ""
-
 # ----------------------------- VLMクラス -----------------------------
 class OpenAIVLM:
     def __init__(self, model: str, api_key: str):
@@ -230,7 +324,8 @@ class OpenAIVLM:
                     {"type":"input_text","text":USER_PROMPT},
                     {"type":"input_image","image_url":f"data:image/jpeg;base64,{b64}"}
                 ]}
-            ]
+            ],
+            temperature=0
         )
         raw = (resp.output_text or "").strip()
         js = _extract_json_object(raw)
@@ -247,7 +342,8 @@ class OpenAIVLM:
             input=[
                 {"role":"system","content":BRAND_PROMPT},
                 {"role":"user","content":name}
-            ]
+            ],
+            temperature=0
         )
         raw = (resp.output_text or "").strip()
         js = _extract_json_object(raw)
@@ -285,12 +381,13 @@ def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
         r["rank_seq"] = i
     return merged
 
-# ----------------------------- BrandResolver -----------------------------
+# ----------------------------- BrandResolver（series URL を最優先に LLM 読み） -----------------------------
 class BrandResolver:
-    def __init__(self, vlm: OpenAIVLM, cache_path: Path = Path("data/brand_cache.json")):
+    def __init__(self, vlm: OpenAIVLM, cache_path: Path = Path("data/brand_cache.json"), series_map: Dict[str,str] = None):
         self.vlm = vlm
         self.cache_path = cache_path
         self.cache: Dict[str, Dict[str,str]] = {}
+        self.series_map = series_map or {}
         self._load()
 
     def _load(self):
@@ -307,6 +404,16 @@ class BrandResolver:
         except Exception:
             pass
 
+    def _find_series_url(self, key: str) -> str:
+        k = _norm_text(key)
+        if k in self.series_map:
+            return self.series_map[k]
+        # ゆるめ一致（PLUS/空白差などの小揺れ吸収）
+        for nm, url in self.series_map.items():
+            if k == nm or k.replace("PLUS","Plus") == nm or k.lower() == nm.lower():
+                return url
+        return ""
+
     def resolve(self, raw_name: str) -> Dict[str,str]:
         key = (raw_name or "").strip()
         if not key:
@@ -316,7 +423,20 @@ class BrandResolver:
         if hit and isinstance(hit, dict) and "brand" in hit and "model" in hit:
             return hit
 
-        # まずWeb参照
+        # 0) ランキング由来の series URL があれば、まず LLM で series ページを読ませる（最小追加）
+        series_url = self._find_series_url(key)
+        if series_url:
+            try:
+                obj = resolve_brand_via_series_llm(self.vlm.client, self.vlm.model, series_url)
+                if obj.get("brand") and obj.get("model"):
+                    out = {"brand": obj["brand"], "model": obj["model"]}
+                    self.cache[key] = out
+                    self._save()
+                    return out
+            except Exception:
+                pass
+
+        # 1) 既存: Web 参照（汽车之家優先→易车）
         try:
             wb, wurl = resolve_brand_via_web(key)
         except Exception:
@@ -327,7 +447,7 @@ class BrandResolver:
             self._save()
             return out
 
-        # LLMで分解
+        # 2) 既存: LLMで分解
         bm = self.vlm.split_brand_model_llm(key)
         self.cache[key] = {"brand": bm.get("brand",""), "model": bm.get("model", key)}
         self._save()
@@ -345,6 +465,9 @@ def main():
     ap.add_argument("--fullpage-split", action="store_true")
     args = ap.parse_args()
 
+    # 追加: ランキングHTMLから series URL マップを事前取得
+    series_map = collect_series_links_from_rank(args.from_url)
+
     full_path = grab_fullpage_to(args.from_url, Path("tiles"))
     if args.fullpage_split:
         tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
@@ -360,7 +483,7 @@ def main():
         all_rows.append(rows)
 
     merged = merge_dedupe_sort(all_rows)
-    resolver = BrandResolver(vlm)
+    resolver = BrandResolver(vlm, series_map=series_map)  # ← 最小追加
     for r in merged:
         bm = resolver.resolve(r["name"])
         r["brand"] = bm.get("brand","")
