@@ -14,6 +14,8 @@ import os, csv, json, base64, argparse, time
 from pathlib import Path
 from typing import List, Dict
 from PIL import Image
+import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from openai import OpenAI
 
@@ -56,6 +58,105 @@ BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/�
 - 输入：博越L → {"brand":"吉利","model":"博越L"}
 
 """
+
+# ----------------------------- AutoHome/Yiche 参照（スクレイプ&検索） -----------------------------
+import time
+from urllib.parse import quote_plus
+
+HEADERS_WEB = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept-Language": "zh-CN,zh;q=0.9"
+}
+_DDG = "https://duckduckgo.com/html/?q={q}"
+
+_AUTOHOME_PATTERNS = [
+    r"https?://car\.autohome\.com\.cn/series/\d+/?",
+    r"https?://car\.autohome\.com\.cn/\d+/#?[\w=]*",
+    r"https?://car\.autohome\.com\.cn/config/series/\d+/?",
+    r"https?://car\.autohome\.com\.cn/pic/series/\d+/?",
+    r"https?://www\.autohome\.com\.cn/\d+/?",
+]
+_AUTOHOME_RE = re.compile("|".join(_AUTOHOME_PATTERNS))
+_YICHE_RE = re.compile(r"https?://car\.yiche\.com/[^/\s]+/?")
+
+def _ddg_search(query: str, site: str, topk: int = 6, sleep: float = 1.2):
+    q = f"site:{site} {query}"
+    url = _DDG.format(q=quote_plus(q))
+    try:
+        rs = requests.get(url, headers=HEADERS_WEB, timeout=20)
+        time.sleep(sleep)
+        if rs.status_code != 200:
+            return []
+        soup = BeautifulSoup(rs.text, "lxml")
+        links = []
+        for a in soup.select("a[href]"):
+            href = a.get("href")
+            if href and site in href:
+                links.append(href)
+        # unique
+        uniq = []
+        for u in links:
+            if u not in uniq:
+                uniq.append(u)
+        return uniq[:topk]
+    except Exception:
+        return []
+
+def _fetch(url: str, sleep: float = 1.0):
+    try:
+        r = requests.get(url, headers=HEADERS_WEB, timeout=25)
+        time.sleep(sleep)
+        if r.status_code == 200:
+            return r.text
+    except Exception:
+        return None
+    return None
+
+def _extract_brand_autohome(html: str):
+    if not html: return None
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True)
+    m = re.search(r"厂商[:：]\s*([^\s/|>《》\\-—–]+)", text)
+    if m: return m.group(1).strip()
+    m = re.search(r"品牌[:：]\s*([^\s/|>《》\\-—–]+)", text)
+    if m: return m.group(1).strip()
+    # パンくず「品牌-车系」
+    m = re.search(r"([一-龥A-Za-z0-9]+)\s*[-－—]\s*([一-龥A-Za-z0-9\+\s]+)", text)
+    if m: return m.group(1).strip()
+    return None
+
+def _extract_brand_yiche(html: str):
+    if not html: return None
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True)
+    m = re.search(r"厂商[:：]\s*([^\s/|>《》\\-—–]+)", text)
+    if m: return m.group(1).strip()
+    m = re.search(r"品牌[:：]\s*([^\s/|>《》\\-—–]+)", text)
+    if m: return m.group(1).strip()
+    return None
+
+def resolve_brand_via_web(model_name: str):
+    \"\"\"汽车之家で確認→無ければ易车。見つかれば (brand, url)、無ければ (None, None)\"\"\"
+    # 1) Autohome
+    cand = _ddg_search(model_name, site="autohome.com.cn", topk=8)
+    au = [u for u in cand if _AUTOHOME_RE.search(u)]
+    for u in au[:5]:
+        html = _fetch(u)
+        b = _extract_brand_autohome(html)
+        if b:
+            return b, u
+    # 2) Yiche fallback
+    cand = _ddg_search(model_name, site="yiche.com", topk=6)
+    yi = [u for u in cand if _YICHE_RE.search(u)]
+    for u in yi[:3]:
+        html = _fetch(u)
+        b = _extract_brand_yiche(html)
+        if b:
+            return b, u
+    return None, None
+
 
 # ----------------------------- タイル分割 -----------------------------
 def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
@@ -253,6 +354,18 @@ class BrandResolver:
         hit = self.cache.get(key)
         if hit and isinstance(hit, dict) and "brand" in hit and "model" in hit:
             return hit
+        # まずは Web 参照（汽车之家優先→易车）で決定できるか試す
+        try:
+            wb, wurl = resolve_brand_via_web(key)
+        except Exception:
+            wb, wurl = (None, None)
+
+        if wb:
+            out = {"brand": wb, "model": key}
+            self.cache[key] = out
+            self._save()
+            return out
+
 
         # LLMで分解（辞書不要）
         bm = self.vlm.split_brand_model_llm(key)
