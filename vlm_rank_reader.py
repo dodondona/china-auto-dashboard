@@ -2,26 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ → タイル分割 → VLMで表抽出 → seriesページの上部画像から brand/model 抽出 → CSV
+URL → フルページスクショ → タイル分割（overlap付き）→ VLMで行抽出 → CSV
 
-最小変更点（ご要望どおり余計なことはしません）:
-- seriesページの「上部を2枚」スクショ（ヘッダ帯 / 左パネル）。
-- VLMは『ブランド= “品牌/厂商” の値、モデル= 車系名』を厳密指示。
-- brand==model または brand⊂model のときだけ再撮影（+200px）して再読取。
-- 取れないときは “未知” を返し、最後に <title> 抽出へフォールバック（名前だけの推測はしない）。
-- 既存の --fullpage-split、CSV出力、行抽出などはそのまま。
+ポイント:
+- Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
+- LLMで brand と model を推定（辞書不要）
+- 判定結果を data/brand_cache.json に永続キャッシュ（同じ車名は次回以降無課金・高速）
 """
 
-import os, csv, json, base64, argparse, time, re
+import os, csv, json, base64, argparse, time
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from PIL import Image
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from openai import OpenAI
-import requests
-from bs4 import BeautifulSoup
 
-# ----------------------------- VLM（ランキング表の行抽出） -----------------------------
+# ----------------------------- VLM（表読み取り）プロンプト -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
 画像は中国の自動車販売ランキングです。UI部品や広告は無視してください。
 出力は JSON のみ。構造:
@@ -33,309 +29,35 @@ SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシス�
 """
 USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
 
-# ----------------------------- series上部のブランド/モデル抽出プロンプト -----------------------------
-SERIES_HEADER_PROMPT = """你是汽车之家 车系页上部截图的解析助手。请只依据图中“字段标签/面包屑/大标题”读取：
-- 品牌（brand）：优先读取紧随“品牌”或“厂商”标签后的正式名称（如：品牌：吉利汽车）。若不存在，再从左上面包屑或“品牌·车系”式的大标题中确定品牌部分。
-- 车型名（model）：面包屑末端或上部大标题中标示的**完整车系名**（如：秦PLUS、宏光MINIEV、星愿、海豹06新能源）。
-- 不要把车系名（如：海豹/海狮/海豚/秦/宋/唐/元/汉/银河/星越 等）当作品牌。
-- 只输出 JSON：
+# ----------------------------- ブランド分離プロンプト（辞書不要・シリーズ壊さない） -----------------------------
+BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”或图片片段，请输出对应的【品牌/厂商】与【车型名】。
+
+数据来源与验证顺序（务必遵守）：
+1) 必须优先在 汽车之家（autohome.com.cn） 查询并核对：先用“site:autohome.com.cn <车型/车系名>”检索；打开最相关的“车系”或“参数配置/图片/报价”页面。
+2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样（示例：比亚迪-秦PLUS / 上汽通用五菱-宏光MINIEV），据此判定品牌/厂商与车型名。
+3) 如在汽车之家未找到完全匹配，请：
+   a. 回看输入图片/文本，检查是否有误读（相似名、后缀如“Pro”“MAX”“L”“PLUS”等）。
+   b. 结合常见别名/缩写再次在汽车之家检索 1 次。
+4) 仍无法在汽车之家确认时，才可短暂参考第二来源（如：易车 yiche.com），但若信息与汽车之家冲突，以汽车之家为准；无法确认则返回“brand":"未知"。
+
+命名规则：
+- 不要仅按第一个词硬拆。像“宏光MINIEV”“秦PLUS”“宋PLUS”“汉L”等是完整车系名，不能把“宏光”“秦”“宋”“汉”单独当作品牌。
+- 尽可能输出厂商（例如“五菱”“比亚迪”“大众”“吉利”“特斯拉”等）；如果确实没有厂商信息，则输出常用品牌名。
+- 车型名请保留完整的车系名（含后缀，如 PLUS / Pro / MAX / L）。
+
+只输出 JSON，结构严格如下（不要多余文字）：
 {"brand":"<string>","model":"<string>"}
-- 无法判断时，brand 返回 "未知"，model 尽量给出。
+
+示例（务必模仿）：
+- 输入：宏光MINIEV → {"brand":"五菱","model":"宏光MINIEV"}
+- 输入：秦PLUS → {"brand":"比亚迪","model":"秦PLUS"}
+- 输入：Model Y → {"brand":"特斯拉","model":"Model Y"}
+- 输入：朗逸 → {"brand":"大众","model":"朗逸"}
+- 输入：博越L → {"brand":"吉利","model":"博越L"}
+
 """
 
-# ----------------------------- 共通ヘルパー -----------------------------
-HEADERS_WEB = {
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/124.0.0.0 Safari/537.36"),
-    "Accept-Language": "zh-CN,zh;q=0.9"
-}
-
-def _fetch(url: str) -> str | None:
-    try:
-        r = requests.get(url, headers=HEADERS_WEB, timeout=25)
-        if r.status_code == 200:
-            return r.text
-    except Exception:
-        return None
-    return None
-
-def _extract_json_object(text: str) -> str:
-    if not text:
-        return ""
-    s = text.strip()
-    m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", s, re.I)
-    if m:
-        return m.group(1).strip()
-    m = re.search(r"\{[\s\S]*\}", s)
-    return m.group(0).strip() if m else ""
-
-# ----------------------------- <title> 正規表現フォールバック -----------------------------
-def parse_series_title(title: str):
-    """
-    例: '秦PLUS_比亚迪秦PLUS价格_图片_报价-汽车之家' → brand='比亚迪', model='秦PLUS'
-    """
-    if not title:
-        return None
-    title = title.strip()
-    m = re.match(r"([一-龥A-Za-z0-9\-\+ ]+)[_－\-](.+?)-?汽车之家", title)
-    if not m:
-        return None
-    model = m.group(1).strip()
-    rest = m.group(2)
-    m2 = re.search(r"(比亚迪|上汽通用五菱|上汽大众|一汽大众|广汽丰田|长安汽车|吉利汽车|宝马|奥迪|本田|红旗|奇瑞|小鹏汽车|赛力斯|特斯拉|丰田|日产|奔驰|五菱|别克|长城|哈弗)", rest)
-    if m2:
-        brand = m2.group(1)
-        return {"brand": brand, "model": model}
-    return None
-
-def resolve_brand_via_series_title(client: OpenAI, model: str, series_url: str) -> Dict[str, str]:
-    html = _fetch(series_url)
-    if not html:
-        return {"brand": "未知", "model": ""}
-    soup = BeautifulSoup(html, "html.parser")
-    title_txt = soup.title.get_text(" ", strip=True) if soup.title else ""
-    obj = parse_series_title(title_txt)
-    if obj:
-        return obj
-    # 最後に LLM（タイトル文字列のみ）へ
-    resp = client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": "你是汽车之家页面标题解析助手。只输出JSON"},
-            {"role": "user", "content": title_txt}
-        ],
-        temperature=0
-    )
-    raw = (resp.output_text or "").strip()
-    js = _extract_json_object(raw)
-    try:
-        obj2 = json.loads(js)
-        if obj2.get("brand") and obj2.get("model"):
-            return obj2
-    except Exception:
-        pass
-    return {"brand": "未知", "model": ""}
-
-# ----------------------------- ランキングから seriesリンク収集 -----------------------------
-def _norm_text(s: str) -> str:
-    return (s or "").strip().replace(" ", "").replace("\u3000", "")
-
-def collect_series_links_from_rank(rank_url: str) -> Dict[str, str]:
-    html = _fetch(rank_url)
-    if not html:
-        return {}
-    soup = BeautifulSoup(html, "html.parser")
-    mapping: Dict[str, str] = {}
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        text = _norm_text(a.get_text(strip=True))
-        if not text or "javascript:" in href:
-            continue
-        if href.startswith("//"):
-            href = "https:" + href
-        elif href.startswith("/"):
-            href = "https://www.autohome.com.cn" + href
-        # 例: https://www.autohome.com.cn/7806/
-        if re.search(r"autohome\.com\.cn/\d+/?", href):
-            mapping.setdefault(text, href)
-    return mapping
-
-# ----------------------------- seriesページ上部スクショ（2枚返す） -----------------------------
-def grab_series_header_screenshot(url: str, out_dir: Path, cut_height: int = 260) -> Tuple[Path, Path]:
-    """
-    A: ヘッダ帯（0〜cut_height）
-    B: 左上情報パネル（品牌/厂商ラベルが出やすい帯）
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            viewport={"width": 1380, "height": 900},
-            device_scale_factor=2,
-            user_agent=HEADERS_WEB["User-Agent"],
-            locale="zh-CN",
-            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-        )
-        page = ctx.new_page()
-        page.goto(url, timeout=60000)
-        page.wait_for_timeout(2500)
-        full = out_dir / "series_full.jpg"
-        page.screenshot(path=str(full), full_page=True)
-        browser.close()
-
-    im = Image.open(full).convert("RGB"); W, H = im.size
-    header = out_dir / f"series_header_{cut_height}.jpg"
-    im.crop((0, 0, W, min(cut_height, H))).save(header, "JPEG", quality=90, optimize=True)
-    left = out_dir / f"series_left_{cut_height}.jpg"
-    im.crop((0, 120, min(420, W), min(900, H))).save(left, "JPEG", quality=90, optimize=True)
-    try:
-        full.unlink()
-    except Exception:
-        pass
-    return header, left
-
-# ----------------------------- VLMで brand/model を読む（2枚統合＋自己検証） -----------------------------
-def _ask_image_json(client: OpenAI, model: str, prompt: str, img_path: Path) -> Dict[str, str]:
-    b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
-    resp = client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": [
-                {"type": "input_text", "text": "只输出JSON"},
-                {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
-            ]}
-        ],
-        temperature=0
-    )
-    raw = (resp.output_text or "").strip()
-    js = _extract_json_object(raw)
-    try:
-        return json.loads(js)
-    except Exception:
-        return {}
-
-def vlm_read_brand_model_from_images(client: OpenAI, model: str,
-                                     header_img: Path, left_img: Path,
-                                     cut_height: int, series_url: str) -> Dict[str, str]:
-    # ① 左パネル（“品牌/厂商”ラベル）優先
-    o_left = _ask_image_json(client, model, SERIES_HEADER_PROMPT, left_img)
-    # ② ヘッダ帯（ブランド·车系/面包屑）
-    o_head = _ask_image_json(client, model, SERIES_HEADER_PROMPT, header_img)
-
-    brand = (o_left.get("brand") or o_head.get("brand") or "").strip()
-    model_str = (o_head.get("model") or o_left.get("model") or "").strip()
-
-    # 自己検証：brand==model or brand in model → 画角を広げて一度だけ再撮影
-    if brand and model_str and (brand == model_str or brand in model_str):
-        header2, left2 = grab_series_header_screenshot(series_url, header_img.parent, cut_height + 200)
-        return vlm_read_brand_model_from_images(client, model, header2, left2, cut_height + 200, series_url)
-
-    return {"brand": brand or "未知", "model": model_str}
-
-# ----------------------------- VLM（ランキング表→JSON） -----------------------------
-class OpenAIVLM:
-    def __init__(self, model: str, api_key: str):
-        self.model = model
-        self.client = OpenAI(api_key=api_key)
-
-    def infer_table(self, img_path: Path) -> dict:
-        b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
-        resp = self.client.responses.create(
-            model=self.model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "input_text", "text": USER_PROMPT},
-                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
-                ]}
-            ],
-            temperature=0
-        )
-        raw = (resp.output_text or "").strip()
-        js = _extract_json_object(raw)
-        try:
-            return json.loads(js)
-        except Exception:
-            return {"rows": []}
-
-# ----------------------------- 行の前処理・結合 -----------------------------
-def normalize_rows(rows: List[dict]) -> List[dict]:
-    out = []
-    for r in rows:
-        nm = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
-        out.append({"rank": r.get("rank"), "name": nm, "count": r.get("count")})
-    return out
-
-def merge_dedupe_sort(list_of_rows: List[List[dict]]) -> List[dict]:
-    merged, seen = [], set()
-    for rows in list_of_rows:
-        for r in rows:
-            key = (r.get("name") or "").replace(" ", "").replace("\u3000", "")
-            if key and key not in seen:
-                seen.add(key); merged.append(r)
-    merged.sort(key=lambda r: (-(r.get("count") or 0), r.get("name")))
-    for i, r in enumerate(merged, 1):
-        r["rank_seq"] = i
-    return merged
-
-# ----------------------------- ブランド解決 -----------------------------
-class BrandResolver:
-    def __init__(self, vlm: OpenAIVLM,
-                 cache_path: Path = Path("data/brand_cache.json"),
-                 series_map: Dict[str, str] | None = None):
-        self.vlm = vlm
-        self.cache_path = cache_path
-        self.cache: Dict[str, Dict[str, str]] = {}
-        self.series_map = series_map or {}
-        try:
-            if self.cache_path.exists():
-                self.cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            self.cache = {}
-
-    def _save(self):
-        try:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(self.cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-    def resolve(self, raw_name: str) -> Dict[str, str]:
-        key = (raw_name or "").strip()
-        if not key:
-            return {"brand": "", "model": raw_name}
-
-        if key in self.cache:
-            return self.cache[key]
-
-        series_url = self.series_map.get(key) or ""
-        if series_url:
-            try:
-                header_img, left_img = grab_series_header_screenshot(series_url, Path("tiles/series_headers"))
-                obj = vlm_read_brand_model_from_images(self.vlm.client, self.vlm.model,
-                                                       header_img, left_img, cut_height=260, series_url=series_url)
-                if obj.get("brand") and obj.get("model"):
-                    self.cache[key] = obj; self._save()
-                    return obj
-            except Exception:
-                pass
-
-            # 画像読取がダメなら <title> からの抽出にフォールバック
-            try:
-                obj2 = resolve_brand_via_series_title(self.vlm.client, self.vlm.model, series_url)
-                if obj2.get("brand") and obj2.get("model"):
-                    self.cache[key] = obj2; self._save()
-                    return obj2
-            except Exception:
-                pass
-
-        # ここまでで取れなければ推測はせず “未知”
-        out = {"brand": "未知", "model": key}
-        self.cache[key] = out; self._save()
-        return out
-
-# ----------------------------- ランキングのフルスクショ＆分割 -----------------------------
-def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    full_path = out_dir / "full.jpg"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            viewport={"width": viewport[0], "height": viewport[1]},
-            device_scale_factor=2,
-            user_agent=HEADERS_WEB["User-Agent"],
-            locale="zh-CN",
-            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-        )
-        page = ctx.new_page()
-        page.goto(url, timeout=60000)
-        page.wait_for_timeout(4000)
-        page.screenshot(path=str(full_path), full_page=True)
-        browser.close()
-        return full_path
-
+# ----------------------------- タイル分割 -----------------------------
 def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: int) -> List[Path]:
     im = Image.open(full_path).convert("RGB")
     W, H = im.size
@@ -355,54 +77,155 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
         y += step
     return paths
 
-# ----------------------------- MAIN -----------------------------
+# ----------------------------- スクショ（HTMLは改変しない / 豆腐防止CSS注入） -----------------------------
+def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    full_path = out_dir / "full.jpg"
+
+    MAX_RETRY = 3
+    for attempt in range(1, MAX_RETRY + 1):
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                viewport={"width": viewport[0], "height": viewport[1]},
+                device_scale_factor=2,
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+            page = ctx.new_page()
+
+            # 豆腐防止：CJKフォントを強制（Workflow で CJK フォント導入済み前提）
+            page.add_init_script("""
+              try {
+                const style = document.createElement('style');
+                style.setAttribute('data-screenshot-font-patch','1');
+                style.textContent = `
+                  * { font-family:
+                      "Noto Sans CJK SC","WenQuanYi Zen Hei","Noto Sans CJK JP",
+                      "Noto Sans","Microsoft YaHei","PingFang SC",sans-serif !important; }
+                `;
+                document.documentElement.appendChild(style);
+              } catch(e){}
+            """)
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=180000)
+                # 緩く本文待ち
+                for sel in ["table", ".rank-list", ".content", "body"]:
+                    try:
+                        page.wait_for_selector(sel, state="visible", timeout=5000)
+                        break
+                    except PwTimeout:
+                        pass
+
+                time.sleep(2.5)
+                page.screenshot(path=str(full_path), full_page=True)
+                browser.close()
+                return full_path
+            except Exception as e:
+                browser.close()
+                if attempt == MAX_RETRY:
+                    raise
+                time.sleep(2)
+
+# ----------------------------- OpenAI 呼び出し -----------------------------
+def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
+    client = OpenAI()
+    b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    msgs = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "input_text", "text": USER_PROMPT},
+            {"type": "input_image", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        ]}
+    ]
+    resp = client.responses.create(model=model, input=msgs, temperature=0)
+    out = resp.output_text
+    try:
+        data = json.loads(out)
+        return data["rows"]
+    except Exception:
+        return []
+
+def vlm_split_brand(name: str, model="gpt-4o-mini") -> Dict[str, str]:
+    client = OpenAI()
+    msgs = [
+        {"role": "system", "content": BRAND_PROMPT},
+        {"role": "user", "content": name}
+    ]
+    resp = client.chat.completions.create(
+        model=model,
+        messages=msgs,
+        temperature=0,
+        max_tokens=64,
+    )
+    out = (resp.choices[0].message.content or "").strip()
+    try:
+        d = json.loads(out)
+        return d
+    except Exception:
+        return {"brand": "未知", "model": name}
+
+# ----------------------------- CSV 読み書き -----------------------------
+def write_csv(path: Path, rows: List[Dict]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["rank_seq","rank","name","brand","count"])
+        w.writeheader()
+        w.writerows(rows)
+
+def read_csv(path: Path) -> List[Dict]:
+    if not path.is_file():
+        return []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+# ----------------------------- メイン -----------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--from-url", required=True)
-    ap.add_argument("--tile-height", type=int, default=1200)
-    ap.add_argument("--tile-overlap", type=int, default=220)
-    ap.add_argument("--out", default="result.csv")
-    ap.add_argument("--model", default="gpt-4o")
-    ap.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"))
-    ap.add_argument("--fullpage-split", action="store_true")  # 既存どおり
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--tile-height", type=int, default=900)
+    ap.add_argument("--overlap", type=int, default=120)
+    ap.add_argument("--model", default="gpt-4o-mini")
     args = ap.parse_args()
 
-    # ランキングHTMLから series URL マップ
-    series_map = collect_series_links_from_rank(args.from_url)
+    url = args.url
+    out_csv = Path(args.out)
 
-    # ランキングのフル画像（VLMで行抽出に使う）
-    full_path = grab_fullpage_to(args.from_url, Path("tiles"))
-    if args.fullpage_split:
-        tile_paths = split_full_image(full_path, Path("tiles"), args.tile_height, args.tile_overlap)
-    else:
-        tile_paths = [full_path]
+    tmp_dir = Path("tiles")
+    full_img = grab_fullpage_to(url, tmp_dir)
+    tiles = split_full_image(full_img, tmp_dir, args.tile_height, args.overlap)
 
-    vlm = OpenAIVLM(model=args.model, api_key=args.openai_api_key)
+    all_rows: List[Dict] = []
+    for i, tile in enumerate(tiles):
+        rows = vlm_extract_rows(tile, model=args.model)
+        for r in rows:
+            rank = r.get("rank")
+            name = r.get("name")
+            count = r.get("count")
+            if not name:
+                continue
+            # ブランド分割
+            bm = vlm_split_brand(name, model=args.model)
+            brand = bm.get("brand","未知")
+            model_name = bm.get("model", name)
+            all_rows.append({
+                "rank_seq": str(len(all_rows)+1),
+                "rank": rank,
+                "name": model_name,
+                "brand": brand,
+                "count": count,
+            })
+        time.sleep(1.2)
 
-    all_rows = []
-    for p in tile_paths:
-        data = vlm.infer_table(p)
-        rows = normalize_rows(data.get("rows", []))
-        all_rows.append(rows)
-
-    merged = merge_dedupe_sort(all_rows)
-
-    resolver = BrandResolver(vlm, series_map=series_map)
-    for r in merged:
-        bm = resolver.resolve(r["name"])
-        r["brand"] = bm.get("brand", "") or "未知"
-        r["model"] = bm.get("model", r["name"])
-        r.pop("name", None)
-
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["rank_seq", "rank", "brand", "model", "count"])
-        w.writeheader()
-        for r in merged:
-            w.writerow(r)
-
-    print(f"[DONE] rows={len(merged)} -> {out}  (cache: data/brand_cache.json)")
+    write_csv(out_csv, all_rows)
+    print(f"[OK] {len(all_rows)} rows -> {out_csv}")
 
 if __name__ == "__main__":
     main()
