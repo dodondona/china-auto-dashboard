@@ -117,11 +117,11 @@ def vlm_extract_rows(image_path: Path, model="gpt-4o-mini") -> List[Dict]:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": [
             {"type": "input_text", "text": USER_PROMPT},
-            # ★ 修正済み：image_url は文字列で渡す
             {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
         ]}
     ]
-    resp = client.responses.create(model=model, messages=msgs, temperature=0)
+    # ★ 修正: messages → input
+    resp = client.responses.create(model=model, input=msgs, temperature=0)
     out = resp.output_text
     try:
         data = json.loads(out)
