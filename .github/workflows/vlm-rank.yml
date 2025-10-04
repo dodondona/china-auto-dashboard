@@ -1,103 +1,153 @@
-name: Monthly VLM Rank Capture
+name: Autohome Rank Enrich (brand column + tiles artifacts)
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "ランキングページURL"
-        required: true
-        default: "https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html"
-      split:
-        description: "フルページをタイル分割する？ (true/false)"
+      target_month:
+        description: "Target month (YYYY-MM), e.g., 2025-08"
         required: false
-        default: "true"
-      tile_height:
-        description: "タイル高さ(px)"
-        required: false
-        default: "1200"
-      tile_overlap:
-        description: "上下オーバーラップ(px)"
-        required: false
-        default: "220"
   schedule:
-    - cron: "0 6 10 * *"   # 毎月10日 06:00(UTC) = 北京時間14:00
+    - cron: "0 3 5 * *"   # 毎月5日 03:00 UTCに実行（任意）
 
 jobs:
-  capture:
+  autohome-rank-enrich:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+
+    permissions:
+      contents: write
+
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TARGET_MONTH: ${{ inputs.target_month }}
 
     steps:
-      - name: Checkout code
+      # 0) チェックアウト
+      - name: Checkout
         uses: actions/checkout@v4
 
+      # 1) 月指定が無ければ先月にフォールバック
+      - name: Set TARGET_MONTH if empty (fallback to previous month)
+        id: setmonth
+        run: |
+          if [ -z "${TARGET_MONTH}" ]; then
+            TARGET_MONTH=$(date -u -d "$(date +%Y-%m-15) -1 month" +%Y-%m)
+            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
+          else
+            echo "TARGET_MONTH=$TARGET_MONTH" >> $GITHUB_ENV
+          fi
+          echo "Using TARGET_MONTH=${TARGET_MONTH}"
+
+      # 2) Python
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Install dependencies
+      # 3) 依存インストール（既存requirements + openai）
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install openai
 
-      # 失敗時に最大3回リトライ
-      - name: Run vlm_rank_reader.py (retry x3)
-        shell: bash
+      # 3.5) ★ CJKフォントを導入（豆腐対策・最小変更）
+      - name: Install Chinese CJK fonts for headless rendering
         run: |
-          set -e
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
+          sudo fc-cache -fv
 
-          if [ -z "${{ secrets.OPENAI_API_KEY }}" ]; then
-            echo "ERROR: OPENAI_API_KEY secret is missing."
-            exit 1
+      # 4) Playwright Chromium（既存パイプラインが使う場合）
+      - name: Install Playwright Chromium (if needed by existing pipeline)
+        run: |
+          python - <<'PY'
+          import sys, subprocess
+          try:
+              import playwright  # noqa
+              subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+          except Exception:
+              print("playwright not installed; skipping.")
+          PY
+
+      # 5) 既存のVLMパイプラインで一次CSVを作る（そのまま）
+      - name: Run existing VLM pipeline to produce the raw CSV
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          mkdir -p data
+          # 例：PC版URL。既存の引数に合わせてください（変更したくなければ既存そのままでOK）
+          python vlm_rank_reader.py \
+            --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
+            --fullpage-split \
+            --tile-height 1200 \
+            --tile-overlap 220 \
+            --out "data/autohome_raw_${TARGET_MONTH}.csv"
+          # ↑ 上の実行で tiles/ ディレクトリ（tile_00.jpg など）が作られる想定
+
+      # 6) タイル画像のインデックスHTMLを作成（見やすさ用・そのまま）
+      - name: Build tiles index (optional but useful)
+        run: |
+          if [ -d tiles ]; then
+            {
+              echo '<!doctype html><meta charset="utf-8"><title>Tiles Preview</title>'
+              echo '<style>body{font-family:system-ui,sans-serif;padding:24px;background:#111;color:#eee}'
+              echo '.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}'
+              echo 'figure{margin:0;background:#222;padding:8px;border-radius:8px}'
+              echo 'figcaption{font-size:12px;margin-top:6px;color:#ccc;word-break:break-all}'
+              echo 'img{max-width:100%;height:auto;display:block;border-radius:4px}'
+              echo '</style><h1>Autohome tiles</h1><div class="grid">'
+              for f in tiles/*.jpg tiles/*.jpeg tiles/*.png; do
+                [ -e "$f" ] || continue
+                bn=$(basename "$f")
+                echo "<figure><img src=\"$bn\" alt=\"$bn\"><figcaption>$bn</figcaption></figure>"
+              done
+              echo '</div>'
+            } > tiles/index.html
+          else
+            echo "no tiles/ directory found"
           fi
-          echo "::add-mask::${{ secrets.OPENAI_API_KEY }}"
 
-          URL="${{ github.event.inputs.url || 'https://www.autohome.com.cn/rank/1-3-1071-x/2025-08.html' }}"
-          SPLIT="${{ github.event.inputs.split || 'true' }}"
-          TILE_H="${{ github.event.inputs.tile_height || '1200' }}"
-          OVERLAP="${{ github.event.inputs.tile_overlap || '220' }}"
-
-          # --fullpage-split はフラグなので true のときだけ付与
-          SPLIT_FLAG=""
-          if [ "$SPLIT" = "true" ] || [ "$SPLIT" = "True" ]; then
-            SPLIT_FLAG="--fullpage-split"
-          fi
-
-          for i in 1 2 3; do
-            echo "Attempt $i/3 ..."
-            if python vlm_rank_reader.py \
-              --from-url "$URL" \
-              $SPLIT_FLAG \
-              --tile-height "$TILE_H" \
-              --tile-overlap "$OVERLAP" \
-              --model gpt-4o \
-              --openai-api-key "${{ secrets.OPENAI_API_KEY }}" \
-              --out result.csv ; then
-              break
-            fi
-            if [ $i -lt 3 ]; then
-              echo "Retrying in 12s..."; sleep 12
-            else
-              echo "All attempts failed"; exit 1
-            fi
-          done
-
-      - name: Upload CSV artifact
+      # 7) タイル画像をArtifactsへ（そのまま）
+      - name: Upload tiles as artifact
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-rank-csv
-          path: result.csv
+          name: autohome-tiles-${{ env.TARGET_MONTH }}
+          path: |
+            tiles/*.jpg
+            tiles/*.jpeg
+            tiles/*.png
+            tiles/index.html
+          if-no-files-found: warn
+          retention-days: 14
+
+      # 8) brand列付与の後処理（そのまま）
+      - name: Enrich brand column (new CSV)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/enrich_brand_llm.py \
+            --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
+            --out "data/autohome_rank_${TARGET_MONTH}.csv" \
+            --no-llm
+          # ↑ まずは --no-llm で安全運用。必要なら外して LLM で補完
+
+      # 9) CSVもArtifactsに入れておく（そのまま）
+      - name: Upload CSVs as artifact (optional)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-csvs-${{ env.TARGET_MONTH }}
+          path: |
+            data/autohome_raw_${{ env.TARGET_MONTH }}.csv
+            data/autohome_rank_${{ env.TARGET_MONTH }}.csv
+          if-no-files-found: ignore
           retention-days: 30
 
-      - name: Upload screenshots
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-rank-tiles
-          path: tiles/
-          if-no-files-found: ignore
-          retention-days: 7
+      # 10) リポジトリへCSVをコミット（そのまま）
+      - name: Commit CSVs
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "data/autohome_raw_${TARGET_MONTH}.csv" "data/autohome_rank_${TARGET_MONTH}.csv" || true
+          git commit -m "autohome rank CSV (raw & brand) for ${TARGET_MONTH}" || echo "no changes"
+          git push
