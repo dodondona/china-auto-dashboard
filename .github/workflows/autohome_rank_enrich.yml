@@ -61,22 +61,20 @@ jobs:
               print("playwright not installed; skipping.")
           PY
 
-      # 5) 既存のVLMパイプラインで一次CSVを作る（★ここはあなたの既存コマンドに合わせる）
+      # 5) 既存のVLMパイプラインで一次CSVを作る
       - name: Run existing VLM pipeline to produce the raw CSV
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p data
-          # 例：PC版URL。既存の引数に合わせてください（変更したくなければ既存そのままでOK）
           python vlm_rank_reader.py \
             --from-url "https://www.autohome.com.cn/rank/1/${TARGET_MONTH}.html" \
             --fullpage-split \
             --tile-height 1200 \
             --tile-overlap 220 \
             --out "data/autohome_raw_${TARGET_MONTH}.csv"
-          # ↑ 上の実行で tiles/ ディレクトリ（tile_00.jpg など）が作られる想定
 
-      # 6) タイル画像のインデックスHTMLを作成（見やすさ用・任意）
+      # 6) タイル画像のインデックスHTMLを作成
       - name: Build tiles index (optional but useful)
         run: |
           if [ -d tiles ]; then
@@ -88,8 +86,8 @@ jobs:
               echo 'figcaption{font-size:12px;margin-top:6px;color:#ccc;word-break:break-all}'
               echo 'img{max-width:100%;height:auto;display:block;border-radius:4px}'
               echo '</style><h1>Autohome tiles</h1><div class="grid">'
-              for f in tiles/*.jpg tiles/*.jpeg tiles/*.png 2>/dev/null; do
-                [ -f "$f" ] || continue
+              for f in tiles/*.jpg tiles/*.jpeg tiles/*.png; do
+                [ -e "$f" ] || continue
                 bn=$(basename "$f")
                 echo "<figure><img src=\"$bn\" alt=\"$bn\"><figcaption>$bn</figcaption></figure>"
               done
@@ -99,7 +97,7 @@ jobs:
             echo "no tiles/ directory found"
           fi
 
-      # 7) タイル画像をArtifactsへ（★ここが「方法1」）
+      # 7) タイル画像をArtifactsへ
       - name: Upload tiles as artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -113,7 +111,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # 8) brand列付与の後処理（あなたの tools/enrich_brand_llm.py を使用）
+      # 8) brand列付与の後処理
       - name: Enrich brand column (new CSV)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -122,9 +120,8 @@ jobs:
             --in  "data/autohome_raw_${TARGET_MONTH}.csv" \
             --out "data/autohome_rank_${TARGET_MONTH}.csv" \
             --no-llm
-          # ↑ まずは --no-llm で安全運用。必要なら外して LLM で補完
 
-      # 9) CSVもArtifactsに入れておくと比較が楽（任意）
+      # 9) CSVもArtifactsに入れておく
       - name: Upload CSVs as artifact (optional)
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -136,7 +133,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # 10) リポジトリへCSVをコミット（既存運用を維持）
+      # 10) リポジトリへCSVをコミット
       - name: Commit CSVs
         run: |
           git config user.name  "github-actions[bot]"
