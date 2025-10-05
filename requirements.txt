@@ -2,3 +2,4 @@ openai>=1.40.0
 pillow
 playwright
 google-generativeai>=0.7.2  # ← Geminiを使うときだけ参照されます
+pandas
