@@ -80,7 +80,7 @@ jobs:
         run: |
            python tools/enrich_title_from_series.py \
              --input "${{ steps.paths.outputs.with_series }}" \
-             --output "${{ steps.paths.outputs.with_brand }}
+             --output "${{ steps.paths.outputs.with_brand }}"
 
       - name: List outputs before commit
         run: |
