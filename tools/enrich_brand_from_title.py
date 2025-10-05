@@ -8,7 +8,8 @@ LLM で brand / series 名を抽出して CSV に追記する。
 - API キーは環境変数 OPENAI_API_KEY を使用（GitHub Secrets を想定）
 - 変更点（最小）:
   * 出力列に 'model' を追加
-  * LLM が返す 'series' から 'brand' を先頭除去して 'model' を生成
+  * model は series から brand を除去→分割→末尾トークンを採用
+  * 「银河星愿」のようにサブブランド「银河」が先頭残りの場合は除去
 """
 
 import os
@@ -124,7 +125,7 @@ def main():
         cb = float(conf.get("brand", 0) or 0)
         cs = float(conf.get("series", 0) or 0)
 
-        # 低信頼なら簡易正規表現で補完（未知のみ埋める）
+        # 低信頼なら簡易正規表現で補完（未知のみ上書き）
         if cb < args.conf_threshold or cs < args.conf_threshold:
             rb, rs = parse_by_regex(title)
             if brand == "未知" and rb != "未知":
@@ -132,12 +133,23 @@ def main():
             if series == "未知" and rs != "未知":
                 series = rs
 
-        # series から brand を先頭除去して model を生成
-        model_val = series
-        if brand and series:
-            # 例: "吉利 银河_星愿" / "吉利银河_星愿" / "吉利 银河星愿" の先頭ブランドを取り除く
-            pattern = rf"^{re.escape(brand)}[\s_]*"
-            model_val = re.sub(pattern, "", series).strip() or series
+        # === model 生成（ここが今回の最小修正）===
+        # 1) series から先頭 brand を除去
+        s = series
+        if brand and s:
+            s = re.sub(rf"^{re.escape(brand)}[\s_]*", "", s)
+
+        # 2) 分割（空白・アンダー・中黒・ハイフン）→ 末尾トークンを採用
+        parts = [p for p in re.split(r"[\s_·\-]+", s or "") if p]
+        if len(parts) >= 2:
+            model_val = parts[-1]
+        else:
+            model_val = s or series
+
+        # 3) サブブランド「银河」先頭残りを安全に除去（例: 银河星愿 → 星愿）
+        if model_val.startswith("银河") and len(model_val) > 2:
+            model_val = model_val[2:]
+        model_val = model_val.strip()
 
         r2 = dict(r)
         r2.update({
