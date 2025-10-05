@@ -76,13 +76,11 @@ jobs:
             --max-rounds 30 \
             --idle-ms 650 \
 
-      - name: Enrich brand/series from <title> via LLM
+      - name: Enrich brand/model from <title> (Playwright)
         run: |
-          python tools/enrich_brand_from_title.py \
-            --input "${{ steps.paths.outputs.with_series }}" \
-            --output "${{ steps.paths.outputs.with_brand }}" \
-            --model "gpt-4o-mini" \
-            --conf-threshold 0.7
+           python tools/enrich_title_from_series.py \
+             --input "${{ steps.paths.outputs.with_series }}" \
+             --output "${{ steps.paths.outputs.with_brand }}
 
       - name: List outputs before commit
         run: |
