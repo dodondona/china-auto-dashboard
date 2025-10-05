@@ -5,11 +5,10 @@ enrich_brand_from_title.py
 Autohome の series ページ <title> を取得し、
 LLM で brand / series 名を抽出して CSV に追記する。
 
-- API キーは環境変数 OPENAI_API_KEY を使用（GitHub Secrets を想定）
-- 変更点（最小）:
-  * 出力列に 'model' を追加
-  * model は series から brand を除去→分割→末尾トークンを採用
-  * 「银河星愿」のようにサブブランド「银河」が先頭残りの場合は除去
+変更点：
+- modelは<title>内の【…】または[…]を最優先で採用（例：特斯拉【Model Y】→Model Y）
+- 無い場合は従来のbrand除去＋トークン分割方式
+- 銀河星愿などサブブランド残りも安全に除去
 """
 
 import os
@@ -36,10 +35,29 @@ PROMPT = """あなたは中国の自動車情報サイトの<title>文字列か�
 
 ルール:
 - 「汽车之家」などサイト名は無視。
-- ブランドは BYD/比亚迪、长安、上汽大众、广汽丰田 等（中英混在可）。シリーズは具体的な車系名称（宋Pro、汉、UNI-K 等）。
+- ブランドは BYD/比亚迪、长安、上汽大众、广汽丰田 等（中英混在可）。
+- シリーズは具体的な車系名称（宋Pro、汉、UNI-K 等）。
 - 雑多な装飾語（报价、图片、配置 等）は除外。
-- brand/series が曖昧なら、合理的に推定し、confidence を下げて返す。
 """
+
+# === 追加：ブラケット抽出ヘルパー ===
+_BRACKET_RX = re.compile(r"[【\[]\s*([^\]】]+?)\s*[】\]]")
+
+def prefer_model_from_title_brackets(title: str, brand: str) -> str:
+    """
+    <title> の先頭にある【…】や[…]を最優先で model として返す。
+    例: 【Model Y】 特斯拉_... → "Model Y"
+        【星愿】 吉利银河_星愿 → "星愿"
+    """
+    if not title:
+        return ""
+    m = _BRACKET_RX.search(title)
+    if not m:
+        return ""
+    cand = m.group(1).strip()
+    if brand and cand.startswith(brand):
+        cand = cand[len(brand):].lstrip("_ ·-　")
+    return cand
 
 def get_title(url: str) -> str:
     try:
@@ -51,12 +69,9 @@ def get_title(url: str) -> str:
         return ""
 
 def parse_by_regex(title: str) -> Tuple[str, str]:
-    """フォールバック用の素朴な抽出。"""
     if not title:
         return "未知", "未知"
-    # よくあるサイト接尾辞を除去
     t = re.sub(r"\s*[-–—\|｜]\s*汽车之家.*$", "", title)
-    # 先頭2トークンを brand / series とみなす簡易規則
     m = re.search(r"^([^\s\-\|_【】]+)[\s_【】]+([^\s\-\|_【】]+)", t)
     if m:
         return m.group(1).strip(), m.group(2).strip()
@@ -95,19 +110,18 @@ def main():
         return
 
     with open(args.input, "r", encoding="utf-8-sig") as f:
-        rows: List[Dict[str, str]] = list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
     if not rows:
         print("入力CSVが空です。")
         return
 
-    # 出力フィールド（既存列を保ちつつ強化）
     fields = list(rows[0].keys())
     for col in ["brand", "series", "model", "brand_conf", "series_conf", "title_raw"]:
         if col not in fields:
             fields.append(col)
 
     client = OpenAI()
-    out: List[Dict[str, str]] = []
+    out = []
 
     for r in tqdm(rows, desc="enrich brand/series by LLM"):
         url = r.get(args.url_col, "")
@@ -116,8 +130,6 @@ def main():
             continue
 
         title = get_title(url)
-
-        # まず LLM で brand/series
         result = extract_by_llm(title, args.model, client)
         brand = result.get("brand", "未知") if isinstance(result, dict) else "未知"
         series = result.get("series", "未知") if isinstance(result, dict) else "未知"
@@ -125,7 +137,6 @@ def main():
         cb = float(conf.get("brand", 0) or 0)
         cs = float(conf.get("series", 0) or 0)
 
-        # 低信頼なら簡易正規表現で補完（未知のみ上書き）
         if cb < args.conf_threshold or cs < args.conf_threshold:
             rb, rs = parse_by_regex(title)
             if brand == "未知" and rb != "未知":
@@ -133,22 +144,19 @@ def main():
             if series == "未知" and rs != "未知":
                 series = rs
 
-        # === model 生成（ここが今回の最小修正）===
-        # 1) series から先頭 brand を除去
-        s = series
-        if brand and s:
-            s = re.sub(rf"^{re.escape(brand)}[\s_]*", "", s)
-
-        # 2) 分割（空白・アンダー・中黒・ハイフン）→ 末尾トークンを採用
-        parts = [p for p in re.split(r"[\s_·\-]+", s or "") if p]
-        if len(parts) >= 2:
-            model_val = parts[-1]
-        else:
-            model_val = s or series
-
-        # 3) サブブランド「银河」先頭残りを安全に除去（例: 银河星愿 → 星愿）
-        if model_val.startswith("银河") and len(model_val) > 2:
-            model_val = model_val[2:]
+        # === model 生成（括弧優先ロジック）===
+        model_val = prefer_model_from_title_brackets(title, brand)
+        if not model_val:
+            s = series
+            if brand and s:
+                s = re.sub(rf"^{re.escape(brand)}[\s_]*", "", s)
+            parts = [p for p in re.split(r"[\s_·\-]+", s or "") if p]
+            if len(parts) >= 2:
+                model_val = parts[-1]
+            else:
+                model_val = s or series
+            if model_val.startswith("银河") and len(model_val) > 2:
+                model_val = model_val[2:]
         model_val = model_val.strip()
 
         r2 = dict(r)
@@ -161,7 +169,7 @@ def main():
             "title_raw": title
         })
         out.append(r2)
-        time.sleep(random.uniform(0.03, 0.08))  # 軽いレート調整
+        time.sleep(random.uniform(0.03, 0.08))
 
     with open(args.output, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
