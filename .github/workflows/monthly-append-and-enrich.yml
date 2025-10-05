@@ -76,11 +76,15 @@ jobs:
 
           WITH_SERIES="data/autohome_raw_${YM}_with_series.csv"
           WITH_BRAND="data/autohome_raw_${YM}_with_brand.csv"
+          WITH_LLMFIX="data/autohome_raw_${YM}_with_llmfix.csv"
+          HTML_FILE="data/autohome_rankpage_${YM}.html"
 
           echo "ym=${YM}"                >> $GITHUB_OUTPUT
           echo "raw=${RAW}"              >> $GITHUB_OUTPUT
           echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
           echo "with_brand=${WITH_BRAND}"   >> $GITHUB_OUTPUT
+          echo "with_llmfix=${WITH_LLMFIX}" >> $GITHUB_OUTPUT
+          echo "html_file=${HTML_FILE}"     >> $GITHUB_OUTPUT
 
       - name: Append series_url from /rank/1 (infinite scroll)
         run: |
@@ -103,6 +107,16 @@ jobs:
             --model gpt-4o-mini \
             --conf-threshold 0.7
 
+      # 👁️ LLMによる目視整合チェック
+      - name: Fix misalignment via LLM (visual check)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/append_series_url_from_html_llm.py \
+            --input ${{ steps.paths.outputs.with_brand }} \
+            --html ${{ steps.paths.outputs.html_file }} \
+            --output ${{ steps.paths.outputs.with_llmfix }}
+
       - name: List outputs before commit
         run: |
           echo "== ls -lh data =="
@@ -114,7 +128,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${{ steps.paths.outputs.with_series }} ${{ steps.paths.outputs.with_brand }} || true
+          git add ${{ steps.paths.outputs.with_series }} \
+                  ${{ steps.paths.outputs.with_brand }} \
+                  ${{ steps.paths.outputs.with_llmfix }} || true
           git status -s
-          git commit -m "monthly enrich (rank/1 infinite-scroll): ${{ steps.paths.outputs.ym }}" || echo "Nothing to commit"
+          git commit -m "monthly enrich (rank/1 infinite-scroll + llmfix): ${{ steps.paths.outputs.ym }}" || echo "Nothing to commit"
           git push
