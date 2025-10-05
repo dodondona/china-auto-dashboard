@@ -128,6 +128,7 @@ def main():
     ap.add_argument("--output", required=True)
     ap.add_argument("--name-col", default="model")  # あなたの実行ログに合わせて 'model' をデフォルトに
     ap.add_argument("--idle-ms", type=int, default=500)
+    ap.add_argument("--min-delta", type=int, default=3, help="(互換用) ダミー引数。未使用。")
     ap.add_argument("--max-rounds", type=int, default=800)
     args = ap.parse_args()
 
