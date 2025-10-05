@@ -58,13 +58,14 @@ jobs:
             YM=$(basename "$RAW" | sed -E 's/^autohome_raw_([0-9]{4}-[0-9]{2}).*/\1/')
             echo "ym=${YM}" >> $GITHUB_OUTPUT
           fi
+
           WITH_SERIES="data/autohome_raw_${YM}_with_series.csv"
           WITH_BRAND="data/autohome_raw_${YM}_with_brand.csv"
-          echo "raw=${RAW}" >> $GITHUB_OUTPUT
-          echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
-          echo "with_brand=${WITH_BRAND}" >> $GITHUB_OUTPUT
 
-      # ★ここを修正済み（from_web.py に統一）
+          echo "raw=${RAW}"                 >> $GITHUB_OUTPUT
+          echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
+          echo "with_brand=${WITH_BRAND}"   >> $GITHUB_OUTPUT
+
       - name: Append series_url from /rank/1 (infinite scroll)
         run: |
           python tools/append_series_url_from_web.py \
@@ -84,10 +85,18 @@ jobs:
             --model "gpt-4o-mini" \
             --conf-threshold 0.7
 
+      - name: List outputs before commit
+        run: |
+          echo "== ls -lh data =="
+          ls -lh data | sed -e 's/^/  /'
+          echo "== git status -s =="
+          git status -s
+
       - name: Commit artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "${{ steps.paths.outputs.with_series }}" "${{ steps.paths.outputs.with_brand }}" || true
+          git status -s
           git commit -m "monthly enrich (rank/1 infinite-scroll): ${{ steps.cal.outputs.ym }}" || echo "Nothing to commit"
           git push
