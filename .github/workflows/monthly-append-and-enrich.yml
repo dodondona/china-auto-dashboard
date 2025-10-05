@@ -75,6 +75,7 @@ jobs:
             --name-col "model_text" \
             --max-rounds 30 \
             --idle-ms 650 \
+            --min-delta 3
 
       - name: Enrich brand/series from <title> via LLM
         run: |
