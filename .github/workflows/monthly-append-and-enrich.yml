@@ -72,7 +72,7 @@ jobs:
             --rank-url "https://www.autohome.com.cn/rank/1" \
             --input "${{ steps.paths.outputs.raw }}" \
             --output "${{ steps.paths.outputs.with_series }}" \
-            --name-col "model_text" \
+            --name-col "model" \
             --max-rounds 30 \
             --idle-ms 650 \
 
