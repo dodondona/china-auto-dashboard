@@ -1,19 +1,18 @@
-name: Monthly append series_url & enrich brand/series (rank/1)
+name: Monthly append series_url & enrich brand/series (rank/1, requests版)
 
 on:
   schedule:
     - cron: '15 0 3 * *'   # UTC 00:15 → JST 09:15 毎月3日
   workflow_dispatch:
 
-# 直 push を許可（403対策）
 permissions:
-  contents: write
+  contents: write   # ← botが直接pushできるようにする
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # 既にSecretsに登録済みのキー名
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +24,8 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install playwright requests tqdm openai
-          python -m playwright install chromium
+          pip install requests tqdm openai
 
-      # 対象月（JSTの「先月」）。CSVの選択に使うだけ。rank-urlは /rank/1 固定
       - name: Decide target month (JST -> last full month)
         id: cal
         run: |
@@ -63,13 +60,14 @@ jobs:
 
           WITH_SERIES="data/autohome_raw_${YM}_with_series.csv"
           WITH_BRAND="data/autohome_raw_${YM}_with_brand.csv"
+
           echo "raw=${RAW}"                 >> $GITHUB_OUTPUT
           echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
           echo "with_brand=${WITH_BRAND}"   >> $GITHUB_OUTPUT
 
-      - name: Append series_url from ranking page (/rank/1)
+      - name: Append series_url from web (rank/1)
         run: |
-          python tools/append_series_url.py \
+          python tools/append_series_url_from_web.py \
             --rank-url "https://www.autohome.com.cn/rank/1" \
             --input "${{ steps.paths.outputs.raw }}" \
             --output "${{ steps.paths.outputs.with_series }}" \
@@ -88,5 +86,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "${{ steps.paths.outputs.with_series }}" "${{ steps.paths.outputs.with_brand }}" || true
-          git commit -m "monthly enrich (rank/1): ${{ steps.cal.outputs.ym }}" || echo "Nothing to commit"
+          git commit -m "monthly enrich (rank/1, requests版): ${{ steps.cal.outputs.ym }}" || echo "Nothing to commit"
           git push
