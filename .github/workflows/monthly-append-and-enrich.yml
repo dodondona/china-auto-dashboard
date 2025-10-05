@@ -82,7 +82,7 @@ jobs:
       # series_url から <title> を読み、brand/series をJSON出力で抽出
       - name: Enrich brand/series from <title> via LLM
         run: |
-          python tools/enrich_brand_from_title.py \
+          python tools/append_series_url_from_web.py\
             --input "${{ steps.paths.outputs.with_series }}" \
             --output "${{ steps.paths.outputs.with_brand }}" \
             --model "gpt-4o-mini" \
