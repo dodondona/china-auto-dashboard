@@ -4,6 +4,11 @@
 append_series_url_from_web.force_dom.py
 Autohome /rank/1 ページから series_id と name を抽出し、
 rank 列を基準に series_url を確実に付与する。
+
+改訂内容：
+- rank優先でseries_urlを付与（ズレ防止）
+- 名前一致＋順序補完のフォールバック維持
+- gotoタイムアウトを90秒に延長
 """
 
 import os, re, time, csv, argparse
@@ -99,7 +104,7 @@ def main():
         context = browser.new_context(user_agent=UA, viewport={"width":1280,"height":1600})
         page = context.new_page()
 
-        print(f"📥 {args.rank-url} にアクセス中...")
+        print(f"📥 {args.rank_url} にアクセス中...")
         page.goto(args.rank_url, wait_until="load", timeout=90000)
         page.wait_for_load_state("networkidle")
 
