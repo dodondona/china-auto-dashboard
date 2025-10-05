@@ -6,8 +6,8 @@ Autohome /rank/1 ページから series_id と name を抽出し、
 rank 列を基準に series_url を確実に付与する。
 
 改訂内容：
-- rank優先でseries_urlを付与（ズレ防止）
-- 名前一致＋順序補完のフォールバック維持
+- rank属性値ではなく「DOM表示順」をrankとして採用（ズレ防止）
+- rank優先付与 → 名前一致 → 順序埋め の三段階ロジック
 - gotoタイムアウトを90秒に延長
 """
 
@@ -17,36 +17,43 @@ from playwright.sync_api import sync_playwright
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
 def normalize_name(s: str) -> str:
+    """全角・半角・記号を統一して比較しやすくする"""
     return re.sub(r"[\s_·\-　]+", "", s or "").lower()
 
 def to_series_url(sid: str) -> str:
+    """series_id から URL 生成"""
     return f"https://www.autohome.com.cn/{sid}/" if sid else ""
 
 def extract_entries_from_dom(page):
-    """rank, sid, name を DOM 表示順で取得"""
+    """
+    表示順（DOM出現順）を rank=1,2,3... として採用。
+    Autohome は data-rank-num が実際の順位とズレることがあるため。
+    """
     data = page.evaluate("""() => Array.from(
       document.querySelectorAll('[data-rank-num]')
     ).map(row => {
-      const rank = Number(row.getAttribute('data-rank-num'));
       const btn  = row.querySelector('button[data-series-id]');
       const sid  = btn ? btn.getAttribute('data-series-id') : '';
       const name = row.querySelector('.tw-text-lg, .tw-font-medium')?.textContent?.trim() || '';
-      return { rank, sid, name };
-    }).filter(x => x.sid && Number.isFinite(x.rank))
-      .sort((a,b)=>a.rank-b.rank)""")
-    seen, out = set(), []
+      return { sid, name };
+    }).filter(x => x.sid)""")
+
+    out, seen = [], set()
+    rank_counter = 1
     for x in data:
         if x["sid"] in seen:
             continue
         seen.add(x["sid"])
-        out.append({"rank": int(x["rank"]), "sid": x["sid"], "name": x["name"]})
+        out.append({"rank": rank_counter, "sid": x["sid"], "name": x["name"]})
+        rank_counter += 1
     return out
 
 def attach_by_rank_name_order(rows, entries, name_col):
     """1) rank直付け 2) 名前一致 3) 順序埋め"""
     used = set()
     rank2sid = {e["rank"]: e["sid"] for e in entries}
-    # rank直付け
+
+    # 1️⃣ rank直付け
     for r in rows:
         rk_raw = r.get("rank", "")
         try:
@@ -58,7 +65,8 @@ def attach_by_rank_name_order(rows, entries, name_col):
             if sid not in used:
                 r["series_url"] = to_series_url(sid)
                 used.add(sid)
-    # 名前一致
+
+    # 2️⃣ 名前一致
     name2sid = {}
     for e in entries:
         key = normalize_name(e["name"])
@@ -72,7 +80,8 @@ def attach_by_rank_name_order(rows, entries, name_col):
         if sid and sid not in used:
             r["series_url"] = to_series_url(sid)
             used.add(sid)
-    # 順序埋め
+
+    # 3️⃣ 順序埋め
     for e in entries:
         if e["sid"] in used:
             continue
@@ -93,12 +102,14 @@ def main():
     ap.add_argument("--min-delta", type=int, default=3)
     args = ap.parse_args()
 
+    # === CSV読み込み ===
     with open(args.input, "r", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
     if not rows:
         print("⚠ 入力CSVが空です。")
         return
 
+    # === Playwright動作 ===
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(user_agent=UA, viewport={"width":1280,"height":1600})
@@ -124,8 +135,10 @@ def main():
         entries = extract_entries_from_dom(page)
         print(f"✅ 抽出 {len(entries)} 件")
 
+    # === series_url付与 ===
     attach_by_rank_name_order(rows, entries, args.name_col)
 
+    # === 出力 ===
     with open(args.output, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
         writer.writeheader()
