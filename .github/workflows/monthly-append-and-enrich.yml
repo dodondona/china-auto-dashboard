@@ -68,7 +68,7 @@ jobs:
 
       - name: Append series_url from /rank/1 (infinite scroll)
         run: |
-          python tools/append_series_url_from_web.py \
+          python tools/append_series_url_from_web.force_dom.py \
             --rank-url "https://www.autohome.com.cn/rank/1" \
             --input "${{ steps.paths.outputs.raw }}" \
             --output "${{ steps.paths.outputs.with_series }}" \
