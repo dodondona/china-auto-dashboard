@@ -2,45 +2,31 @@
 # -*- coding: utf-8 -*-
 """
 vlm_rank_reader.py
-URL → フルページスクショ → タイル分割（overlap付き）→ VLMで行抽出 → CSV
-
-ポイント:
-- Playwright側でCJKフォントを強制適用 → 豆腐(□)防止
-- LLMで brand と model を推定（辞書不要）
-- 判定結果を data/brand_cache.json に永続キャッシュ（同じ車名は次回以降無課金・高速）
+URL → フルページスクショ → タイル分割 → VLMで行抽出 → CSV
+- Autohome ページの <title> や パンくずから brand を優先抽出
+- 失敗時のみ LLM フォールバック
 """
 
-import os, csv, json, base64, argparse, time
+import os, csv, json, base64, argparse, time, re
 from pathlib import Path
 from typing import List, Dict
 from PIL import Image
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from openai import OpenAI
+import requests
+from bs4 import BeautifulSoup
 
-# ----------------------------- VLM（表読み取り）プロンプト -----------------------------
+# ----------------------------- VLM（表読み取り） -----------------------------
 SYSTEM_PROMPT = """あなたは表の読み取りに特化した視覚アシスタントです。
-画像は中国の自動車販売ランキングです。UI部品や広告は無視してください。
+画像は中国の自動車販売ランキングです。広告やUI部品は無視してください。
 出力は JSON のみ。構造:
-{
-  "rows": [
-    {"rank": <int|null>, "name": "<string>", "count": <int|null>}
-  ]
-}
+{"rows":[{"rank":<int|null>,"name":"<string>","count":<int|null>}]}
 """
-USER_PROMPT = "この画像に見えている全ての行を JSON で返してください。"
+USER_PROMPT = "販売台数ランキング表をすべて読み取り、順位(rank)/車名(name)/販売台数(count) をJSONで返してください。"
 
-# ----------------------------- ブランド分離プロンプト -----------------------------
-BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”或图片片段，请输出对应的【品牌/厂商】与【车型名】。
-
-数据来源与验证顺序（务必遵守）：
-1) 必须优先在 汽车之家（autohome.com.cn） 查询并核对：先用“site:autohome.com.cn <车型/车系名>”检索；打开最相关的“车系”或“参数配置/图片/报价”页面。
-2) 在页面中寻找「厂商」「品牌」或面包屑位置的“<品牌/厂商>-<车系>”字样。
-3) 如在汽车之家未找到完全匹配，请回看输入名，结合常见别名/缩写再次检索。
-4) 仍无法确认时，可参考易车等，但以汽车之家为准；无法确认则 brand=未知。
-
-命名规则：
-- 不要仅按第一个词硬拆。“宏光MINIEV”“秦PLUS”などは完全な車系名。
-- 出力は JSON のみ。{"brand":"<string>","model":"<string>"}
+# ----------------------------- ブランド分離（LLMフォールバック） -----------------------------
+BRAND_PROMPT = """你是中国车系名称解析助手。给定一个“车系/车型名称”，请输出对应的【品牌/厂商】与【车型名】。
+输出 JSON: {"brand":"<string>","model":"<string>"}
 """
 
 # ----------------------------- タイル分割 -----------------------------
@@ -67,47 +53,26 @@ def split_full_image(full_path: Path, out_dir: Path, tile_height: int, overlap: 
 def grab_fullpage_to(url: str, out_dir: Path, viewport=(1380, 2400)) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     full_path = out_dir / "full.jpg"
-
-    MAX_RETRY = 3
-    for attempt in range(1, MAX_RETRY + 1):
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport={"width": viewport[0], "height": viewport[1]},
-                device_scale_factor=2,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36",
-                locale="zh-CN",
-                extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
-            )
-            page = ctx.new_page()
-            page.add_init_script("""
-              try {
-                const style = document.createElement('style');
-                style.textContent = `
-                  * { font-family:
-                      "Noto Sans CJK SC","WenQuanYi Zen Hei","Noto Sans CJK JP",
-                      "Noto Sans","Microsoft YaHei","PingFang SC",sans-serif !important; }
-                `;
-                document.documentElement.appendChild(style);
-              } catch(e){}
-            """)
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=180000)
-                for sel in ["table", ".rank-list", ".content", "body"]:
-                    try:
-                        page.wait_for_selector(sel, state="visible", timeout=5000)
-                        break
-                    except PwTimeout:
-                        pass
-                time.sleep(2.5)
-                page.screenshot(path=str(full_path), full_page=True)
-                browser.close()
-                return full_path
-            except Exception as e:
-                browser.close()
-                if attempt == MAX_RETRY:
-                    raise
-                time.sleep(2)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            viewport={"width": viewport[0], "height": viewport[1]},
+            device_scale_factor=3,  # ★豆腐対策で解像度上げ
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36",
+            locale="zh-CN",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9"},
+        )
+        page = ctx.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=180000)
+            page.wait_for_selector("body", state="visible", timeout=10000)
+            time.sleep(2.5)
+            page.screenshot(path=str(full_path), full_page=True)
+            browser.close()
+            return full_path
+        except Exception:
+            browser.close()
+            raise
 
 # ----------------------------- OpenAI 呼び出し -----------------------------
 def vlm_extract_rows(image_path: Path, model="gpt-4o") -> List[Dict]:
@@ -120,31 +85,52 @@ def vlm_extract_rows(image_path: Path, model="gpt-4o") -> List[Dict]:
             {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"}
         ]}
     ]
-    # messages → input に修正済み
     resp = client.responses.create(model=model, input=msgs, temperature=0)
-    out = resp.output_text
     try:
-        data = json.loads(out)
-        return data["rows"]
+        return json.loads(resp.output_text)["rows"]
     except Exception:
         return []
 
+# ----------------------------- ブランド解決 -----------------------------
+def resolve_brand_via_autohome(name: str) -> Dict[str, str]:
+    """Autohome で検索し、title/pan-breadcrumbからブランドを抜く"""
+    try:
+        search_url = f"https://www.autohome.com.cn/fastsearch?type=3&q={name}"
+        r = requests.get(search_url, timeout=10)
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "lxml")
+        a = soup.find("a", href=re.compile(r"/\d+/"))
+        if not a:
+            return None
+        car_url = "https:" + a["href"] if a["href"].startswith("//") else a["href"]
+        r2 = requests.get(car_url, timeout=10)
+        if r2.status_code != 200:
+            return None
+        soup2 = BeautifulSoup(r2.text, "lxml")
+        title = soup2.find("title")
+        if title:
+            m = re.match(r"(.*?)-(.*?)_.*", title.text.strip())
+            if m:
+                return {"brand": m.group(1), "model": name}
+        return None
+    except Exception:
+        return None
+
 def vlm_split_brand(name: str, model="gpt-4o") -> Dict[str, str]:
+    # まず Autohome から取得
+    r = resolve_brand_via_autohome(name)
+    if r:
+        return r
+    # フォールバックで LLM
     client = OpenAI()
     msgs = [
         {"role": "system", "content": BRAND_PROMPT},
         {"role": "user", "content": name}
     ]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=msgs,
-        temperature=0,
-        max_tokens=64,
-    )
-    out = (resp.choices[0].message.content or "").strip()
+    resp = client.chat.completions.create(model=model, messages=msgs, temperature=0, max_tokens=64)
     try:
-        d = json.loads(out)
-        return d
+        return json.loads(resp.choices[0].message.content.strip())
     except Exception:
         return {"brand": "未知", "model": name}
 
@@ -156,12 +142,6 @@ def write_csv(path: Path, rows: List[Dict]):
         w.writeheader()
         w.writerows(rows)
 
-def read_csv(path: Path) -> List[Dict]:
-    if not path.is_file():
-        return []
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
-
 # ----------------------------- メイン -----------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -169,39 +149,31 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--tile-height", type=int, default=900)
     ap.add_argument("--overlap", type=int, default=120)
-    ap.add_argument("--model", default="gpt-4o")   # ★ デフォルトを gpt-4o に変更
+    ap.add_argument("--model", default="gpt-4o")
     args = ap.parse_args()
 
-    url = args.url
-    out_csv = Path(args.out)
-
     tmp_dir = Path("tiles")
-    full_img = grab_fullpage_to(url, tmp_dir)
+    full_img = grab_fullpage_to(args.url, tmp_dir)
     tiles = split_full_image(full_img, tmp_dir, args.tile_height, args.overlap)
 
     all_rows: List[Dict] = []
-    for i, tile in enumerate(tiles):
+    for tile in tiles:
         rows = vlm_extract_rows(tile, model=args.model)
         for r in rows:
-            rank = r.get("rank")
-            name = r.get("name")
-            count = r.get("count")
-            if not name:
+            if not r.get("name"):
                 continue
-            bm = vlm_split_brand(name, model=args.model)
-            brand = bm.get("brand","未知")
-            model_name = bm.get("model", name)
+            bm = vlm_split_brand(r["name"], model=args.model)
             all_rows.append({
                 "rank_seq": str(len(all_rows)+1),
-                "rank": rank,
-                "name": model_name,
-                "brand": brand,
-                "count": count,
+                "rank": r.get("rank"),
+                "name": r.get("name"),
+                "brand": bm.get("brand","未知"),
+                "count": r.get("count"),
             })
         time.sleep(1.2)
 
-    write_csv(out_csv, all_rows)
-    print(f"[OK] {len(all_rows)} rows -> {out_csv}")
+    write_csv(Path(args.out), all_rows)
+    print(f"[OK] {len(all_rows)} rows -> {args.out}")
 
 if __name__ == "__main__":
     main()
