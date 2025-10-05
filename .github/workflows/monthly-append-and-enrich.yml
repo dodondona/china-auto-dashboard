@@ -1,12 +1,12 @@
-name: Monthly append series_url & enrich brand/series (rank/1, infinite scroll)
+name: Monthly append series_url & enrich brand/series (rank/1 infinite scroll)
 
 on:
   schedule:
-    - cron: '15 0 3 * *'   # JST 09:15 毎月3日（UTC 00:15）
+    - cron: '15 0 3 * *'   # JST 09:15 毎月3日
   workflow_dispatch:
 
 permissions:
-  contents: write   # ← github-actions[bot] で push するために必須
+  contents: write
 
 jobs:
   run:
@@ -27,7 +27,6 @@ jobs:
           pip install playwright requests tqdm openai
           python -m playwright install chromium
 
-      # 先月のCSVを狙う（なければ最新CSVを使用）
       - name: Decide target month (JST -> last full month)
         id: cal
         run: |
@@ -50,27 +49,25 @@ jobs:
           YM='${{ steps.cal.outputs.ym }}'
           RAW="data/autohome_raw_${YM}.csv"
           if [ ! -f "$RAW" ]; then
-            echo "⚠ 指定月の base CSV が見つかりません: $RAW"
+            echo "⚠ 指定月の base CSV 不在: $RAW"
             RAW=$(ls -1t data/autohome_raw_*.csv | head -n 1 || true)
             if [ -z "$RAW" ]; then
-              echo "❌ data/autohome_raw_*.csv がありません"; exit 1
+              echo "❌ data/autohome_raw_*.csv が見つかりません"; exit 1
             fi
-            echo "→ 最新CSVを使用します: $RAW"
+            echo "→ 最新CSVを使用: $RAW"
             YM=$(basename "$RAW" | sed -E 's/^autohome_raw_([0-9]{4}-[0-9]{2}).*/\1/')
             echo "ym=${YM}" >> $GITHUB_OUTPUT
           fi
-
           WITH_SERIES="data/autohome_raw_${YM}_with_series.csv"
           WITH_BRAND="data/autohome_raw_${YM}_with_brand.csv"
-
-          echo "raw=${RAW}"                 >> $GITHUB_OUTPUT
+          echo "raw=${RAW}" >> $GITHUB_OUTPUT
           echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
-          echo "with_brand=${WITH_BRAND}"   >> $GITHUB_OUTPUT
+          echo "with_brand=${WITH_BRAND}" >> $GITHUB_OUTPUT
 
-      # /rank/1 を無限スクロール→HTML一括解析で series_url 生成
+      # ★ここを修正済み（from_web.py に統一）
       - name: Append series_url from /rank/1 (infinite scroll)
         run: |
-          python tools/append_series_url_from_rank.py \
+          python tools/append_series_url_from_web.py \
             --rank-url "https://www.autohome.com.cn/rank/1" \
             --input "${{ steps.paths.outputs.raw }}" \
             --output "${{ steps.paths.outputs.with_series }}" \
@@ -79,10 +76,9 @@ jobs:
             --idle-ms 650 \
             --min-delta 3
 
-      # series_url から <title> を読み、brand/series をJSON出力で抽出
       - name: Enrich brand/series from <title> via LLM
         run: |
-          python tools/append_series_url_from_web.py\
+          python tools/enrich_brand_from_title.py \
             --input "${{ steps.paths.outputs.with_series }}" \
             --output "${{ steps.paths.outputs.with_brand }}" \
             --model "gpt-4o-mini" \
