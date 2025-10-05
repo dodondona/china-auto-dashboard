@@ -1,49 +1,47 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-append_series_url.py (name-driven popup capture)
-- ランキング /rank/1 のカード型UIに対応
-- CSV側の車名列（model_text 等）を手掛かりに画面上の該当テキストをクリック
-- 新しいタブ (popup) を捕まえて遷移先URLを取得し、series_url に正規化して追記
-- #pvareaid やクエリは無視して https://www.autohome.com.cn/<id>/ に丸める
+append_series_url_from_html.py
+
+保存した Autohome ランキング HTML から seriesid / seriesname を抽出し、
+既存CSVの各行に series_url を追記して別名で保存します。
+
+特徴:
+- Playwright不要（クリック/待ち時間ゼロで爆速）
+- "seriesid":"7806","seriesname":"星愿" のような埋め込みを正規表現で抽出
+- さらに保険として appスキーム/autohomeリンク等からも seriesid を抽出
+- CSVとの対応付けは ①名前突合 → ②順番突合 の二段構え
+- 既存列は不変更。末尾に 'series_url' を追加
+
+使い方:
+python tools/append_series_url_from_html.py \
+  --html data/2025最新汽车之家销量榜排行榜-2025年08月-车系月销榜前十名-汽车之家.html \
+  --input data/autohome_raw_2025-09.csv \
+  --output data/autohome_raw_2025-09_with_series.csv \
+  --name-col model_text
 """
 
-import csv, re, sys, time, random, argparse
-from typing import List, Dict, Optional
-from urllib.parse import urljoin
-from playwright.sync_api import (
-    sync_playwright, TimeoutError as PWTimeout, Page, BrowserContext
-)
+import re, csv, argparse, sys
+from typing import List, Dict, Tuple, Optional
+from pathlib import Path
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-)
+def read_text(path: str) -> str:
+    p = Path(path)
+    data = p.read_bytes()
+    # 自動判定（UTF-8前提、BOM許容）
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return data.decode("gb18030", errors="ignore")
 
-# series_id 抽出（さまざまな表記に対応）
-SERIES_ID_PATS = [
-    re.compile(r"/(\d{3,7})(?:/|$)"),
-    re.compile(r"series[-/](\d{3,7})", re.I),
-    re.compile(r"[?&#]seriesid=(\d{3,7})", re.I),
-    re.compile(r"series_(\d{3,7})", re.I),
-]
-
-def extract_series_id(url: str) -> Optional[str]:
-    if not url: return None
-    for pat in SERIES_ID_PATS:
-        m = pat.search(url)
-        if m: return m.group(1)
-    return None
-
-def normalize_series_url(url: str) -> str:
-    sid = extract_series_id(url or "")
-    return f"https://www.autohome.com.cn/{sid}/" if sid else ""
-
-def read_csv(path: str) -> List[Dict[str, str]]:
+def read_csv_rows(path: str) -> List[Dict[str, str]]:
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
-def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
+def write_csv_rows(path: str, rows: List[Dict[str, str]]) -> None:
     if not rows: return
     fields = list(rows[0].keys())
     if "series_url" not in fields:
@@ -52,154 +50,138 @@ def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader(); w.writerows(rows)
 
+# ---------- HTML 解析 ----------
+
+# 埋め込みJSON様データ: ..."seriesid":"7806","seriesname":"星愿"...
+RE_SERIES_PAIR = re.compile(r'"seriesid"\s*:\s*"(\d{3,7})"\s*,\s*"seriesname"\s*:\s*"([^"]+)"')
+# appスキーム等: autohome://car/seriesmain?seriesid=5769
+RE_SERIES_APP = re.compile(r'seriesid\s*=\s*(\d{3,7})', re.I)
+# href 等からの保険: /5769/ や /5769?xxx
+RE_SERIES_PATH = re.compile(r'/(\d{3,7})(?:/|[?#]|")')
+
+def normalize(s: str) -> str:
+    return re.sub(r'\s+', '', (s or "")).lower()
+
+def to_series_url(series_id: str) -> str:
+    return f"https://www.autohome.com.cn/{series_id}/"
+
+def extract_series_from_html(html: str) -> List[Tuple[str, str]]:
+    """
+    HTMLから (series_id, series_name) をページ出現順で返す。
+    まず RE_SERIES_PAIR を使い、見つからない分は他のパターンで補完。
+    """
+    pairs: List[Tuple[str, str]] = []
+
+    # 1) メイン: seriesid/seriesname のペア
+    for sid, sname in RE_SERIES_PAIR.findall(html):
+        pairs.append((sid, sname))
+
+    # 2) もし0件/少数なら、保険: seriesid=1234 / /1234/ から推定（nameは空）
+    if not pairs:
+        # seriesid= の方が確度高いので先
+        sids = RE_SERIES_APP.findall(html)
+        if not sids:
+            sids = RE_SERIES_PATH.findall(html)
+        # 重複除去・順序維持
+        seen = set()
+        for sid in sids:
+            if sid not in seen:
+                seen.add(sid)
+                pairs.append((sid, ""))
+
+    # 去重（同一 series_id を最初の出現だけ残す）
+    seen2 = set()
+    uniq: List[Tuple[str, str]] = []
+    for sid, sname in pairs:
+        if sid not in seen2:
+            seen2.add(sid)
+            uniq.append((sid, sname))
+    return uniq
+
+# ---------- 突合ロジック ----------
+
+def attach_by_name_then_order(
+    csv_rows: List[Dict[str, str]],
+    pairs: List[Tuple[str, str]],
+    name_col: str
+) -> None:
+    """
+    1) 名前完全/部分一致で series_url を付与
+    2) 付かなかった行はページ順で埋める
+    """
+    # name -> index map (正規化)
+    page_names = [normalize(n) for _, n in pairs]
+    page_urls = [to_series_url(sid) for sid, _ in pairs]
+
+    # 1) 名前一致（完全→部分）
+    used = set()
+    for i, row in enumerate(csv_rows):
+        name = normalize(row.get(name_col, ""))
+        url = ""
+        if not name:
+            csv_rows[i]["series_url"] = ""
+            continue
+        # 完全一致
+        for j, pn in enumerate(page_names):
+            if j in used: continue
+            if pn and pn == name:
+                url = page_urls[j]; used.add(j); break
+        # 部分一致
+        if not url:
+            for j, pn in enumerate(page_names):
+                if j in used: continue
+                if pn and (pn in name or name in pn):
+                    url = page_urls[j]; used.add(j); break
+        csv_rows[i]["series_url"] = url  # いったんセット（空の場合も）
+
+    # 2) 順番埋め（残り）
+    k = 0
+    for i, row in enumerate(csv_rows):
+        if row.get("series_url"): continue
+        while k < len(page_urls) and k in used:
+            k += 1
+        if k < len(page_urls):
+            csv_rows[i]["series_url"] = page_urls[k]
+            used.add(k); k += 1
+        else:
+            csv_rows[i]["series_url"] = ""
+
+# ---------- メイン ----------
+
 def detect_name_col(fieldnames: List[str], preferred: Optional[str]) -> str:
     if preferred and preferred in fieldnames:
         return preferred
     for c in ["model_text", "model", "name", "car", "series_name", "title"]:
         if c in fieldnames: return c
-    # 最後の手段：先頭列
     return fieldnames[0]
-
-def scroll_page(page: Page, steps: int = 8, pause: float = 0.25):
-    for _ in range(steps):
-        page.mouse.wheel(0, 1400)
-        page.wait_for_timeout(int(pause * 1000))
-
-def click_and_capture_popup(context: BrowserContext, page: Page, clickable, base_url: str, timeout_ms: int = 12000) -> str:
-    """車名テキストなどをクリック → 新タブURLを取得。失敗時は同タブURLも見る。"""
-    try:
-        clickable.scroll_into_view_if_needed(timeout=timeout_ms)
-    except Exception:
-        pass
-
-    # クリック直前に popup 監視を仕掛ける
-    with context.expect_page() as popup_wait:
-        try:
-            clickable.click(timeout=timeout_ms, force=True)
-        except Exception:
-            # 座標クリック（最終兵器）
-            try:
-                box = clickable.bounding_box()
-                if box:
-                    page.mouse.click(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
-                else:
-                    clickable.click(timeout=timeout_ms, force=True)
-            except Exception:
-                pass
-
-    # 新タブを受け取る（来なければ同タブでURL変化を確認）
-    target_url = ""
-    got_popup = False
-    try:
-        p2 = popup_wait.value
-        got_popup = True
-        p2.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
-        p2.wait_for_load_state("networkidle", timeout=timeout_ms)
-        target_url = p2.url
-        p2.close()
-    except Exception:
-        try:
-            target_url = page.url
-        except Exception:
-            target_url = ""
-
-    # 同タブで変わってしまったら戻す
-    if not got_popup:
-        try:
-            page.go_back(wait_until="load", timeout=timeout_ms)
-        except Exception:
-            page.goto(base_url, wait_until="domcontentloaded")
-
-    return normalize_series_url(target_url)
-
-def find_click_target_for_name(page: Page, name: str):
-    """
-    クリック対象を “名前ベース” で探す。
-    - まず a:has-text("<name>")
-    - なければ get_by_text("<name>")
-    - それでもダメならカードらしき要素（li/div）で has_text してその中の a を優先
-    """
-    name = (name or "").strip()
-    if not name: return None
-
-    # 1) a:has-text
-    loc = page.locator(f'a:has-text("{name}")')
-    if loc.count() > 0:
-        return loc.first
-
-    # 2) get_by_text（Playwrightのテキスト検索）
-    try:
-        loc2 = page.get_by_text(name, exact=False)
-        if loc2.count() > 0:
-            return loc2.first
-    except Exception:
-        pass
-
-    # 3) li/div カード内の a
-    containers = page.locator("li, div")
-    cont = containers.filter(has_text=name)
-    if cont.count() > 0:
-        a_inside = cont.first.locator("a")
-        if a_inside.count() > 0:
-            return a_inside.first
-        return cont.first
-
-    return None
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rank-url", required=True, help="例: https://www.autohome.com.cn/rank/1")
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--name-col", default=None, help="車名列（未指定なら自動推定）")
+    ap.add_argument("--html", required=True, help="保存したランキングHTMLのパス")
+    ap.add_argument("--input", required=True, help="既存CSV（追記元）")
+    ap.add_argument("--output", required=True, help="出力CSV（series_url追加）")
+    ap.add_argument("--name-col", default=None, help="CSVの車名列（未指定なら自動判定）")
     args = ap.parse_args()
 
-    rows = read_csv(args.input)
+    # 入力読み込み
+    rows = read_csv_rows(args.input)
     if not rows:
         print("入力CSVが空です。", file=sys.stderr); sys.exit(1)
-
     name_col = detect_name_col(list(rows[0].keys()), args.name_col)
-    print(f"[*] 使用する車名列: {name_col}")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 1700}
-        )
-        page = context.new_page()
-        page.goto(args.rank_url, wait_until="networkidle", timeout=30000)
-        scroll_page(page, steps=4, pause=0.2)  # 初期ロード促進
+    # HTML解析
+    html = read_text(args.html)
+    pairs = extract_series_from_html(html)
+    if not pairs:
+        print("HTMLから series 情報が抽出できませんでした。", file=sys.stderr); sys.exit(2)
 
-        for i, r in enumerate(rows):
-            name = (r.get(name_col) or "").strip()
-            if not name:
-                rows[i]["series_url"] = ""
-                continue
+    # 突合（名前→順序）
+    attach_by_name_then_order(rows, pairs, name_col=name_col)
 
-            url = ""
-            # 検索→スクロールを繰り返して見つける
-            for _ in range(6):
-                target = find_click_target_for_name(page, name)
-                if target and target.count() > 0:
-                    try:
-                        url = click_and_capture_popup(context, page, target, args.rank_url)
-                    except Exception:
-                        url = ""
-                    if url:
-                        break
-                # まだ見つからない/開けない → もう少しスクロールして再トライ
-                page.mouse.wheel(0, 1400)
-                page.wait_for_timeout(350)
-
-            rows[i]["series_url"] = url
-            print(f"  #{i+1} {name} -> {url or '(未取得)'}")
-            time.sleep(random.uniform(0.06, 0.15))
-
-        context.close(); browser.close()
-
-    write_csv(args.output, rows)
-    print(f"✔ 出力: {args.output}")
+    # 出力
+    write_csv_rows(args.output, rows)
+    print(f"✔ 出力: {args.output}  （{len(rows)}行 / HTML抽出 {len(pairs)}件）")
+    print(f"  使用した車名列: {name_col}")
 
 if __name__ == "__main__":
     main()
