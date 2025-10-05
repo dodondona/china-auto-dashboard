@@ -2,29 +2,66 @@
 # -*- coding: utf-8 -*-
 """
 append_series_url.py
-Autohomeのランキングページから各車種のリンク（series URL）を取得し、
-既存CSVに 'series_url' 列を追記するだけのユーティリティ。
+Autohome ランキングページから車種ごとのリンクを取得して
+CSV に series_url 列を追加する。
 
-- 元のCSVは変更しない（別名で保存）
-- 動的HTML対応（Playwright使用）
+- href が無い場合でも、Playwrightでクリックして遷移URLを確定。
+- 同タブ遷移・新タブ・SPA すべて対応。
+- 元CSVは読み取り専用。出力は別ファイル。
 """
 
 import csv, re, sys, time, random, argparse
-from urllib.parse import urljoin, urlparse
-from pathlib import Path
+from urllib.parse import urljoin
 from typing import List, Dict, Optional
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Page, BrowserContext
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+ROW_SELECTOR = "table.rank-list tbody tr, table tbody tr"
 
-ROW_SELECTORS = ["table.rank-list tbody tr", "table tbody tr"]
-NAME_LINK_SELECTORS = ["td.name a", "td a", "a"]
+def normalize_series_url(url: str) -> str:
+    m = re.search(r"https?://www\.autohome\.com\.cn/(\d{3,7})(?:/|$)", url or "")
+    return f"https://www.autohome.com.cn/{m.group(1)}/" if m else ""
 
-def read_csv(path: str) -> List[Dict[str, str]]:
+def click_and_capture_series_url(context: BrowserContext, page: Page, clickable, base_url: str, timeout_ms: int = 15000) -> str:
+    """hrefが無い場合に実際にクリックして遷移URLを得る"""
+    try:
+        clickable.scroll_into_view_if_needed(timeout=timeout_ms)
+    except Exception:
+        pass
+
+    target_url = ""
+    got_popup = False
+    popup_wait = context.expect_page()
+
+    try:
+        with page.expect_navigation(wait_until="load", timeout=timeout_ms):
+            clickable.click(timeout=timeout_ms)
+        target_url = page.url
+    except Exception:
+        # 新タブパターン
+        try:
+            popup = popup_wait.value
+            got_popup = True
+            popup.wait_for_load_state("networkidle", timeout=timeout_ms)
+            target_url = popup.url
+            popup.close()
+        except Exception:
+            target_url = page.url
+
+    # 同タブなら戻る
+    if not got_popup:
+        try:
+            page.go_back(wait_until="load", timeout=timeout_ms)
+        except Exception:
+            page.goto(base_url, wait_until="domcontentloaded")
+
+    return normalize_series_url(target_url)
+
+def read_csv_rows(path: str) -> List[Dict[str, str]]:
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
-def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
+def write_csv_rows(path: str, rows: List[Dict[str, str]]) -> None:
     if not rows: return
     fields = list(rows[0].keys())
     if "series_url" not in fields:
@@ -34,56 +71,6 @@ def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
         w.writeheader()
         w.writerows(rows)
 
-def normalize_url(url: str) -> str:
-    if not url: return ""
-    m = re.search(r"/(\d{3,7})/", url)
-    if not m:
-        m = re.search(r"/(\d{3,7})(?:$|\?)", url)
-    if m:
-        return f"https://www.autohome.com.cn/{m.group(1)}/"
-    pr = urlparse(url)
-    return f"{pr.scheme}://{pr.netloc}{pr.path}"
-
-def fetch_links(rank_url: str, max_rows: Optional[int] = None) -> List[Dict[str, str]]:
-    result = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=USER_AGENT)
-        page = context.new_page()
-        page.goto(rank_url, wait_until="networkidle")
-        rows = None
-        for sel in ROW_SELECTORS:
-            try:
-                page.wait_for_selector(sel, timeout=15000)
-                loc = page.locator(sel)
-                if loc.count() > 0:
-                    rows = loc
-                    break
-            except PWTimeout:
-                continue
-        if not rows:
-            raise RuntimeError("行が見つかりません。セレクタ要調整。")
-
-        n = rows.count() if max_rows is None else min(max_rows, rows.count())
-        for i in range(n):
-            row = rows.nth(i)
-            link, text = "", ""
-            for a_sel in NAME_LINK_SELECTORS:
-                a = row.locator(a_sel).first
-                try:
-                    href = a.get_attribute("href")
-                    tx = a.inner_text().strip()
-                except Exception:
-                    continue
-                if href:
-                    link = urljoin(rank_url, href)
-                    text = tx
-                    break
-            result.append({"href": link or "", "text": text})
-            time.sleep(random.uniform(0.05, 0.15))
-        context.close(); browser.close()
-    return result
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rank-url", required=True)
@@ -91,14 +78,53 @@ def main():
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
-    rows = read_csv(args.input)
-    links = fetch_links(args.rank_url, len(rows))
+    rows = read_csv_rows(args.input)
+    print(f"[1/3] 読み込み: {len(rows)} 行")
 
-    for i, row in enumerate(rows):
-        href = links[i]["href"] if i < len(links) else ""
-        row["series_url"] = normalize_url(href)
-    write_csv(args.output, rows)
-    print(f"✅ series_url追記完了: {args.output}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width":1280,"height":1600}
+        )
+        page = context.new_page()
+        page.goto(args.rank_url, wait_until="networkidle", timeout=30000)
+
+        all_rows = page.locator(ROW_SELECTOR)
+        n = min(all_rows.count(), len(rows))
+        print(f"[2/3] ランキング行検出: {n}件")
+
+        for i in range(n):
+            r = all_rows.nth(i)
+            href = ""
+            text = ""
+            a = r.locator("td.name a").first
+            try:
+                if a.count() > 0:
+                    href = a.get_attribute("href")
+                    text = a.inner_text().strip()
+            except Exception:
+                pass
+
+            if href:
+                full = urljoin(args.rank_url, href)
+                rows[i]["series_url"] = normalize_series_url(full)
+            else:
+                clickable = a if a.count() > 0 else r.locator("td.name").first
+                try:
+                    url = click_and_capture_series_url(context, page, clickable, args.rank_url)
+                    rows[i]["series_url"] = url
+                    print(f"  → #{i+1}: click取得 {url}")
+                except Exception as e:
+                    print(f"  × #{i+1} 取得失敗: {e}")
+                    rows[i]["series_url"] = ""
+
+            time.sleep(random.uniform(0.1, 0.3))
+
+        context.close(); browser.close()
+
+    write_csv_rows(args.output, rows)
+    print(f"[3/3] 出力完了: {args.output}")
 
 if __name__ == "__main__":
     main()
