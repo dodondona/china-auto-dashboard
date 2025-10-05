@@ -73,9 +73,10 @@ jobs:
       - name: Append series_url from ranking page
         run: |
           python tools/append_series_url.py \
-            --rank-url "${{ steps.paths.outputs.rank_url }}" \
-            --input "${{ steps.paths.outputs.raw }}" \
-            --output "${{ steps.paths.outputs.with_series }}"
+           --rank-url "https://www.autohome.com.cn/rank/1" \
+           --input "${{ steps.paths.outputs.raw }}" \
+           --output "${{ steps.paths.outputs.with_series }}" \
+           --name-col "model_text"   # ← CSVの車名列名に合わせて
 
       - name: Enrich brand/series from <title> via LLM
         run: |
