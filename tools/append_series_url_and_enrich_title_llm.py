@@ -4,11 +4,11 @@
 append_series_url_and_enrich_title_llm.py
 -----------------------------------------------------
 - autohome.com.cn/rank/1 を Playwright で開く
-- ランキング各行を DOM から列挙し、各行の button[data-series-id] から series_url を作る
-- rank は data-rank-num を優先。無い/読めない場合は「行の出現順」で補完
-- 各 series_url を開いて <title> を取得
-- title を LLM で解析し brand / model を推定
-- rank / series_url / count / title / brand / model を CSV 出力
+- ランキング各行を DOM から列挙し、button[data-series-id] から series_url を生成
+- rank は data-rank-num があればそれを、無ければ「行の見た目の順位」や出現順で補完
+- 各 series_url を開き <title> を取得
+- title を LLM で解析して brand/model を推定
+- rank / series_url / count / title / brand / model を CSV へ
 
 依存:
   pip install playwright openai pandas
@@ -18,7 +18,6 @@ append_series_url_and_enrich_title_llm.py
 import os
 import re
 import json
-import time
 import argparse
 from pathlib import Path
 
@@ -53,27 +52,29 @@ def goto_with_retries(page, url: str, timeout_ms: int = 120000):
             page.wait_for_timeout(1000)
     raise last_err or RuntimeError("Failed to open page")
 
-def wait_rank_dom_ready(page, timeout_ms=60000):
-    """[data-rank-num] を待つ（SPA対策）。"""
+def wait_rank_dom_ready(page, timeout_ms=120000):
+    """
+    ランキングの行が現れるまで待つ。
+    data-rank-num が無い構成もあるので、複数セレクタで待機。
+    """
     try:
-        page.wait_for_selector("[data-rank-num]", timeout=timeout_ms)
-    except PWTimeout:
-        # 一部構成で描画が遅い場合の緩和：少しスクロールしながら待つ
-        for _ in range(10):
-            page.mouse.wheel(0, 20000)
-            page.wait_for_timeout(800)
-            if page.query_selector("[data-rank-num]"):
-                return
-        raise
+        page.wait_for_selector("div.rank-num, em.rank, [data-rank-num], button[data-series-id]",
+                               timeout=timeout_ms, state="visible")
+    except PWTimeout as e:
+        # デバッグ用にHTMLを保存
+        Path("data").mkdir(parents=True, exist_ok=True)
+        with open("data/debug_rankpage_error.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        raise e
 
-def scroll_to_bottom(page, idle_ms=650, max_rounds=40):
-    """末尾までロード（無限スクロール対策）。"""
+def scroll_to_bottom(page, idle_ms=700, max_rounds=50):
+    """無限スクロールの末尾まで読む。"""
     prev = -1
     stable = 0
     for _ in range(max_rounds):
         page.mouse.wheel(0, 24000)
         page.wait_for_timeout(idle_ms)
-        n = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
+        n = page.evaluate("() => document.querySelectorAll('button[data-series-id]').length")
         if n == prev:
             stable += 1
         else:
@@ -89,52 +90,73 @@ def safe_int(x):
     except Exception:
         return None
 
+def nearest_row_container(el):
+    """行コンテナっぽい上位要素を返す（セレクタ揺れ対策）。"""
+    c = el
+    for _ in range(6):
+        if c is None:
+            break
+        # 行内に見える典型的要素があればここを行とみなす
+        if c.query_selector("button[data-series-id]") and (
+            c.get_attribute("data-rank-num") or
+            c.query_selector("div.rank-num, em.rank") or
+            c.query_selector(".tw-text-lg.tw-font-medium")
+        ):
+            return c
+        c = c.evaluate_handle("n => n.parentElement").as_element()
+    return el
+
+def parse_rank_from_container(container):
+    """data-rank-num > 可視の順位 > None の順に取得。"""
+    attr = container.get_attribute("data-rank-num")
+    rk = safe_int(attr)
+    if rk is not None:
+        return rk
+    badge = container.query_selector("div.rank-num, em.rank")
+    if badge:
+        txt = (badge.inner_text() or "").strip()
+        rk = safe_int(re.sub(r"[^\d]", "", txt))
+        if rk is not None:
+            return rk
+    return None
+
+def parse_count_from_container(container):
+    txt = (container.inner_text() or "").strip()
+    m = re.search(r"(\d{4,6})\s*车系销量", txt)
+    return safe_int(m.group(1)) if m else None
+
 def extract_rank_and_links(page):
     """
-    ランキング行を DOM から列挙し、rank / series_url / count を抽出。
-    - rank: data-rank-num を優先、無ければ出現順で補完
-    - series_url: button[data-series-id] → https://www.autohome.com.cn/{id}/
-    - count: 行テキストから (\d{4,6}) 车系销量 を拾う
+    行を列挙し、rank / series_url / count を抽出。
+    - ラインの基準は button[data-series-id]
+    - rankは data-rank-num → 表示順位 → 出現順
     """
+    buttons = page.query_selector_all("button[data-series-id]") or []
     rows = []
-    items = page.query_selector_all("[data-rank-num]")
-    if not items:
-        return rows
-
-    for idx, el in enumerate(items, start=1):
-        # rank
-        rank_attr = el.get_attribute("data-rank-num")
-        rank = safe_int(rank_attr) or idx
-
-        # series id → url
-        btn = el.query_selector("button[data-series-id]")
-        sid = btn.get_attribute("data-series-id") if btn else None
+    for idx, btn in enumerate(buttons, start=1):
+        sid = btn.get_attribute("data-series-id")
         series_url = f"https://www.autohome.com.cn/{sid}/" if sid else None
-
-        # count
-        text = el.inner_text() or ""
-        m = re.search(r"(\d{4,6})\s*车系销量", text)
-        count = safe_int(m.group(1)) if m else None
-
-        rows.append(
-            {"rank": rank, "series_url": series_url, "count": count}
-        )
+        cont = nearest_row_container(btn)
+        rk = parse_rank_from_container(cont)
+        if rk is None:
+            rk = idx
+        count = parse_count_from_container(cont)
+        rows.append({"rank": rk, "series_url": series_url, "count": count})
     return rows
 
 def get_title_from_series_url(page, url):
-    """個別車系ページの <title> を取得。失敗時は空文字。"""
+    """個別車系ページの<title>を取得。失敗時は空文字。"""
     if not url:
         return ""
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=25000)
-        # SPAページで title が遅れることがあるので短く待つ
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(400)
         return (page.title() or "").strip()
     except Exception:
         return ""
 
 def llm_parse_brand_model(client, model_name, title):
-    """LLMにタイトルを渡して brand/model を抽出。必ずキーを返す。"""
+    """LLMにタイトルを渡して brand/model を抽出。"""
     if not title:
         return {"brand": "", "model": ""}
     try:
@@ -148,13 +170,12 @@ def llm_parse_brand_model(client, model_name, title):
             max_tokens=200,
         )
         out = (resp.choices[0].message.content or "").strip()
-
-        # JSON 抽出（寛容に）
         m = re.search(r"\{.*\}", out, re.S)
         data = json.loads(m.group(0)) if m else {}
-        brand = (data.get("brand") or "").strip()
-        model = (data.get("model") or "").strip()
-        return {"brand": brand, "model": model}
+        return {
+            "brand": (data.get("brand") or "").strip(),
+            "model": (data.get("model") or "").strip(),
+        }
     except Exception:
         return {"brand": "", "model": ""}
 
@@ -171,7 +192,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx = browser.new_context(
             user_agent=UA_MOBILE,
             viewport={"width": 480, "height": 960},
@@ -180,59 +201,47 @@ def main():
         )
         page = ctx.new_page()
 
-        # ランキングページを開く
+        # ランキングページ
         print(f"🌐 Loading {args.rank_url}")
         goto_with_retries(page, args.rank_url, timeout_ms=120000)
-        # ランクDOMが現れるまで待つ（重要）
-        wait_rank_dom_ready(page, timeout_ms=60000)
-        # 全部読み込む
-        n = scroll_to_bottom(page)
-        print(f"🧩 detected rows: {n}")
+        wait_rank_dom_ready(page, timeout_ms=120000)
+        total = scroll_to_bottom(page)
+        print(f"🧩 detected buttons(data-series-id): {total}")
 
-        # rank / series_url / count を抽出（リンク基準）
         base_rows = extract_rank_and_links(page)
-        # 万が一空なら、見た順でダミー採番しておく
         if not base_rows:
+            # デバッグダンプ
+            Path("data").mkdir(parents=True, exist_ok=True)
+            with open("data/debug_rankpage_empty.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            # フェイルセーフ（空でもrankだけ採番）
             items = page.query_selector_all("[data-rank-num]") or []
             base_rows = [{"rank": i, "series_url": None, "count": None} for i, _ in enumerate(items, start=1)]
 
-        # seriesページの title を収集
+        # 各 series_url の <title> 取得
         print("🔎 Fetching <title> from series_url ...")
         subset = sorted(base_rows, key=lambda r: r["rank"])[: args.max_series]
         for r in subset:
             r["title"] = get_title_from_series_url(page, r.get("series_url"))
-            # ごく短い間隔でアクセス（過負荷回避）
             page.wait_for_timeout(250)
 
         browser.close()
 
-    # LLMで brand/model を解析
+    # LLM で brand/model を解析
     print("🤖 Parsing brand/model via LLM...")
     for r in subset:
-        bm = llm_parse_brand_model(client, args.model, r.get("title", ""))
-        r.update(bm)
+        r.update(llm_parse_brand_model(client, args.model, r.get("title", "")))
 
-    # ---- ここから堅牢化：rank 列の保証と安定ソート ----
-    # 万一不正があっても rank を必ず持たせる
+    # rank列の保証と安定ソート
     rows_fixed = []
-    auto = 1
-    for r in subset:
-        rk = safe_int(r.get("rank"))
-        if rk is None:
-            rk = auto
+    for i, r in enumerate(subset, start=1):
+        rk = safe_int(r.get("rank")) or i
         rows_fixed.append({**r, "rank": rk})
-        auto += 1
-
     df = pd.DataFrame(rows_fixed)
-
-    # rank 列が無い/空の場合の最終ガード
     if "rank" not in df.columns or df["rank"].isna().all():
-        print("⚠️ rank 列を補完します（出現順）")
         df["rank"] = range(1, len(df) + 1)
+    df = df.sort_values("rank").reset_index(drop=True)
 
-    df = df.sort_values(by="rank", ascending=True).reset_index(drop=True)
-
-    # 保存
     df.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"✅ Saved: {out}  (rows={len(df)})")
 
