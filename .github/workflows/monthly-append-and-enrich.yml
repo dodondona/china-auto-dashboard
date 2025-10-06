@@ -34,16 +34,37 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # フォールバック用に OpenCC を追加（requirements.txt へ入れてもOK）
-          pip install opencc-python-reimplemented
+          # ここで追加分（bs4, opencc, openai など）も確実に入れる
+          pip install beautifulsoup4 opencc-python-reimplemented openai
 
-      # （ここはあなたの現行の rank 抽出・series_url 付与・title 解析 LLМ のステップ）
-      # 例）
+      # 中国語フォント（必要なら）
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
+          sudo fc-cache -fv
+
+      # Playwright（必要なら）
+      - name: Install Playwright Chromium (if needed)
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          try:
+            import playwright  # noqa
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+          except Exception:
+            pass
+          PY
+
+      # 入出力パスの解決（最新 raw を採用）
       - name: Resolve paths
         id: paths
         shell: bash
         run: |
           RAW=$(ls -1t data/autohome_raw_*.csv | head -n 1)
+          if [ -z "$RAW" ]; then
+            echo "❌ data/autohome_raw_*.csv が見つかりません"; exit 1
+          fi
           YM=$(basename "$RAW" | sed -E 's/^autohome_raw_([0-9]{4}-[0-9]{2}).*/\1/')
           echo "ym=$YM" >> $GITHUB_OUTPUT
           echo "raw=$RAW" >> $GITHUB_OUTPUT
@@ -51,9 +72,32 @@ jobs:
           echo "with_brand=data/autohome_raw_${YM}_with_brand.csv" >> $GITHUB_OUTPUT
           echo "with_brand_ja=data/autohome_raw_${YM}_with_brand_ja.csv" >> $GITHUB_OUTPUT
 
-      # …中略… Append series_url, Enrich brand/model from <title> via LLM まで既存どおり…
+      # rank/1 スクロール→ series_url 付与（あなたの既存スクリプト）
+      - name: Append series_url from /rank/1 (Playwright)
+        run: |
+          python tools/append_series_url_from_web.playwright_full.py \
+            --rank-url https://www.autohome.com.cn/rank/1 \
+            --input  "${{ steps.paths.outputs.raw }}" \
+            --output "${{ steps.paths.outputs.with_series }}" \
+            --name-col model \
+            --max-rounds 30 \
+            --idle-ms 650
 
-      - name: Translate brand/model to Japanese (LLM→fallback)
+      # <title> から brand/model を埋める（あなたの既存）
+      - name: Enrich brand/model from <title> via LLM
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/enrich_brand_from_title.py \
+            --input  "${{ steps.paths.outputs.with_series }}" \
+            --output "${{ steps.paths.outputs.with_brand }}" \
+            --model gpt-4o-mini \
+            --conf-threshold 0.7
+
+      # 日本語列の付与（新規スクリプト）
+      - name: Translate brand/model to Japanese (LLM → fallback + JP-brands katakana)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python tools/translate_brand_model_ja.py \
             --input  "${{ steps.paths.outputs.with_brand }}" \
@@ -64,19 +108,18 @@ jobs:
         run: |
           echo "== data =="
           ls -lh data | sed -e 's/^/  /'
-          echo "== head translated =="
+          echo "== preview (brand/model → brand_ja/model_ja) =="
           python - <<'PY'
-import pandas as pd
-import os
-p = os.environ.get("WITH_BRAND_JA","${{ steps.paths.outputs.with_brand_ja }}")
+import os, pandas as pd
+p = "${{ steps.paths.outputs.with_brand_ja }}"
 df = pd.read_csv(p)
-print(df[['brand','model','brand_ja','model_ja']].head(15).to_string(index=False))
+print(df[['rank','brand','model','brand_ja','model_ja']].head(20).to_string(index=False))
 PY
 
       - name: Commit artifacts
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ steps.paths.outputs.with_brand_ja }}" || true
-          git commit -m "translate brand/model to Japanese: ${{ steps.paths.outputs.ym }}" || echo "Nothing to commit"
+          git add "${{ steps.paths.outputs.with_series }}" "${{ steps.paths.outputs.with_brand }}" "${{ steps.paths.outputs.with_brand_ja }}" || true
+          git commit -m "monthly enrich+translate: ${{ steps.paths.outputs.ym }}" || echo "Nothing to commit"
           git push
