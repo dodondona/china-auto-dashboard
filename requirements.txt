@@ -3,3 +3,6 @@ pillow
 playwright
 google-generativeai>=0.7.2  # ← Geminiを使うときだけ参照されます
 pandas
+beautifulsoup4>=4.12.3
+requests>=2.32.0
+lxml>=5.2.1         # 任意：パーサ高速化/堅牢化
