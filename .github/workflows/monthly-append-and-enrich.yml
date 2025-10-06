@@ -1,4 +1,4 @@
-name: Monthly append series_url & enrich brand/series (rank/1 + VLM fallback)
+name: Monthly rank extract & enrich via LLM (rank/1)
 
 on:
   schedule:
@@ -30,101 +30,23 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install playwright openai pandas
+          playwright install chromium
 
-      - name: Install CJK fonts
+      - name: Extract & enrich rank list
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei fonts-wqy-microhei
-          sudo fc-cache -fv
+          python tools/append_series_url_and_enrich_title_llm.py \
+            --rank-url "https://www.autohome.com.cn/rank/1" \
+            --output "data/autohome_raw_$(date +'%Y-%m')_with_brand.csv" \
+            --model "gpt-4o-mini"
 
-      - name: Install Playwright Chromium
-        run: |
-          python -m playwright install chromium
-
-      # 入出力ファイルを自動判定
-      - name: Resolve paths
-        id: paths
-        shell: bash
-        run: |
-          RAW=$(ls -1t data/autohome_raw_*.csv | head -n 1 || true)
-          if [ -z "$RAW" ]; then
-            echo "❌ data/autohome_raw_*.csv が見つかりません"; exit 1
-          fi
-          YM=$(basename "$RAW" | sed -E 's/^autohome_raw_([0-9]{4}-[0-9]{2}).*/\1/')
-          echo "→ 最新CSV: $RAW"
-          WITH_SERIES="data/autohome_raw_${YM}_with_series.csv"
-          WITH_BRAND="data/autohome_raw_${YM}_with_brand.csv"
-          VLMFIX="data/autohome_rank_${YM}_vlmfix.csv"
-
-          echo "ym=${YM}" >> $GITHUB_OUTPUT
-          echo "raw=${RAW}" >> $GITHUB_OUTPUT
-          echo "with_series=${WITH_SERIES}" >> $GITHUB_OUTPUT
-          echo "with_brand=${WITH_BRAND}" >> $GITHUB_OUTPUT
-          echo "vlmfix=${VLMFIX}" >> $GITHUB_OUTPUT
-
-      # rank/1 から series_url を補完（Playwright DOMスクロール）
-      - name: Append series_url from /rank/1 (infinite scroll)
-        run: |
-          python tools/append_series_url_from_web.force_dom.py \
-            --rank-url https://www.autohome.com.cn/rank/1 \
-            --input "${{ steps.paths.outputs.raw }}" \
-            --output "${{ steps.paths.outputs.with_series }}" \
-            --name-col model \
-            --max-rounds 30 \
-            --idle-ms 650 \
-            --min-delta 3
-
-      # brand/series 情報補完（LLMタイトル解析）
-      - name: Enrich brand/series from <title> via LLM
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python tools/enrich_brand_from_title.py \
-            --input "${{ steps.paths.outputs.with_series }}" \
-            --output "${{ steps.paths.outputs.with_brand }}" \
-            --model gpt-4o-mini \
-            --conf-threshold 0.7
-
-      # 🔹 VLM による画像ベース補正（rank番号＋車名読み取り）
-      - name: Fix misalignment via VLM (from fullpage tiles; DOM非依存)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python tools/vlm_rank_reader_tiles.py \
-            --url https://www.autohome.com.cn/rank/1 \
-            --out "${{ steps.paths.outputs.vlmfix }}" \
-            --model gpt-4o-mini
-
-          python - <<'PY'
-          import pandas as pd
-          vlm = pd.read_csv("${{ steps.paths.outputs.vlmfix }}")      # rank,brand,model,count
-          df  = pd.read_csv("${{ steps.paths.outputs.with_brand }}")  # 既存 with_brand.csv
-          df = df.set_index("rank")
-          for rk, row in vlm.set_index("rank").iterrows():
-              mv = str(row.get("model") or "").strip()
-              if mv and rk in df.index:
-                  df.at[rk, "model"] = mv
-          df.reset_index(inplace=True)
-          df.to_csv("${{ steps.paths.outputs.with_brand }}", index=False, encoding="utf-8-sig")
-          print("✅ with_brand updated by VLM (tiles)")
-          PY
-
-      - name: List outputs before commit
-        run: |
-          echo "== ls -lh data =="
-          ls -lh data | sed -e 's/^/  /'
-          echo "== git status -s =="
-          git status -s
-
-      - name: Commit artifacts
+      - name: Commit CSV
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/*.csv || true
-          git status -s
-          git commit -m "monthly enrich + VLM fix: ${{ steps.paths.outputs.ym }}" || echo "Nothing to commit"
+          git add data/autohome_raw_*_with_brand.csv || true
+          git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "Nothing to commit"
           git push
