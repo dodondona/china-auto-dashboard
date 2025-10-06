@@ -1,200 +1,202 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import argparse, json, os, re, time, hashlib
-from pathlib import Path
-import pandas as pd
-from openai import OpenAI
+"""
+translate_brand_model_ja.py
 
-# 簡体→日本語漢字の近似（フォールバック）
-try:
-    from opencc import OpenCC
-    cc = OpenCC('s2tjp')
-except Exception:
-    cc = None
+中国語のブランド/車種名を「グローバル名優先 → 例外はカタカナ → それ以外は原文」
+のルールで日本語列を付与する軽量スクリプト。
 
-def norm_space(s: str) -> str:
-    return re.sub(r'\s+', ' ', s or '').strip()
+入出力:
+  - ディレクトリ内の CSV から最新のもの（パターン指定で複数のうち最終更新が新しい）を選び、
+    brand_ja / model_ja 列を追加して別名で保存します。
+  - 既存列名は保持します。未知値は元の値を温存します。
 
-# 👉 ここがコア：最小限の「カタカナ優先ルール」
-JP_BRAND_CANON = {
-    # brand_ja 正規化候補
-    "トヨタ": {"トヨタ","Toyota","TOYOTA"},
-    "ホンダ": {"ホンダ","Honda","HONDA"},
-    "日産":   {"日産","Nissan","NISSAN"},
-}
-# モデル名の「英語グローバル名 → カタカナ」最小セット
-JP_MODEL_KATA = {
-    # Nissan
-    "Sylphy": "シルフィ",
-    "Serena": "セレナ",
-    "X-Trail": "エクストレイル",
-    "March": "マーチ",
-    # Honda
-    "Accord": "アコード",
-    "Civic": "シビック",
-    "Fit": "フィット",
-    "Vezel": "ヴェゼル",
-    # Toyota
-    "Camry": "カムリ",
-    "Corolla": "カローラ",
-    "Corolla Cross": "カローラクロス",
-    "Yaris": "ヤリス",
-    "Alphard": "アルファード",
-    "Voxy": "ヴォクシー",
-    "Noah": "ノア",
-    "Crown": "クラウン",
-    "Land Cruiser": "ランドクルーザー",
-    "Land Cruiser Prado": "ランドクルーザープラド",
-    "RAV4": "RAV4",  # これのみ英記が一般的
-}
+想定カラム:
+  - brand / model （存在しない場合は大小文字ゆらぎを吸収します）
 
-# brandが日本メーカーかどうかチェック
-def is_jp_brand(brand_ja: str) -> bool:
-    b = norm_space(brand_ja)
-    for k, variants in JP_BRAND_CANON.items():
-        if b in variants or b == k:
-            return True
-    return b in {"トヨタ","ホンダ","日産"}
+使い方例:
+  python scripts/translate_brand_model_ja.py \
+    --inp data --pattern "autohome_raw_*.csv" --out-suffix "_ja"
 
-def kata_override(brand_ja: str, model_en: str) -> str:
-    """日本メーカーの場合、英語モデル名の一部をカタカナに置換（最小ルール）"""
-    if not is_jp_brand(brand_ja):
-        return model_en
-    m = norm_space(model_en)
-    # 最長一致を先に
-    for key in sorted(JP_MODEL_KATA.keys(), key=len, reverse=True):
-        if key.lower() == m.lower():
-            return JP_MODEL_KATA[key]
-    return m
-
-PROMPT = """あなたは自動車名の正規化アシスタントです。以下の制約で出力してください。
-
-【目的】
-- 入力は中国サイトから得た「ブランド名」「モデル名」「ページタイトル」です。
-- 出力は JSON のみで、キーは brand_ja と model_ja です。
-
-【変換ルール】
-1) モデル名は「グローバル正式名称（英語）」が一般に存在するならそれを採用。
-   例: 海豹→Seal, 海豚→Dolphin, 海鸥→Seagull, 元PLUS→Atto 3, 轩逸→Sylphy, 凯美瑞→Camry 等
-2) 見つからない場合のみ、原語の簡体字を「日本語の漢字体系に近い字形」で返す。
-3) ブランド名は一般的な日本語表記（カタカナ or 英文既成社名）を優先。
-   例: BYD, テスラ, フォルクスワーゲン, トヨタ, ホンダ, 日産, メルセデス・ベンツ, BMW 等
-4) 余計な語や注釈は一切つけず、厳密に JSON だけを返す。
-
-【入力】
-brand(raw): {brand}
-model(raw): {model}
-title: {title}
-
-【出力】
-{{"brand_ja":"...","model_ja":"..."}}
+依存:
+  pandas, unidecode, opencc-python-reimplemented
 """
 
-def llm_translate(client: OpenAI, model: str, brand: str, model_name: str, title: str) -> dict:
-    prompt = PROMPT.format(brand=brand, model=model_name, title=title)
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": "Return ONLY JSON with keys brand_ja and model_ja."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=120,
-        )
-        txt = resp.choices[0].message.content.strip()
-        m = re.search(r'\{.*\}', txt, flags=re.S)
-        if not m:
-            return {}
-        obj = json.loads(m.group(0))
-        return {
-            "brand_ja": norm_space(obj.get("brand_ja", "")),
-            "model_ja": norm_space(obj.get("model_ja", "")),
-        }
-    except Exception:
-        return {}
+import argparse
+import glob
+import os
+import re
+import sys
+from datetime import datetime
 
-def fallback_jp(text: str) -> str:
-    t = norm_space(text)
-    if not t:
-        return t
-    if re.fullmatch(r'[A-Za-z0-9\-\s\+\.]+', t):
-        return t
-    if cc:
+import pandas as pd
+from unidecode import unidecode
+try:
+    from opencc import OpenCC
+    _CC = OpenCC('s2tjp')  # 簡体→日本語向け繁体（近似）
+except Exception:
+    _CC = None  # なくても動く（原文のままにする）
+
+# --- 1) ブランドの中国語 → グローバル英語名 ---
+BRAND_CN_TO_GLOBAL = {
+    "比亚迪": "BYD",
+    "丰田": "Toyota",
+    "一汽丰田": "Toyota",
+    "广汽丰田": "Toyota",
+    "本田": "Honda",
+    "东风本田": "Honda",
+    "广汽本田": "Honda",
+    "日产": "Nissan",
+    "东风日产": "Nissan",
+    "大众": "Volkswagen",
+    "上汽大众": "Volkswagen",
+    "一汽-大众": "Volkswagen",
+    "别克": "Buick",
+    "雪佛兰": "Chevrolet",
+    "宝马": "BMW",
+    "奔驰": "Mercedes-Benz",
+    "奥迪": "Audi",
+    "保时捷": "Porsche",
+    "理想": "Li Auto",
+    "蔚来": "NIO",
+    "小鹏": "Xpeng",
+    "吉利": "Geely",
+    "长安": "Changan",
+    "奇瑞": "Chery",
+    "红旗": "Hongqi",
+    "问界": "AITO",
+    "华为": "Huawei",  # 製品ブランドとして
+    "极氪": "Zeekr",
+    "极狐": "Arcfox",
+    "腾势": "DENZA",
+    "哪吒": "Nezha",
+    "小米": "Xiaomi",
+}
+
+# --- 2) 車種の中国語 → グローバル英語名（最小限・安全寄り） ---
+MODEL_CN_TO_GLOBAL = {
+    # 日系（確度高）
+    "轩逸": "Sylphy",
+    "卡罗拉": "Corolla",
+    "凯美瑞": "Camry",
+    "雅阁": "Accord",
+    "思域": "Civic",
+    "天籁": "Altima",
+    # BYD 系（直訳英語が定着）
+    "海狮": "Sea Lion",
+    "海豹": "Seal",
+    "海豚": "Dolphin",
+    "汉": "Han",
+    "秦": "Qin",
+    "宋": "Song",
+    "唐": "Tang",
+    "元": "Yuan",
+    # 汎用的に見かけるもの
+    "途观": "Tiguan",
+    "帕萨特": "Passat",
+    "迈腾": "Magotan",
+    "奥迪A4L": "A4L",
+    "奥迪A6L": "A6L",
+}
+
+# --- 3) 「グローバル英語でもカタカナで出したい」例外 ---
+GLOBAL_EN_TO_KATA = {
+    "Sylphy": "シルフィ",
+    "Accord": "アコード",
+    "Camry": "カムリ",
+    # 必要に応じて追加してください
+}
+
+LATIN_RE = re.compile(r"^[A-Za-z0-9\s\-\+\/\.]+$")
+
+
+def prefer_global_brand(brand_raw: str) -> str:
+    """ブランドはグローバル英語優先、なければ原文（必要なら簡→日繁変換）。"""
+    if not isinstance(brand_raw, str):
+        return brand_raw
+    brand_raw = brand_raw.strip()
+    if brand_raw in BRAND_CN_TO_GLOBAL:
+        return BRAND_CN_TO_GLOBAL[brand_raw]
+    # すでにラテン文字ならそのまま
+    if LATIN_RE.match(brand_raw):
+        return brand_raw
+    # 可能なら簡→日繁（厳密ではないため“参考程度”）
+    if _CC:
         try:
-            return norm_space(cc.convert(t))
+            return _CC.convert(brand_raw)
         except Exception:
             pass
-    return t
+    return brand_raw
 
-def make_key(brand: str, model: str, title: str) -> str:
-    s = json.dumps([brand, model, title], ensure_ascii=False)
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+def prefer_global_model(model_raw: str) -> str:
+    """
+    モデルは:
+      1) 中国語→グローバル英語に変換できればそれを採用
+      2) ただし例外はカタカナに置換（Sylphy/Accord/Camry 等）
+      3) 変換できなければ、ラテン文字はそのまま / それ以外は原文（必要なら簡→日繁）
+    """
+    if not isinstance(model_raw, str):
+        return model_raw
+    text = model_raw.strip()
+    if text in MODEL_CN_TO_GLOBAL:
+        en = MODEL_CN_TO_GLOBAL[text]
+        return GLOBAL_EN_TO_KATA.get(en, en)
+
+    if LATIN_RE.match(text):
+        # 例: "SEAL DM-i", "Model Y" 等はそのまま
+        return text
+
+    # 未知の中国語は原文維持（安全）
+    if _CC:
+        try:
+            return _CC.convert(text)
+        except Exception:
+            pass
+    return text
+
+
+def find_latest_csv(directory: str, pattern: str) -> str:
+    paths = glob.glob(os.path.join(directory, pattern))
+    if not paths:
+        raise FileNotFoundError(f"No CSV matched: {os.path.join(directory, pattern)}")
+    # 最終更新日時が新しいもの
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return paths[0]
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--model", default="gpt-4o-mini")
-    ap.add_argument("--cache", default="data/.translate_brand_model_ja.cache.json")
+    ap.add_argument("--inp", required=True, help="入力ディレクトリ")
+    ap.add_argument("--pattern", default="*.csv", help="入力CSVのglobパターン")
+    ap.add_argument("--out-suffix", default="_ja", help="出力ファイル名のサフィックス")
     args = ap.parse_args()
 
-    df = pd.read_csv(args.input)
-    if "title_raw" not in df.columns:
-        df["title_raw"] = ""
+    src = find_latest_csv(args.inp, args.pattern)
+    df = pd.read_csv(src)
 
-    # キャッシュ
-    cache_path = Path(args.cache)
-    cache = {}
-    if cache_path.exists():
-        try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+    # カラム名ゆらぎ対応
+    cols = {c.lower(): c for c in df.columns}
+    brand_col = cols.get("brand") or cols.get("brand_cn") or "brand"
+    model_col = cols.get("model") or cols.get("model_cn") or "model"
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY",""))
+    if brand_col not in df.columns or model_col not in df.columns:
+        raise RuntimeError(
+            f"CSVに brand/model カラムが見つかりません: columns={list(df.columns)}"
+        )
 
-    brand_ja_list, model_ja_list = [], []
+    # 変換
+    df["brand_ja"] = df[brand_col].map(prefer_global_brand)
+    df["model_ja"] = df[model_col].map(prefer_global_model)
 
-    for _, row in df.iterrows():
-        brand_raw = str(row.get("brand","") or "")
-        model_raw = str(row.get("model","") or "")
-        title     = str(row.get("title_raw","") or "")
-        key = make_key(brand_raw, model_raw, title)
+    # 出力名
+    base = os.path.splitext(os.path.basename(src))[0]
+    out = os.path.join(os.path.dirname(src), f"{base}{args.out_suffix}.csv")
+    df.to_csv(out, index=False, encoding="utf-8-sig")
 
-        got = cache.get(key)
-        if not got:
-            got = llm_translate(client, args.model, brand_raw, model_raw, title)
-            time.sleep(0.2)
-            cache[key] = got
-            try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+    print(f"[OK] {src} -> {out}  (rows={len(df)})")
 
-        b_ja = got.get("brand_ja","") if isinstance(got, dict) else ""
-        m_ja = got.get("model_ja","") if isinstance(got, dict) else ""
-
-        # 最低限検証
-        if not b_ja:
-            b_ja = fallback_jp(brand_raw)
-        if not m_ja:
-            m_ja = fallback_jp(model_raw)
-
-        # ✅ 日本メーカーなら主要モデルだけカタカナ優先
-        m_ja = kata_override(b_ja, m_ja)
-
-        brand_ja_list.append(b_ja)
-        model_ja_list.append(m_ja)
-
-    df["brand_ja"] = [norm_space(x) for x in brand_ja_list]
-    df["model_ja"] = [norm_space(x) for x in model_ja_list]
-
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"✅ 翻訳完了: {args.output}  ({len(df)} rows)")
 
 if __name__ == "__main__":
     main()
