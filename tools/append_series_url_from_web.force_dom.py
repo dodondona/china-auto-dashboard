@@ -1,150 +1,143 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-append_series_url_from_web.force_dom.py
-Autohome /rank/1 ページから series_id と name を抽出し、
-rank 列を基準に series_url を確実に付与する。
+Append series_url (and optionally count) to CSV by scraping /rank/1.
 
-改訂内容：
-- rank属性値ではなく「DOM表示順」をrankとして採用（ズレ防止）
-- rank優先付与 → 名前一致 → 順序埋め の三段階ロジック
-- gotoタイムアウトを90秒に延長
+最小変更で既存パイプラインにはめ込めるドロップイン版:
+- 引数は従来どおり(--rank-url --input --output --name-col --idle-ms --max-rounds 等)
+- 名前ではなく rank をキーにマージ
+- リンク抽出は button[data-series-id] を DOM 順で列挙（= 表示順がそのまま rank）
 """
 
-import os, re, time, csv, argparse
+import os
+import re
+import argparse
+from pathlib import Path
+import pandas as pd
 from playwright.sync_api import sync_playwright
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-
-def normalize_name(s: str) -> str:
-    """全角・半角・記号を統一して比較しやすくする"""
-    return re.sub(r"[\s_·\-　]+", "", s or "").lower()
-
-def to_series_url(sid: str) -> str:
-    """series_id から URL 生成"""
-    return f"https://www.autohome.com.cn/{sid}/" if sid else ""
-
-def extract_entries_from_dom(page):
-    """
-    表示順（DOM出現順）を rank=1,2,3... として採用。
-    Autohome は data-rank-num が実際の順位とズレることがあるため。
-    """
-    data = page.evaluate("""() => Array.from(
-      document.querySelectorAll('[data-rank-num]')
-    ).map(row => {
-      const btn  = row.querySelector('button[data-series-id]');
-      const sid  = btn ? btn.getAttribute('data-series-id') : '';
-      const name = row.querySelector('.tw-text-lg, .tw-font-medium')?.textContent?.trim() || '';
-      return { sid, name };
-    }).filter(x => x.sid)""")
-
-    out, seen = [], set()
-    rank_counter = 1
-    for x in data:
-        if x["sid"] in seen:
-            continue
-        seen.add(x["sid"])
-        out.append({"rank": rank_counter, "sid": x["sid"], "name": x["name"]})
-        rank_counter += 1
-    return out
-
-def attach_by_rank_name_order(rows, entries, name_col):
-    """1) rank直付け 2) 名前一致 3) 順序埋め"""
-    used = set()
-    rank2sid = {e["rank"]: e["sid"] for e in entries}
-
-    # 1️⃣ rank直付け
-    for r in rows:
-        rk_raw = r.get("rank", "")
-        try:
-            rk = int(str(rk_raw).strip())
-        except Exception:
-            rk = None
-        if rk and rk in rank2sid and not r.get("series_url"):
-            sid = rank2sid[rk]
-            if sid not in used:
-                r["series_url"] = to_series_url(sid)
-                used.add(sid)
-
-    # 2️⃣ 名前一致
-    name2sid = {}
-    for e in entries:
-        key = normalize_name(e["name"])
-        if key and e["sid"] not in used:
-            name2sid[key] = e["sid"]
-    for r in rows:
-        if r.get("series_url"):
-            continue
-        nm = normalize_name(r.get(name_col, ""))
-        sid = name2sid.get(nm)
-        if sid and sid not in used:
-            r["series_url"] = to_series_url(sid)
-            used.add(sid)
-
-    # 3️⃣ 順序埋め
-    for e in entries:
-        if e["sid"] in used:
-            continue
-        for r in rows:
-            if not r.get("series_url"):
-                r["series_url"] = to_series_url(e["sid"])
-                used.add(e["sid"])
-                break
-
-def main():
+def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rank-url", default="https://www.autohome.com.cn/rank/1")
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--name-col", default="model")
-    ap.add_argument("--idle-ms", type=int, default=600)
-    ap.add_argument("--max-rounds", type=int, default=25)
-    ap.add_argument("--min-delta", type=int, default=3)
-    args = ap.parse_args()
+    ap.add_argument("--input", required=True, help="input CSV (既存raw)")
+    ap.add_argument("--output", required=True, help="output CSV")
+    ap.add_argument("--name-col", default="model")  # 互換のため残すが使用しない
+    ap.add_argument("--idle-ms", type=int, default=650)
+    ap.add_argument("--max-rounds", type=int, default=40)
+    # 互換: 未知引数が来てもエラーにしない
+    args, _ = ap.parse_known_args()
+    return args
 
-    # === CSV読み込み ===
-    with open(args.input, "r", encoding="utf-8-sig") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        print("⚠ 入力CSVが空です。")
-        return
+UA_MOBILE = (
+    "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Mobile Safari/537.36"
+)
 
-    # === Playwright動作 ===
+def wait_rank_ready(page, timeout_ms=120000):
+    # data-rank-num が無くても、series-id ボタンは必ず出るのでこれで待つ
+    page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    page.wait_for_selector("button[data-series-id]", timeout=timeout_ms)
+
+def scroll_to_bottom(page, idle_ms=650, max_rounds=40):
+    prev = -1
+    stable = 0
+    for _ in range(max_rounds):
+        page.mouse.wheel(0, 24000)
+        page.wait_for_timeout(idle_ms)
+        n = page.evaluate("() => document.querySelectorAll('button[data-series-id]').length")
+        if n == prev:
+            stable += 1
+        else:
+            stable = 0
+        prev = n
+        if stable >= 3:
+            break
+    return prev
+
+def safe_int(x):
+    try:
+        return int(str(x).strip())
+    except Exception:
+        return None
+
+def parse_count_from_container(container):
+    txt = (container.inner_text() or "").strip()
+    m = re.search(r"(\d{4,6})\s*车系销量", txt)
+    return safe_int(m.group(1)) if m else None
+
+def nearest_row_container(el):
+    c = el
+    for _ in range(6):
+        if c is None:
+            break
+        if c.query_selector("button[data-series-id]"):
+            return c
+        c = c.evaluate_handle("n => n.parentElement").as_element()
+    return el
+
+def scrape_rank_list(url, idle_ms, max_rounds):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(user_agent=UA, viewport={"width":1280,"height":1600})
-        page = context.new_page()
+        ctx = browser.new_context(
+            user_agent=UA_MOBILE,
+            viewport={"width": 480, "height": 960},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+        )
+        page = ctx.new_page()
+        page.goto(url, wait_until="load", timeout=180000)
+        wait_rank_ready(page, timeout_ms=180000)
+        total = scroll_to_bottom(page, idle_ms=idle_ms, max_rounds=max_rounds)
 
-        print(f"📥 {args.rank_url} にアクセス中...")
-        page.goto(args.rank_url, wait_until="load", timeout=90000)
-        page.wait_for_load_state("networkidle")
+        buttons = page.query_selector_all("button[data-series-id]") or []
+        rows = []
+        for idx, btn in enumerate(buttons, start=1):
+            sid = btn.get_attribute("data-series-id")
+            series_url = f"https://www.autohome.com.cn/{sid}/" if sid else None
+            cont = nearest_row_container(btn)
+            count = parse_count_from_container(cont)
+            rows.append({"rank": idx, "series_url": series_url, "count_from_web": count})
 
-        prev_count, stable_rounds = 0, 0
-        for _ in range(args.max_rounds):
-            page.mouse.wheel(0, 20000)
-            time.sleep(args.idle_ms / 1000)
-            n = len(page.query_selector_all("[data-rank-num]"))
-            if n - prev_count < args.min_delta:
-                stable_rounds += 1
-                if stable_rounds >= 3:
-                    break
-            else:
-                stable_rounds = 0
-            prev_count = n
+        browser.close()
+    return rows
 
-        entries = extract_entries_from_dom(page)
-        print(f"✅ 抽出 {len(entries)} 件")
+def main():
+    args = parse_args()
+    inp = Path(args.input)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    # === series_url付与 ===
-    attach_by_rank_name_order(rows, entries, args.name_col)
+    df = pd.read_csv(inp, encoding="utf-8-sig")
+    if "rank" not in df.columns:
+        # 万一 rank が無い raw でも、行順で採番
+        df.insert(0, "rank", range(1, len(df) + 1))
 
-    # === 出力 ===
-    with open(args.output, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
+    print(f"📥 input: {inp} ({len(df)} rows)")
+    print(f"🌐 scraping: {args.rank_url}")
 
-    print(f"✅ series_url 追記完了: {args.output}")
+    web_rows = scrape_rank_list(args.rank_url, args.idle_ms, args.max_rounds)
+    web = pd.DataFrame(web_rows)
+    # 50件未満の場合もあるのでそのままマージ（rank基準・上書き）
+    merged = df.merge(web, on="rank", how="left")
+
+    # series_url 列名を従来通りに
+    if "series_url_y" in merged.columns and "series_url_x" in merged.columns:
+        merged["series_url"] = merged["series_url_x"].fillna(merged["series_url_y"])
+        merged = merged.drop(columns=["series_url_x", "series_url_y"])
+    elif "series_url" not in merged.columns and "series_url_y" in merged.columns:
+        merged = merged.rename(columns={"series_url_y": "series_url"})
+
+    # count は既存があれば温存、無ければWeb値で補完
+    if "count" in merged.columns and "count_from_web" in merged.columns:
+        merged["count"] = merged["count"].fillna(merged["count_from_web"])
+        merged = merged.drop(columns=["count_from_web"])
+    elif "count_from_web" in merged.columns and "count" not in merged.columns:
+        merged = merged.rename(columns={"count_from_web": "count"})
+
+    merged = merged.sort_values("rank").reset_index(drop=True)
+    merged.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"✅ output: {out} ({len(merged)} rows)")
 
 if __name__ == "__main__":
     main()
