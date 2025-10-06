@@ -1,216 +1,193 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-translate_brand_model_ja.py
-- 入力CSV（brand, model, title_raw がある前提）を読み込み
-- brand と model を日本語訳し、brand_ja / model_ja を列追加して保存
-- まずルールで「英字はそのまま」「記号は保持」、それ以外は LLM 翻訳
-- 低コスト化のためのキャッシュあり（tools/.cache_ja.json）
-
-使い方:
-  python tools/translate_brand_model_ja.py \
-    --input  data/autohome_raw_2025-09_with_brand.csv \
-    --output data/autohome_raw_2025-09_with_brand_ja.csv \
-    --model  gpt-4o-mini
-"""
-
 import os, re, json, time, argparse
-from pathlib import Path
 import pandas as pd
+from pathlib import Path
+from typing import Dict, Tuple
 
-CACHE_PATH = Path("tools/.cache_ja.json")
-
-# --- ちょいルール -------------------------------------------------------------
-
-def looks_latin_or_mixed(s: str) -> bool:
-    """英数字/記号メインなら True（Tesla, Model Y, SU7 などはそのまま）"""
-    if not s:
-        return False
-    # 中/日/韓の文字が無い or ほぼ英数字なら True
-    return not re.search(r"[\u4e00-\u9fff\u3040-\u30ff]", s) or re.fullmatch(r"[A-Za-z0-9\-\s_+./]+", s) is not None
-
-# 一部ブランドの簡易固定訳（必要最低限・好みで拡張可）
-FIXED_BRAND = {
-    "特斯拉": "テスラ",
-    "丰田": "トヨタ",
-    "本田": "ホンダ",
-    "日产": "日産",
-    "大众": "フォルクスワーゲン",
-    "奥迪": "アウディ",
-    "宝马": "BMW",
-    "奔驰": "メルセデス・ベンツ",
-    "比亚迪": "BYD",
+# ==== 1) 小さな既知マップ（ブランド中心） ====
+BRAND_ALIASES = {
+    # 中国系
     "吉利": "ジーリー",
     "吉利汽车": "ジーリー",
-    "五菱": "ウーリン",
-    "上汽大众": "SAIC-VW",
-    "广汽丰田": "GACトヨタ",
+    "比亚迪": "BYD",
+    "五菱": "五菱",             # 迷えば原文（漢字）でOK
+    "奇瑞": "チェリー",
     "长安": "長安",
-    "奇瑞": "奇瑞",
-    "小米": "シャオミ",
-    "红旗": "紅旗",
+    "上汽大众": "フォルクスワーゲン",
+    "上汽大眾": "フォルクスワーゲン",
+    "上汽": "上汽",
+    "广汽丰田": "トヨタ",       # 厳密に「広汽トヨタ」だが、簡易にトヨタ採用
+    "广汽": "広汽",
+    "小鹏": "シャオペン",
+    "小鵬": "シャオペン",
+    "蔚来": "ニオ",
+    "理想": "リーオート",
+    "问界": "アイト",           # AITO（アイト）。好みで英字のままも可
+    "AITO": "アイト",
+
+    # 欧米・日系
+    "大众": "フォルクスワーゲン",
+    "奥迪": "アウディ",
+    "丰田": "トヨタ",
+    "日产": "日産",
+    "本田": "ホンダ",
+    "梅赛德斯-奔驰": "メルセデス・ベンツ",
+    "奔驰": "メルセデス・ベンツ",
+    "宝马": "BMW",
+    "特斯拉": "テスラ",
+    "雪佛兰": "シボレー",
     "别克": "ビュイック",
-    "别克汽车": "ビュイック",
+    "奥迪": "アウディ",
+    "保时捷": "ポルシェ",
+    "红旗": "紅旗",
 }
 
-# --- LLM ----------------------------------------------------------------------
+# 車種の記号・サフィックス類は基本「翻訳しない」
+MODEL_PROTECT_TOKENS = (
+    r"(?i)\b(plus|pro|max|dm-i|dm|ev|hev|phev|mhev|se|gt|gl|gs|l|s|x|rs)\b",
+)
+MODEL_PROTECT_RE = re.compile("|".join(MODEL_PROTECT_TOKENS))
 
-def llm_translate_pairs(pairs, model="gpt-4o-mini"):
-    """
-    pairs: [{"brand": "...", "model": "...", "title": "..."} ...]
-    まとめて1回で投げ、JSON配列で返させる（出力を厳密JSONに限定）
-    """
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# すでに英数字が中心なら翻訳しない（例：Model 3 / SU7 / RAV4）
+MOSTLY_LATIN = re.compile(r"^[A-Za-z0-9\-\s\+\.]+$")
 
-    # プロンプト：自動車の文脈で自然な日本語に。英字は維持、数字/記号も保持。
-    sys = (
-        "あなたは自動車名の翻訳器です。入力は中国語中心のブランド名と車種名の組です。"
-        "以下のルールで日本語へ変換してください：\n"
-        "1) 英字や数字、型番（例: Model Y, SU7, A6L）はそのまま残す\n"
-        "2) ブランドは既知の日本語表記があればそれを使う。なければカタカナ音訳\n"
-        "3) 車種は自然な日本語（多くはカタカナ、ただし '星越L' の L など英字は保持）\n"
-        "4) 出力は厳密なJSON配列。各要素は {\"brand_ja\":\"…\",\"model_ja\":\"…\"} のみ\n"
-        "5) 余計な説明やコメントは禁止"
-    )
-    user_lines = []
-    for i, p in enumerate(pairs, 1):
-        user_lines.append(f"{i}. brand={p['brand']} | model={p['model']} | title={p.get('title','')}")
-    user = "\n".join(user_lines)
+# かなを含むか（LLMが日本語化したかを見る）
+HAS_KANA = re.compile(r"[ぁ-ゟ゠-ヿ]")
 
+# キャッシュ
+CACHE_PATH = Path("cache/ja_alias.json")
+
+def load_cache() -> Dict[str, str]:
+    if CACHE_PATH.exists():
+        try:
+            return json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+def save_cache(cache: Dict[str, str]):
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ==== LLM 呼び出し（OpenAI互換） ====
+def call_llm(prompt: str, model: str = "gpt-4o-mini") -> str:
+    import openai
+    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     resp = client.chat.completions.create(
         model=model,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": user},
-        ],
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        max_tokens=64,
     )
-    txt = (resp.choices[0].message.content or "").strip()
-    m = re.search(r"\[.*\]", txt, re.S)
-    if not m:
-        return []
-    try:
-        arr = json.loads(m.group(0))
-        return arr if isinstance(arr, list) else []
-    except Exception:
-        return []
+    return resp.choices[0].message.content.strip()
 
-# --- メイン --------------------------------------------------------------------
+def conservative_brand_ja(brand: str, model_name: str, cache: Dict[str, str], llm_model: str) -> str:
+    key = f"B::{brand}"
+    if key in cache:
+        return cache[key]
+
+    # 1) 既知マップ優先
+    for k, v in BRAND_ALIASES.items():
+        if k == brand or k in brand:
+            cache[key] = v
+            return v
+
+    # 2) 英字・既にカタカナ → そのまま
+    if MOSTLY_LATIN.match(brand) or HAS_KANA.search(brand):
+        cache[key] = brand
+        return brand
+
+    # 3) LLM：広く使われる日本語表記があるときだけ日本語に。なければ原文（漢字）のまま
+    prompt = f"""以下は自動車ブランドの表記です。日本語市場で広く定着した呼称がある場合のみ日本語（カタカナ等）で1語で返答。ない場合は原文のまま返す。
+- 不要な説明は禁止。出力は1語のみ。
+- あいまいな場合は原文のまま。
+
+対象: {brand}
+"""
+    try:
+        out = call_llm(prompt, model=llm_model)
+        # 出力が不適切なら原文にフォールバック
+        if not out or len(out) > 20 or "\n" in out:
+            out = brand
+    except Exception:
+        out = brand
+
+    cache[key] = out
+    return out
+
+def conservative_model_ja(model_name: str, brand_ja: str, cache: Dict[str, str], llm_model: str) -> str:
+    key = f"M::{brand_ja}::{model_name}"
+    if key in cache:
+        return cache[key]
+
+    # 1) 既に英字中心 or 守るべきトークンを含む → そのまま
+    if MOSTLY_LATIN.match(model_name) or MODEL_PROTECT_RE.search(model_name):
+        cache[key] = model_name
+        return model_name
+
+    # 2) すでにカナ混在 → そのまま（=訳済み扱い）
+    if HAS_KANA.search(model_name):
+        cache[key] = model_name
+        return model_name
+
+    # 3) LLM：通称が明確にある場合のみカタカナ。なければ原文のまま（漢字）
+    prompt = f"""以下は自動車の車種名です。日本のメディアで広く使われるカタカナ通称が明確な場合のみカタカナで1語で返答。見当たらない場合は原文そのまま返す。
+- 出力は1語のみ。不要な説明や補足は出力しない。
+- “Plus / Pro / DM-i / EV / L / MAX などのサフィックスは英字のまま”。
+- 例：RAV4→RAV4、Model 3→Model 3、海豚→海豚（訳さない）、卡罗拉锐放→カローラクロス
+
+車種: {model_name}
+"""
+    try:
+        out = call_llm(prompt, model=llm_model)
+        # ガードレール
+        if not out or len(out) > 30 or "\n" in out:
+            out = model_name
+        # LLMが余計な説明したら原文
+        if " " in out and len(out.split()) > 3:
+            out = model_name
+    except Exception:
+        out = model_name
+
+    cache[key] = out
+    return out
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--model", default="gpt-4o-mini")
-    ap.add_argument("--batch-size", type=int, default=10)
-    ap.add_argument("--sleep-ms", type=int, default=150)
     args = ap.parse_args()
 
-    if not os.getenv("OPENAI_API_KEY"):
-        raise SystemExit("OPENAI_API_KEY が未設定です。secrets に設定してください。")
-
     df = pd.read_csv(args.input)
+    if not {"brand", "model"}.issubset(df.columns):
+        raise SystemExit("input CSVに brand / model 列が必要です。")
 
-    # キャッシュ
-    cache = {}
-    if CACHE_PATH.exists():
-        try:
-            cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            cache = {}
-    changed = False
+    cache = load_cache()
 
-    out_brand_ja, out_model_ja = [], []
+    brand_ja_list, model_ja_list = [], []
+    for _, row in df.iterrows():
+        brand = str(row["brand"]).strip()
+        model_name = str(row["model"]).strip()
 
-    batch = []
-    idx_map = []  # バッチ→行番号対応
-    for i, row in df.iterrows():
-        b = str(row.get("brand", "")).strip()
-        m = str(row.get("model", "")).strip()
-        t = str(row.get("title_raw", "")).strip()
+        b_ja = conservative_brand_ja(brand, model_name, cache, args.model)
+        m_ja = conservative_model_ja(model_name, b_ja, cache, args.model)
 
-        key = f"{b}|{m}"
-        trans_b, trans_m = None, None
+        brand_ja_list.append(b_ja)
+        model_ja_list.append(m_ja)
 
-        # 1) 固定訳・英字優先のルール
-        if looks_latin_or_mixed(b):
-            trans_b = b
-        elif b in FIXED_BRAND:
-            trans_b = FIXED_BRAND[b]
+        # 低速すぎる環境向けの軽いスロットル
+        time.sleep(0.05)
 
-        if looks_latin_or_mixed(m):
-            trans_m = m
+    df["brand_ja"] = brand_ja_list
+    df["model_ja"] = model_ja_list
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(args.output, index=False, encoding="utf-8-sig")
 
-        # 2) キャッシュ
-        if key in cache:
-            cached = cache[key]
-            # ルールで決まっていない側だけキャッシュから補う
-            if trans_b is None:
-                trans_b = cached.get("brand_ja") or trans_b
-            if trans_m is None:
-                trans_m = cached.get("model_ja") or trans_m
-
-        # 3) まだ欠けている場合は後でLLMへ
-        if trans_b is None or trans_m is None:
-            batch.append({"brand": b, "model": m, "title": t})
-            idx_map.append(i)
-            # すぐ埋めるのは後で
-            out_brand_ja.append(None)
-            out_model_ja.append(None)
-        else:
-            out_brand_ja.append(trans_b)
-            out_model_ja.append(trans_m)
-
-        # バッチ投げ
-        if len(batch) >= args.batch_size:
-            res = llm_translate_pairs(batch, model=args.model)
-            for k, ridx in enumerate(idx_map):
-                if k < len(res):
-                    tb = res[k].get("brand_ja", "") or ""
-                    tm = res[k].get("model_ja", "") or ""
-                    out_brand_ja[ridx] = out_brand_ja[ridx] or tb
-                    out_model_ja[ridx] = out_model_ja[ridx] or tm
-                    cache_key = f"{df.at[ridx,'brand']}|{df.at[ridx,'model']}"
-                    cache[cache_key] = {"brand_ja": out_brand_ja[ridx], "model_ja": out_model_ja[ridx]}
-                    changed = True
-            batch.clear()
-            idx_map.clear()
-            time.sleep(args.sleep_ms/1000.0)
-
-    # 最終バッチ
-    if batch:
-        res = llm_translate_pairs(batch, model=args.model)
-        for k, ridx in enumerate(idx_map):
-            if k < len(res):
-                tb = res[k].get("brand_ja", "") or ""
-                tm = res[k].get("model_ja", "") or ""
-                out_brand_ja[ridx] = out_brand_ja[ridx] or tb
-                out_model_ja[ridx] = out_model_ja[ridx] or tm
-                cache_key = f"{df.at[ridx,'brand']}|{df.at[ridx,'model']}"
-                cache[cache_key] = {"brand_ja": out_brand_ja[ridx], "model_ja": out_model_ja[ridx]}
-                changed = True
-        batch.clear()
-        idx_map.clear()
-
-    # 欠けていれば最後に埋める（安全策）
-    for i in range(len(df)):
-        if out_brand_ja[i] is None:
-            out_brand_ja[i] = str(df.at[i, "brand"])
-        if out_model_ja[i] is None:
-            out_model_ja[i] = str(df.at[i, "model"])
-
-    df_out = df.copy()
-    df_out["brand_ja"] = out_brand_ja
-    df_out["model_ja"] = out_model_ja
-    df_out.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"✅ 保存: {args.output}")
-
-    if changed:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"🗂️ キャッシュ更新: {CACHE_PATH}")
+    save_cache(cache)
+    print(f"✅ 翻訳済みCSV: {args.output}  （brand_ja / model_ja 追加）")
 
 if __name__ == "__main__":
     main()
