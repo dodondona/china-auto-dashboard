@@ -1,42 +1,131 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-append_series_url_from_web.playwright_full.py
---------------------------------------------
-Autohomeランキングページ (/rank/1) をPlaywrightで全スクロールし、
-上位50件分の「車系ページURL」を抽出してCSVに追加する。
+append_series_url_from_web.playwright_full.py  (robust)
+- /rank/1 を Playwright で最下段までロード
+- DOMから series_id を「出現順」で抽出（=順位）
+- 入力CSVに series_url 列として付与
 
-出力: _with_series.csv
-依存: playwright, pandas
+ポイント:
+- XHR("frontapi/rank/series") の完了を“ロード完了の目印”として待つ（レスポンス本文は使わない）
+- button[data-series-id] / a[href*="//www.autohome.com.cn/数字/"] 両方で抽出
+- スクロール＋増分監視で50位まで表示
+- 0件時はデバッグHTML/スクショを data/ に保存
 """
 
-import asyncio, re, time, argparse, pandas as pd
-from playwright.async_api import async_playwright
+import asyncio, re, argparse, pandas as pd, time
 from pathlib import Path
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-async def fetch_series_urls(url: str, max_rounds=30, idle_ms=650, min_delta=3):
-    print(f"🌐 開始: {url}")
-    urls, prev_count = [], 0
+RANK_XHR_KEYWORD = "rank"  # “frontapi/rank/series” など rank を含むXhrを待つ
+
+async def wait_rank_filled(page, timeout_ms=60000):
+    """ランキングXHRが返り、DOMにカードが出るまで待つ"""
+    # 1) XHR完了待ち（本文は使わない）
+    try:
+        await page.wait_for_response(
+            lambda r: (r.status == 200) and (RANK_XHR_KEYWORD in r.url),
+            timeout=timeout_ms
+        )
+    except PWTimeout:
+        pass  # 次のDOM待ちにフォールバック
+
+    # 2) DOMに最初のカードが現れるまで待つ（いずれかが見えればOK）
+    sel_any = 'button[data-series-id], a[href*="//www.autohome.com.cn/"]'
+    await page.wait_for_selector(sel_any, state="visible", timeout=timeout_ms)
+
+async def robust_scroll_to_bottom(page, rounds=40, idle_ms=500, min_delta=1, max_items=60):
+    """下までスクロール。抽出件数が増えなくなるまで回す"""
+    prev = 0
+    for i in range(rounds):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(idle_ms/1000)
+
+        ids = await extract_series_ids_from_dom(page)
+        cur = len(ids)
+        print(f"  ⤷ round {i+1}: {cur}件 (+{cur-prev})")
+        if cur >= max_items:
+            return ids[:max_items]
+        if (cur - prev) < min_delta and i >= 2:
+            # 一度最上部→最下部の“揺さぶり”でlazy要素を起こす
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.3)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(idle_ms/1000)
+            # もう一度数える
+            ids2 = await extract_series_ids_from_dom(page)
+            if len(ids2) - cur < min_delta:
+                return ids2[:max_items]
+        prev = cur
+    return await extract_series_ids_from_dom(page)
+
+async def extract_series_ids_from_dom(page):
+    """DOMから series_id を出現順で抽出（button[data-series-id] と href両対応）"""
+    ids = []
+
+    # 1) button[data-series-id]
+    try:
+        btns = await page.locator('button[data-series-id]').element_handles()
+        for h in btns:
+            sid = await h.get_attribute("data-series-id")
+            if sid and sid.isdigit() and sid not in ids:
+                ids.append(sid)
+    except Exception:
+        pass
+
+    # 2) a[href*="//www.autohome.com.cn/xxxx/"]
+    try:
+        hrefs = await page.eval_on_selector_all(
+            'a[href*="//www.autohome.com.cn/"]',
+            "els => els.map(e => e.getAttribute('href'))"
+        )
+        for href in hrefs or []:
+            if not href:
+                continue
+            m = re.search(r'//www\.autohome\.com\.cn/(\d{3,7})/', href)
+            if m:
+                sid = m.group(1)
+                if sid not in ids:
+                    ids.append(sid)
+    except Exception:
+        pass
+
+    return ids
+
+async def run(rank_url, input_csv, output_csv, name_col, max_rounds, idle_ms, min_delta):
+    from playwright.async_api import Error as PWError
+    Path("data").mkdir(exist_ok=True, parents=True)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--disable-gpu"])
         page = await browser.new_page()
-        await page.goto(url, wait_until="networkidle")
+        print(f"🌐 開始: {rank_url}")
+        await page.goto(rank_url, wait_until="networkidle")
 
-        # 無限スクロールで全行をロード
-        for i in range(max_rounds):
-            await page.mouse.wheel(0, 10000)
-            await asyncio.sleep(idle_ms / 1000)
-            html = await page.content()
-            matches = re.findall(r'href="(?:https:)?//www\.autohome\.com\.cn/(\d{3,7})/', html)
-            uniq = list(dict.fromkeys(matches))
-            delta = len(uniq) - prev_count
-            print(f"  ⤷ round {i+1}: {len(uniq)}件 (+{delta})")
-            if delta < min_delta:
-                break
-            prev_count = len(uniq)
+        # ランキングが注入されるまで待つ
+        await wait_rank_filled(page, timeout_ms=60000)
+
+        # しっかり下まで表示させる
+        ids = await robust_scroll_to_bottom(
+            page, rounds=max_rounds, idle_ms=idle_ms, min_delta=min_delta, max_items=60
+        )
+
+        if not ids:
+            # デバッグ出力
+            Path("data/_debug_rank_page.html").write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path="data/_debug_rank_page.png", full_page=True)
+            print("⚠️ 0件でした。data/_debug_rank_page.html / .png を確認してください。")
+
         await browser.close()
-        return uniq
+
+    # 入出力
+    df = pd.read_csv(input_csv)
+    n = min(len(df), len(ids))
+    urls = [f"https://www.autohome.com.cn/{sid}/" for sid in ids[:n]]
+    out = df.head(n).copy()
+    out["series_url"] = urls
+    out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+    print(f"✅ 抽出完了: {len(ids)}件 / 保存: {output_csv}（{n}行に付与）")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -44,26 +133,12 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--name-col", default="model")
-    ap.add_argument("--max-rounds", type=int, default=30)
-    ap.add_argument("--idle-ms", type=int, default=650)
-    ap.add_argument("--min-delta", type=int, default=3)
+    ap.add_argument("--max-rounds", type=int, default=40)
+    ap.add_argument("--idle-ms", type=int, default=600)
+    ap.add_argument("--min-delta", type=int, default=1)
     args = ap.parse_args()
-
-    df = pd.read_csv(args.input)
-    series_ids = asyncio.run(fetch_series_urls(args.rank_url,
-                                               args.max_rounds,
-                                               args.idle_ms,
-                                               args.min_delta))
-    print(f"✅ 抽出完了: {len(series_ids)}件")
-    urls = [f"https://www.autohome.com.cn/{sid}/" for sid in series_ids]
-
-    # 行数が一致しない場合は上位のみ使用
-    n = min(len(df), len(urls))
-    df = df.head(n).copy()
-    df["series_url"] = urls[:n]
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"💾 保存完了: {args.output}")
+    asyncio.run(run(args.rank_url, args.input, args.output, args.name_col,
+                    args.max_rounds, args.idle_ms, args.min_delta))
 
 if __name__ == "__main__":
     main()
