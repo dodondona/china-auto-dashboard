@@ -1,37 +1,72 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""
-brand / model の日本語列を追加するトランスレータ
-方針:
- 1) LLMに「グローバル名称（英語公称）があるならそれを返す。なければ簡体字→日本語の漢字へ」
- 2) 英数字・記号はそのまま維持
- 3) 厳密JSONで brand_ja, model_ja を返させ、検証に失敗したら OpenCC でフォールバック
- 4) タイトル（title_raw）も渡して文脈を補強
-使い方:
-  python tools/translate_brand_model_ja.py \
-    --input data/autohome_raw_YYYY-MM_with_brand.csv \
-    --output data/autohome_raw_YYYY-MM_with_brand_ja.csv \
-    --model gpt-4o-mini
-"""
-
-import argparse, json, os, sys, time, re, hashlib
-import pandas as pd
+import argparse, json, os, re, time, hashlib
 from pathlib import Path
-
-# OpenAI SDK (>=1.x)
+import pandas as pd
 from openai import OpenAI
 
-# フォールバック用：簡体字→日本語の漢字（主に常用字＋書記体系）へ近似変換
-# 完全ではないが、中国語簡体→日本語（s2tjp）で「化け」はだいぶ減る
+# 簡体→日本語漢字の近似（フォールバック）
 try:
     from opencc import OpenCC
-    cc = OpenCC('s2tjp')  # Simplified Chinese to Japanese Kanji
+    cc = OpenCC('s2tjp')
 except Exception:
     cc = None
 
 def norm_space(s: str) -> str:
     return re.sub(r'\s+', ' ', s or '').strip()
+
+# 👉 ここがコア：最小限の「カタカナ優先ルール」
+JP_BRAND_CANON = {
+    # brand_ja 正規化候補
+    "トヨタ": {"トヨタ","Toyota","TOYOTA"},
+    "ホンダ": {"ホンダ","Honda","HONDA"},
+    "日産":   {"日産","Nissan","NISSAN"},
+}
+# モデル名の「英語グローバル名 → カタカナ」最小セット
+JP_MODEL_KATA = {
+    # Nissan
+    "Sylphy": "シルフィ",
+    "Serena": "セレナ",
+    "X-Trail": "エクストレイル",
+    "March": "マーチ",
+    # Honda
+    "Accord": "アコード",
+    "Civic": "シビック",
+    "Fit": "フィット",
+    "Vezel": "ヴェゼル",
+    # Toyota
+    "Camry": "カムリ",
+    "Corolla": "カローラ",
+    "Corolla Cross": "カローラクロス",
+    "Yaris": "ヤリス",
+    "Alphard": "アルファード",
+    "Voxy": "ヴォクシー",
+    "Noah": "ノア",
+    "Crown": "クラウン",
+    "Land Cruiser": "ランドクルーザー",
+    "Land Cruiser Prado": "ランドクルーザープラド",
+    "RAV4": "RAV4",  # これのみ英記が一般的
+}
+
+# brandが日本メーカーかどうかチェック
+def is_jp_brand(brand_ja: str) -> bool:
+    b = norm_space(brand_ja)
+    for k, variants in JP_BRAND_CANON.items():
+        if b in variants or b == k:
+            return True
+    return b in {"トヨタ","ホンダ","日産"}
+
+def kata_override(brand_ja: str, model_en: str) -> str:
+    """日本メーカーの場合、英語モデル名の一部をカタカナに置換（最小ルール）"""
+    if not is_jp_brand(brand_ja):
+        return model_en
+    m = norm_space(model_en)
+    # 最長一致を先に
+    for key in sorted(JP_MODEL_KATA.keys(), key=len, reverse=True):
+        if key.lower() == m.lower():
+            return JP_MODEL_KATA[key]
+    return m
 
 PROMPT = """あなたは自動車名の正規化アシスタントです。以下の制約で出力してください。
 
@@ -40,63 +75,52 @@ PROMPT = """あなたは自動車名の正規化アシスタントです。以�
 - 出力は JSON のみで、キーは brand_ja と model_ja です。
 
 【変換ルール】
-1) モデル名は「グローバル正式名称（英語）」が一般に存在するならそれを採用してください。
-   例:  海豹→Seal, 海豚→Dolphin, 海鸥→Seagull, 元PLUS→Atto 3, 轩逸→Sylphy, 凯美瑞→Camry, 雅阁→Accord 等
-   （英数字・ハイフン等の記号はそのまま）
-2) グローバル正式名称が見つからない場合のみ、原語の簡体字を「日本語の漢字体系に近い字形」に変換して返してください。
-   （カタカナ化は避け、英数字はそのまま、略称や創作はしない）
-3) ブランド名は一般的な日本語表記（カタカナ or 英文正式社名）を優先してください。
-   例: BYD, テスラ, フォルクスワーゲン, トヨタ, ホンダ, 日産, メルセデス・ベンツ, BMW など。
-   迷う場合は英文既成社名（BYD, Tesla, Volkswagen, Toyota, Honda, Nissan, Mercedes-Benz, BMW 等）
-4) 余計な語や注釈は一切つけず、厳密に JSON だけを返してください。
+1) モデル名は「グローバル正式名称（英語）」が一般に存在するならそれを採用。
+   例: 海豹→Seal, 海豚→Dolphin, 海鸥→Seagull, 元PLUS→Atto 3, 轩逸→Sylphy, 凯美瑞→Camry 等
+2) 見つからない場合のみ、原語の簡体字を「日本語の漢字体系に近い字形」で返す。
+3) ブランド名は一般的な日本語表記（カタカナ or 英文既成社名）を優先。
+   例: BYD, テスラ, フォルクスワーゲン, トヨタ, ホンダ, 日産, メルセデス・ベンツ, BMW 等
+4) 余計な語や注釈は一切つけず、厳密に JSON だけを返す。
 
 【入力】
 brand(raw): {brand}
 model(raw): {model}
 title: {title}
 
-【出力形式例】
-{{"brand_ja":"トヨタ","model_ja":"Camry"}}
+【出力】
+{{"brand_ja":"...","model_ja":"..."}}
 """
 
 def llm_translate(client: OpenAI, model: str, brand: str, model_name: str, title: str) -> dict:
-    """LLMに問い合わせて brand_ja, model_ja を得る。失敗時は空を返す。"""
     prompt = PROMPT.format(brand=brand, model=model_name, title=title)
     try:
         resp = client.chat.completions.create(
             model=model,
             temperature=0,
             messages=[
-                {"role": "system", "content": "You are a precise normalizer that returns ONLY JSON with required keys."},
+                {"role": "system", "content": "Return ONLY JSON with keys brand_ja and model_ja."},
                 {"role": "user", "content": prompt},
             ],
             max_tokens=120,
         )
         txt = resp.choices[0].message.content.strip()
-        # JSON以外を排除（例: ```json ... ```）
         m = re.search(r'\{.*\}', txt, flags=re.S)
         if not m:
             return {}
         obj = json.loads(m.group(0))
-        out = {
+        return {
             "brand_ja": norm_space(obj.get("brand_ja", "")),
             "model_ja": norm_space(obj.get("model_ja", "")),
         }
-        # 最低限の検証：空や過剰長、変な接頭語をはねる
-        for k in list(out.keys()):
-            if not out[k] or len(out[k]) > 60:
-                out[k] = ""
-        return out
     except Exception:
         return {}
 
 def fallback_jp(text: str) -> str:
-    """OpenCCがあれば簡体→日本語漢字へ。なければ原文を軽く整形。"""
     t = norm_space(text)
     if not t:
         return t
     if re.fullmatch(r'[A-Za-z0-9\-\s\+\.]+', t):
-        return t  # 英数字はそのまま
+        return t
     if cc:
         try:
             return norm_space(cc.convert(t))
@@ -117,40 +141,31 @@ def main():
     args = ap.parse_args()
 
     df = pd.read_csv(args.input)
-    for col in ("brand", "model"):
-        if col not in df.columns:
-            print(f"❌ '{col}' 列が見つかりません: {args.input}")
-            sys.exit(1)
     if "title_raw" not in df.columns:
-        # なくても動くようにする
         df["title_raw"] = ""
 
-    # キャッシュ読み込み
+    # キャッシュ
     cache_path = Path(args.cache)
+    cache = {}
     if cache_path.exists():
         try:
             cache = json.loads(cache_path.read_text(encoding="utf-8"))
         except Exception:
-            cache = {}
-    else:
-        cache = {}
+            pass
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY",""))
 
     brand_ja_list, model_ja_list = [], []
 
-    for i, row in df.iterrows():
-        brand = str(row.get("brand", "") or "")
-        model_name = str(row.get("model", "") or "")
-        title = str(row.get("title_raw", "") or "")
+    for _, row in df.iterrows():
+        brand_raw = str(row.get("brand","") or "")
+        model_raw = str(row.get("model","") or "")
+        title     = str(row.get("title_raw","") or "")
+        key = make_key(brand_raw, model_raw, title)
 
-        key = make_key(brand, model_name, title)
         got = cache.get(key)
-
         if not got:
-            # LLM問い合わせ
-            got = llm_translate(client, args.model, brand, model_name, title)
-            # レート控えめ
+            got = llm_translate(client, args.model, brand_raw, model_raw, title)
             time.sleep(0.2)
             cache[key] = got
             try:
@@ -159,30 +174,27 @@ def main():
             except Exception:
                 pass
 
-        b_ja = got.get("brand_ja", "") if isinstance(got, dict) else ""
-        m_ja = got.get("model_ja", "") if isinstance(got, dict) else ""
+        b_ja = got.get("brand_ja","") if isinstance(got, dict) else ""
+        m_ja = got.get("model_ja","") if isinstance(got, dict) else ""
 
-        # フォールバック: 空や中国語丸残りっぽい場合は OpenCC で簡体→日本語漢字へ
+        # 最低限検証
         if not b_ja:
-            b_ja = fallback_jp(brand)
+            b_ja = fallback_jp(brand_raw)
         if not m_ja:
-            # グローバル英字が入っていればそのまま通る。無ければ字形変換。
-            m_ja = fallback_jp(model_name)
+            m_ja = fallback_jp(model_raw)
+
+        # ✅ 日本メーカーなら主要モデルだけカタカナ優先
+        m_ja = kata_override(b_ja, m_ja)
 
         brand_ja_list.append(b_ja)
         model_ja_list.append(m_ja)
 
-    df["brand_ja"] = brand_ja_list
-    df["model_ja"] = model_ja_list
+    df["brand_ja"] = [norm_space(x) for x in brand_ja_list]
+    df["model_ja"] = [norm_space(x) for x in model_ja_list]
 
-    # 最後に軽く正規化：余計な二重空白など
-    for col in ("brand_ja", "model_ja"):
-        df[col] = df[col].map(norm_space)
-
-    out = args.output
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"✅ 翻訳完了: {out}  ({len(df)} rows)")
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(args.output, index=False, encoding="utf-8-sig")
+    print(f"✅ 翻訳完了: {args.output}  ({len(df)} rows)")
 
 if __name__ == "__main__":
     main()
