@@ -1,8 +1,13 @@
+# 既存
 openai>=1.40.0
 pillow
 playwright
-google-generativeai>=0.7.2  # ← Geminiを使うときだけ参照されます
+google-generativeai>=0.7.2
 pandas
 beautifulsoup4>=4.12.3
 requests>=2.32.0
-lxml>=5.2.1         # 任意：パーサ高速化/堅牢化
+lxml>=5.2.1
+
+# 追加（今回の翻訳ロジックで必須）
+unidecode
+opencc-python-reimplemented
