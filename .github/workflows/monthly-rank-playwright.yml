@@ -35,21 +35,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fonts-noto-cjk
 
-      - name: Resolve month & paths
+      - name: Resolve month & paths (robust)
         shell: bash
         run: |
-          # 先月のYYYY-MMを計算（手動で当月にしたい場合はここを書き換え）
-          PYTHONIOENCODING=utf-8 python - <<'PY' >> $GITHUB_ENV
-import datetime, os
-today = datetime.date.today()
-first = today.replace(day=1)
-last_month_last_day = first - datetime.timedelta(days=1)
-ym = last_month_last_day.strftime("%Y-%m")
-print(f"YM={ym}")
-PY
-          echo "RAW=data/autohome_raw_${YM}.csv"            >> $GITHUB_ENV
-          echo "SERIES=data/autohome_raw_${YM}_with_series.csv" >> $GITHUB_ENV
-          echo "BRAND=data/autohome_raw_${YM}_with_brand.csv"   >> $GITHUB_ENV
+          # 先月YYYY-MM（UbuntuのGNU dateでOK）
+          YM=$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)
+          echo "YM=$YM" | tee -a "$GITHUB_ENV"
+          echo "RAW=data/autohome_raw_${YM}.csv"            | tee -a "$GITHUB_ENV"
+          echo "SERIES=data/autohome_raw_${YM}_with_series.csv" | tee -a "$GITHUB_ENV"
+          echo "BRAND=data/autohome_raw_${YM}_with_brand.csv"   | tee -a "$GITHUB_ENV"
 
       - name: Show env
         run: |
