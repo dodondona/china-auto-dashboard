@@ -1,4 +1,4 @@
-name: Monthly append series_url & enrich brand/series (rank/1 + global translation)
+name: Monthly append series_url & enrich brand/series (rank/1 + LLM global translation)
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt || true
-          python -m pip install pandas unidecode opencc-python-reimplemented playwright beautifulsoup4 requests lxml
+          python -m pip install pandas openai playwright beautifulsoup4 requests lxml
           python -m playwright install chromium
 
       - name: Install CJK fonts
@@ -38,19 +38,11 @@ jobs:
       - name: Resolve month & paths (robust)
         shell: bash
         run: |
-          # 先月YYYY-MM（UbuntuのGNU dateでOK）
           YM=$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)
           echo "YM=$YM" | tee -a "$GITHUB_ENV"
           echo "RAW=data/autohome_raw_${YM}.csv"            | tee -a "$GITHUB_ENV"
           echo "SERIES=data/autohome_raw_${YM}_with_series.csv" | tee -a "$GITHUB_ENV"
           echo "BRAND=data/autohome_raw_${YM}_with_brand.csv"   | tee -a "$GITHUB_ENV"
-
-      - name: Show env
-        run: |
-          echo "YM=$YM"
-          echo "RAW=$RAW"
-          echo "SERIES=$SERIES"
-          echo "BRAND=$BRAND"
 
       - name: Append series_url from /rank/1 (Playwright infinite scroll)
         run: |
@@ -64,16 +56,22 @@ jobs:
             --input "$SERIES" \
             --output "$BRAND"
 
-      - name: Translate brand/model to Japanese (global-first mapping)
+      - name: Translate brand/model to global names (LLM)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/translate_brand_model_ja.py \
-            --inp data \
-            --pattern "autohome_raw_${YM}_with_brand.csv" \
-            --out-suffix "_ja"
+          python tools/translate_brand_model_llm.py \
+            --input "$BRAND" \
+            --output "data/autohome_raw_${YM}_with_brand_ja.csv" \
+            --brand-col brand --model-col model \
+            --brand-ja-col brand_ja --model-ja-col model_ja \
+            --model gpt-4o-mini \
+            --cache .cache/global_map.json
 
       - name: List outputs before commit
         run: |
           ls -lh data | tail -n 50 || true
+          test -f "data/autohome_raw_${YM}_with_brand_ja.csv"
 
       - name: Commit artifacts
         run: |
@@ -81,7 +79,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
-            git commit -m "auto: append + enrich + translate (global rule) for $YM [skip ci]"
+            git commit -m "auto: append + enrich + LLM translate to global names for $YM [skip ci]"
             git push
           else
             echo "No changes to commit."
