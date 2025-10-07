@@ -42,19 +42,19 @@ jobs:
           sudo apt-get install -y fonts-noto-cjk
 
       - name: Resolve paths
-        run: pwd && ls -R scripts || true
+        run: pwd && ls -R tools || true
 
       - name: Append series_url from /rank/1 (Playwright infinite scroll)
         run: |
-          python scripts/append_series_url.py
+          python tools/append_series_url.py
 
       - name: Enrich brand/model from <title> via LLM or rules
         run: |
-          python scripts/enrich_brand_model.py
+          python tools/enrich_brand_model.py
 
       - name: Translate brand/model to Japanese (rule-based global mapping)
         run: |
-          python scripts/translate_brand_model_ja.py \
+          python tools/translate_brand_model_ja.py \
             --inp data \
             --pattern "autohome_raw_*.csv" \
             --out-suffix "_ja"
