@@ -30,10 +30,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install deps (pin to the same interpreter)
+      - name: Install deps (pin to same interpreter)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pandas unidecode opencc-python-reimplemented playwright beautifulsoup4 requests
+          # requirements.txt も読む（失敗しても続行）
+          python -m pip install -r requirements.txt || true
+          # このパイプラインで必須の追加分
+          python -m pip install pandas unidecode opencc-python-reimplemented playwright beautifulsoup4 requests lxml
           python -m playwright install chromium
 
       - name: Install CJK fonts
@@ -43,12 +46,14 @@ jobs:
 
       - name: Preflight (show files; fail early if scripts missing)
         run: |
-          echo "== repo root =="
-          pwd
           echo "== list tools =="
           ls -l tools || true
           miss=0
-          for f in tools/enrich_title_from_series.py tools/enrich_brand_model.py tools/translate_brand_model_ja.py; do
+          for f in \
+            tools/append_series_url_from_web.playwright_full.py \
+            tools/enrich_brand_from_title.py \
+            tools/translate_brand_model_ja.py \
+          ; do
             if [ ! -f "$f" ]; then
               echo "::error title=Missing script::$f not found"
               miss=1
@@ -62,11 +67,16 @@ jobs:
 
       - name: Append series_url from /rank/1 (Playwright infinite scroll)
         run: |
-          python tools/enrich_title_from_series.py
+          # まず full、ダメなら force_dom、最終手段で汎用
+          python tools/append_series_url_from_web.playwright_full.py \
+          || python tools/append_series_url_from_web.force_dom.py \
+          || python tools/append_series_url_from_web.py
 
-      - name: Enrich brand/model from <title> via LLM or rules
+      - name: Enrich brand/model from <title> via rules/LLM
         run: |
-          python tools/enrich_brand_model.py
+          # 通常はタイトル由来のこれを使う。必要ならもう一方にフォールバック
+          python tools/enrich_brand_from_title.py \
+          || python tools/enrich_title_from_series.py
 
       - name: Translate brand/model to Japanese (global-first mapping)
         run: |
