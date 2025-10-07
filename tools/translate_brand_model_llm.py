@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-LLMで中国名→グローバル英名に正規化（v4: ルール＋代表例＋輸出名優先＋ピンイン禁止）
+LLMで中国名→グローバル英名または日本語名に正規化（辞書最小）
 - ブランド/モデルをユニーク抽出→LLMにバッチ問い合わせ
-- 厳格JSONで受け取り、CJKやピンイン出力は再問い合わせ
-- 公式英名は維持（例: Geely Galaxy の 'Galaxy' はOK）
-- 日本ブランド/モデルはカタカナ優先
-- キャッシュは毎回削除して再生成
+- 厳格JSONで受け取り、CJKが残った項目だけ再問い合わせ
+- ピンインは日本語漢字の直後に括弧付きで併記（例: 星願（Xingyuan））
+- 毎回キャッシュ削除前提
 """
 
 import argparse, json, os, time, sys
@@ -15,167 +14,80 @@ from typing import Dict, List
 import pandas as pd
 import regex as re2  # pip install regex
 
-# --- regex ---
 LATIN_RE = re2.compile(r"^[\p{Latin}\p{Number}\s\-\+\/\.\(\)]+$")
 HAS_CJK  = re2.compile(r"\p{Han}")
-
-# 「ピンインっぽい」ラテン出力を検知（先頭子音群や 'ang','ong' 等を含む簡易判定）
-PINYIN_CORE = re2.compile(
-    r"(?i)\b("
-    r"(zh|ch|sh|x|q|j|z|c|s|r|y|w|b|p|m|f|d|t|n|l|g|k|h)"
-    r"[aāáǎàeēéěèiīíǐìoōóǒòuūúǔùüǘǚǜv]|\w+(ang|eng|ing|ong)\b)"
-)
-
-# ピンイン誤検知を避けたい既知ラテン語（例: Galaxy, Lavida, Passat などの正式英名）
-PINYIN_WHITELIST = {
-    "galaxy","lavida","passat","sagitar","magotan","tayron","tharu","bingo",
-    "arrizo","tiggo","binyue","xingyue","boyue","hongqi","aion","voyah","deepal",
-    "neta","zeekr","li auto","xpeng","aito","denza","wuling","changan","geely",
-    "byd","haval","chery","a6 l","c-class","3 series","cr-v","sylphy","teana",
-    "sunny","bluebird","camry","corolla","frontlander","rav4","galaxy a7",
-    "seal","dolphin","sea lion","song plus","song pro","han","tang","qin",
-    "atto 3","dolphin mini","yuan plus","yuan up","leap c10","envision plus"
-}
 
 DEF_MODEL = "gpt-4o-mini"
 BATCH = 50
 RETRY = 3
 SLEEP = 1.0
 
-# --- ブランド用プロンプト ---
+# --- プロンプト定義（改訂版） ---
+
 PROMPT_BRAND = """
-あなたは自動車ブランド名の正規化を行う変換器です。
-入力は中国語・英語・日本語が混在したブランド名です。出力は JSON のみ。
+あなたは自動車ブランド名の正規化を行う変換器です。入力は中国語や混在表記のブランド名です。
+以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
 
 【出力仕様】
-- 厳密に: {"map": {"<入力>": "<出力>", ...}}
-- すべての入力キーを含める。JSON以外の文字（注釈・コードブロック等）禁止。
-- 出力は単一文字列。
+- 厳密に次の形式: {"map": {"<入力>": "<出力>", ...}}
+- 入力のすべてのキーを含めること。
+- JSON以外の文字（説明文・注釈・コードブロック）は一切禁止。
 
-【優先順序】
-A) グローバルで通用する英語(ラテン)表記が明確なら、その綴りを採用（BYD, NIO, XPeng, Zeekr, Li Auto, Geely, Chery, Haval, Volkswagen, Audi, BMW, Mercedes-Benz）。
-B) **日本メーカー（トヨタ、ホンダ、日産、三菱、マツダ、スバル、スズキ、ダイハツ）は必ずカタカナ表記**。
-C) 上記以外で国際的ラテン表記が不明な場合は、**簡体字→日本語の字形（新字体）**へ自然置換（红旗→紅旗、长安→長安、东风→東風）。
-D) **輸出市場で統一されたグローバル英名が存在する場合は優先**（比亚迪→BYD、吉利→Geely、奇瑞→Chery、哈弗→Haval、吉利银河→Geely Galaxy）。
-E) 記号・英数字・スペースは保持。**ピンイン（発音ローマ字）だけで構成された出力は禁止**。
-F) ハルシネーション禁止。確信が持てない場合は入力を返すが、上記ルールに最大限従う。
+【ルール】
+1) でたらめ禁止。確信が持てない場合は入力をそのまま返す。
+2) 記号・英数字・スペースは温存。
+3) 出力は単一文字列。括弧や注釈は不要。
 
-【代表例】（辞書ではない。パターン学習用）
-- 比亚迪 → BYD
-- 吉利汽车 → Geely
-- 吉利银河 → Geely Galaxy
-- 奇瑞 → Chery
-- 哈弗 → Haval
-- 红旗 → Hongqi
-- 五菱汽车 → Wuling
-- 长安 → Changan
-- 岚图 → Voyah
-- 深蓝 → Deepal
-- 哪吒 → Neta
-- 腾势 → Denza
-- 智己 → IM Motors
-- 小鹏 → XPeng
-- 小米汽车 → Xiaomi
-- 特斯拉 → Tesla
-- 丰田 → トヨタ
-- 本田 → ホンダ
-- 日产 → 日産
-- 大众 → Volkswagen
-- 奔驰 → Mercedes-Benz
-- 宝马 → BMW
-
-これらの規則と例に従い、与えられた `items` を統一し、JSONのみ返答。
+【ブランド変換規則】
+A) グローバルで通用するラテン表記がある場合はその綴りを使う。
+   例: "BYD", "NIO", "Li Auto", "XPeng", "Zeekr", "Xiaomi", "Volkswagen", "Audi", "BMW"
+B) 日本で広く通用する自動車メーカー名はカタカナにする。
+   例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ", "メルセデス・ベンツ", "フォルクスワーゲン", "ビュイック"
+C) 中国語のみで国際表記がない場合は、簡体字→日本語の新字体へ変換。
+   例: "红旗"→"紅旗", "长安"→"長安"
+D) ピンイン表記しかないブランドは、漢字（ピンイン）の形式にする。
+   例: "长安"→"長安（Changan）"
+E) BYD「海洋シリーズ」（海豹/海獅/海豚/海鷗）はグローバル名が確立しているため、ブランドは常に"BYD"とする。
 """
 
-# --- モデル用プロンプト ---
 PROMPT_MODEL = """
-あなたは自動車のモデル（車名/シリーズ名）を正規化する変換器です。
-入力は中国語・英語・日本語混在。出力は JSON のみ。
+あなたは自動車のモデル名（車名/シリーズ名）の正規化を行う変換器です。
+入力は中国語または混在表記のモデル名です。以下の規則に厳密に従い、日本語での最終表示用に統一してください。
+出力は JSON のみ。
 
 【出力仕様】
-- 厳密に: {"map": {"<入力>": "<出力>", ...}}
-- 全入力キーを含める。JSON以外の文字禁止。出力は単一文字列。
+- 厳密に次の形式: {"map": {"<入力>": "<出力>", ...}}
+- 入力のすべてのキーを含めること。
+- JSON以外の文字（説明・注釈・コードブロック）は一切禁止。
 
-【変換方針】
-E) グローバルで通用するラテン表記があれば採用（Model 3, Han, Seal, Dolphin, 001, SU7）。
-F) **日本メーカーの定番モデルはカタカナ**（カローラ, アコード, シビック, フィット, プリウス, シルフィー, カムリ）。
-G) 中国語固有シリーズで国際ラテンが不明なら、**簡体字→日本語字形（新字体）**へ自然置換（轩逸→軒逸, 星愿→星願, 海狮→海獅）。
-H) グレード/派生（Pro, MAX, Plus, DM-i, EV, PHEV 等）は保持。
-I) ブランド名混在（本田CR-V等）はモデルのみを残す（CR-V）。
-J) **輸出向け公式英名が存在する場合は中国国内名より優先**。
-   例: 元PLUS→Atto 3, 元UP→Dolphin Mini, 海豚→Dolphin, 海豹→Seal, 海狮→Sea Lion,
-       宋PLUS→Song PLUS, 宋Pro→Song Pro, 唐→Tang, 秦→Qin, 汉→Han,
-       朗逸→Lavida, 速腾→Sagitar, 探岳→Tayron, 途岳→Tharu, 迈腾→Magotan,
-       缤越→Binyue, 星越L→Xingyue L, 博越L→Boyue L, 瑞虎8→Tiggo 8, 艾瑞泽8→Arrizo 8,
-       奔驰C级→C-Class, 宝马3系→3 Series, 五菱缤果→Bingo, 哈弗大狗→Big Dog。
-K) **ピンイン（発音ローマ字）だけで構成された出力は禁止**。その場合の代替:
-   - 日本メーカーの既知モデル名ならカタカナ（轩逸→シルフィー 等）
-   - それ以外は**簡体字→日本語字形**に置換（星愿→星願 等）
-L) **例外**: 公式英名として確立している語はラテン表記を保持（例: Galaxy A7 の "Galaxy"）。
+【共通ルール】
+1) 確信が持てない場合は入力をそのまま返す。
+2) 記号・英数字・スペースはそのまま残す（例: "Model 3", "DM-i", "Pro"）。
+3) 出力は単一文字列。
 
-【代表例】（辞書ではない。パターン学習用）
-- 秦PLUS → Qin PLUS
-- 秦L → Qin L
-- 海豹06新能源 → Seal 06
-- 海豚 → Dolphin
-- 海狮06新能源 → Sea Lion 06
-- 朗逸 → Lavida
-- 速腾 → Sagitar
-- 帕萨特 → Passat
-- 探岳 → Tayron
-- 途岳 → Tharu
-- 星越L → Xingyue L
-- 博越L → Boyue L
-- 缤越 → Binyue
-- 瑞虎8 → Tiggo 8
-- 艾瑞泽8 → Arrizo 8
-- 五菱缤果 → Bingo
-- 哈弗大狗 → Big Dog
-- 锋兰达 → Frontlander
-- 卡罗拉锐放 → Corolla Cross
-- 本田CR-V → CR-V
-- 奔驰C级 → C-Class
-- 宝马3系 → 3 Series
-- 红旗H5 → Hongqi H5
-- 问界M8 → M8
-- 小米SU7 → SU7
-- 银河A7 → Galaxy A7
-- 轩逸 → Sylphy（日本語表記の場合は「シルフィー」）
-
-上記ルール＋例に従い、与えられた `items` を統一し、JSONのみ返答。
+【モデル変換規則】
+A) グローバルに通用するラテン表記のモデル名がある場合はそのまま採用。
+   例: "Model 3", "Seal", "Atto 3", "Dolphin", "Song PLUS", "Coolray"
+B) 日本で長年使われている日本メーカーのモデルはカタカナ表記。
+   例: シルフィー, アコード, カムリ, カローラ, シビック, フィット, プリウス, アルファード, ヤリス
+C) BYD海洋シリーズ（海豹/海獅/海豚/海鷗）は英語動物名に変換。
+   例: 海豹→Seal, 海獅→Sea Lion, 海豚→Dolphin, 海鷗→Seagull
+D) グローバル名がない場合で、ピンインが使われるモデルは「漢字（ピンイン）」形式にする。
+   例: 星願→星願（Xingyuan）, 逸動→逸動（Yidong）, 宏光MINIEV→宏光（Hongguang）MINIEV
+E) ブランド名が重複している場合（例: "本田CR-V"）はブランド名部分を削除してモデル名のみを残す。
+F) グレード/派生記号（Pro, MAX, Plus, DM-iなど）はそのまま残す。
+G) 缤越→Coolray, 博越→Atlas など輸出名がある場合はグローバル名を優先。
 """
 
-def is_pinyinish(text: str) -> bool:
-    """ピンインっぽい英字出力を検出（ただし既知の公式ラテン語は除外）"""
-    t = (text or "").strip().lower()
-    if not t:
-        return False
-    # whitelist（公式名など）は除外
-    for w in PINYIN_WHITELIST:
-        if t == w or t.endswith(" " + w) or w in t:
-            return False
-    # 純ラテン以外はここでは扱わない
-    if HAS_CJK.search(text):
-        return False
-    # ピンインコアパターンに合致すれば疑わしい
-    return PINYIN_CORE.search(t) is not None
+def is_latin(x: str) -> bool:
+    return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
 
 def load_cache(path: str) -> Dict[str, Dict[str, str]]:
-    # 毎回キャッシュ削除
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-            print(f"[INFO] Cache file {path} deleted for fresh run.")
-        except Exception as e:
-            print(f"[WARN] Cache delete failed: {e}")
+    # キャッシュ削除前提なので、常に空で開始
     return {"brand": {}, "model": {}}
 
 def save_cache(path: str, data: Dict[str, Dict[str, str]]):
-    if not path:
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    pass  # キャッシュは保存しない
 
 def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
     from openai import OpenAI
@@ -195,7 +107,6 @@ def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
             txt = resp.choices[0].message.content.strip()
             obj = json.loads(txt)
             mp = obj.get("map", {})
-            # 入力キーを必ず含む形で戻す
             return {x: mp.get(x, x) for x in items}
         except Exception:
             if attempt == RETRY - 1:
@@ -207,13 +118,8 @@ def chunked(lst: List[str], n: int):
     for i in range(0, len(lst), n):
         yield lst[i:i+n]
 
-def requery_problematic(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
-    """CJK残り or ピンイン疑いの出力のみ再問い合わせ"""
-    bad = []
-    for k, v in map_in.items():
-        val = str(v or "")
-        if HAS_CJK.search(val) or is_pinyinish(val):
-            bad.append(k)
+def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
+    bad = [k for k, v in map_in.items() if HAS_CJK.search(str(v or ""))]
     if not bad:
         return map_in
     fix = call_llm(bad, prompt, model)
@@ -229,7 +135,6 @@ def main():
     ap.add_argument("--brand-ja-col", default="brand_ja")
     ap.add_argument("--model-ja-col", default="model_ja")
     ap.add_argument("--model", default=DEF_MODEL)
-    ap.add_argument("--cache", default=".cache/global_map.json")
     args = ap.parse_args()
 
     if not os.getenv("OPENAI_API_KEY"):
@@ -238,35 +143,33 @@ def main():
 
     df = pd.read_csv(args.input)
     if args.brand_col not in df.columns or args.model_col not in df.columns:
-        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'.")
+        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}")
 
-    cache = load_cache(args.cache)
+    cache = {"brand": {}, "model": {}}
 
-    # --- ブランド変換 ---
+    # ----- brand -----
     brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
     brand_map = {}
     for batch in chunked(brands, BATCH):
         part = call_llm(batch, PROMPT_BRAND, args.model)
         brand_map.update(part)
-        brand_map = requery_problematic(brand_map, PROMPT_BRAND, args.model)
-        cache["brand"] = brand_map; save_cache(args.cache, cache)
+        brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
 
-    # --- モデル変換 ---
+    # ----- model -----
     models = sorted(set(str(x) for x in df[args.model_col].dropna()))
     model_map = {}
     for batch in chunked(models, BATCH):
         part = call_llm(batch, PROMPT_MODEL, args.model)
         model_map.update(part)
-        model_map = requery_problematic(model_map, PROMPT_MODEL, args.model)
-        cache["model"] = model_map; save_cache(args.cache, cache)
+        model_map = requery_nonlatin(model_map, PROMPT_MODEL, args.model)
 
-    # --- 適用 ---
+    # ----- apply -----
     df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
     df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"[OK] LLM-normalized (v4: export-name priority & no-pinyin): {args.input} -> {args.output} (rows={len(df)})")
+    print(f"[OK] LLM-normalized: {args.input} -> {args.output} (rows={len(df)})")
 
 if __name__ == "__main__":
     main()
