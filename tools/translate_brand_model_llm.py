@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-LLMで中国名→表示用名に正規化（辞書最小）
+LLMで中国名→表示用（日本語優先／グローバル名併用）に正規化（辞書最小）
 - ブランド/モデルをユニーク抽出→LLMにバッチ問い合わせ
 - 厳格JSONで受け取り、CJKが残った項目だけ再問い合わせ
-- 既にLatinは素通し、なければ漢字（必要に応じてピンイン併記）へフォールバック
-- 実行毎にキャッシュを削除して常に最新ルールで再計算
+- 既にLatinは素通し、なければ『漢字本体（Pinyin）+サフィックス』へフォールバック
+- 実行ごとにキャッシュは削除（毎回クリーンにやり直す）
 """
 
 import argparse, json, os, time, sys
@@ -22,8 +22,7 @@ BATCH = 50
 RETRY = 3
 SLEEP = 1.0
 
-# --- プロンプト（強化版。日本車カタカナ／ブランド片除去／ピンイン括弧の一貫性） ---
-
+# --- 差し替え済みプロンプト（最小だが強い few-shot 付き） ---
 PROMPT_BRAND = """
 あなたはChatGPT本体と同等の理解力を持つ変換器です。入力は中国語/混在表記の自動車ブランド名です。
 以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
@@ -35,28 +34,41 @@ PROMPT_BRAND = """
 
 【共通ルール】
 1) 捏造禁止。確信が持てない場合は**入力をそのまま返す**。
-2) 記号・英数字・スペースは保存。
-3) 出力は**単一文字列**のみ（括弧や注釈を付けない）。
+2) 出力は**単一文字列**のみ（説明・注釈を付けない）。
+3) 日本で一般に定着したカタカナ名がある場合は**必ずカタカナ**にする。
+   例: "丰田"→"トヨタ", "本田"→"ホンダ", "日产"→"日産",
+       "大众"→"フォルクスワーゲン", "奥迪"→"アウディ",
+       "别克"→"ビュイック", "奔驰"→"メルセデス・ベンツ"。
+4) 中国系や新興でカタカナ慣用が弱い場合は**グローバル英名**を採用（BYD, XPeng, Li Auto, NIO, Zeekr, Geely, Wuling, Haval, Chery, Hongqi, Leapmotor, AITO, Xiaomi など）。
+5) サブブランド「吉利银河」は **"Geely Galaxy"** を採用。
+6) **取り違え禁止（重要）**：
+   - "吉利"/"吉利汽车" は **Geely / ジーリー**（**Chery/奇瑞ではない**）
+   - "奇瑞" は **Chery / チリ**（**Geely/吉利ではない**）
 
-【ブランド優先順】
-A) **日本メーカーは必ず日本語カタカナ表記**に統一：
-   トヨタ, ホンダ, 日産, 三菱, マツダ, スバル, スズキ, ダイハツ, レクサス。
-   例: "丰田"→"トヨタ"、"本田"→"ホンダ"、"日产"→"日産"。
-B) A以外で**日本で一般に定着した日本語ブランド名**がある場合は日本語表記：
-   例: "Volkswagen"→"フォルクスワーゲン", "Audi"→"アウディ", "Buick"→"ビュイック",
-       "Mercedes-Benz"→"メルセデス・ベンツ", "Porsche"→"ポルシェ" など。
-C) Bに該当せず、**グローバルで通用するラテン表記が明確**なら、その綴りを採用：
-   例: BYD, XPeng, Li Auto, NIO, Zeekr, Geely, Wuling, Haval, Chery, Hongqi, Leapmotor, AITO, Xiaomi。
-   例外：サブブランドとしての "吉利银河" は "Geely Galaxy" を採用。
-D) それ以外（国際ラテン表記が不明）は**簡体字→日本語の新字体**へ自然置換：
-   "红旗"→"紅旗"、"长安"→"長安" 等。
-E) ジョイントベンチャー表記は最上位ブランドに統一してよいが、確信がなければD。
+【Few-shot（厳守例）】
+入力→出力:
+- "丰田" → "トヨタ"
+- "日产" → "日産"
+- "大众" → "フォルクスワーゲン"
+- "别克" → "ビュイック"
+- "奔驰" → "メルセデス・ベンツ"
+- "奥迪" → "アウディ"
+- "红旗" → "紅旗"
+- "吉利汽车" → "Geely"
+- "吉利银河" → "Geely Galaxy"
+- "奇瑞" → "Chery"
+- "五菱汽车" → "Wuling"
+- "小米汽车" → "Xiaomi"
+- "零跑汽车" → "Leapmotor"
+- "哈弗" → "Haval"
+- "长安" → "長安"
+- "长安启源" → "長安啓源"
 
 理解したら、与えられた `items` についてJSONのみを返す。
 """
 
 PROMPT_MODEL = """
-あなたはChatGPT本体と同等の理解力を持つ変換器です。入力は中国語/混在表記の車名（シリーズ名/モデル名）です。
+あなたはChatGPT本体と同等の理解力を持つ変換器です。入力は中国語/混在表記の車名（シリーズ/モデル）です。
 以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
 
 【出力仕様】
@@ -64,38 +76,58 @@ PROMPT_MODEL = """
 - 入力に含まれる全てのキーを必ず含める。
 - JSON以外の文字（説明/注釈/コードブロック/末尾カンマ）は禁止。
 
-【絶対遵守の共通ルール】
-0) **モデル名の先頭に付いたブランド片は必ず除去**（"本田CR-V"→"CR-V"、"小米SU7"→"SU7"）。
-1) **記号・英数字・スペース・大小は保存**（"Model 3", "DM-i", "Pro", "PLUS", "L", "EV", "PHEV", "06" など）。
-2) 出力は**単一文字列**のみ（説明・注釈を付けない）。
+【絶対遵守】
+A) **先頭のブランド片は必ず除去**（"本田CR-V"→"CR-V", "小米SU7"→"SU7"）。
+B) **記号・英数字・大小・スペースは保存**（例: "Model 3", "DM-i", "Pro", "PLUS", "L", "EV", "PHEV", "05/06"）。
+C) 出力は**単一文字列**のみ。
 
-【優先順（強度が高い順）】
-A) **日本メーカーの既定カタカナ車名は必ずカタカナ**：
-   例: "轩逸"→"シルフィー"（Sylphy）, "凯美瑞"→"カムリ", "卡罗拉锐放"→"カローラクロス",
-       "雅阁"→"アコード", "本田CR-V"→"CR-V", "丰田RAV4荣放"→"RAV4"。
-   ※ 英字記号名（RAV4等）はそのまま。
-B) **中国以外OEMや中国市場の英語公式名が広く通用**：ラテン表記を採用。
-   例: Lavida, Magotan, Tayron, Tharu, Frontlander, Atlas L, Atto 3, Seal 06 など。
-C) **中国語固有シリーズ名**で国際ラテン表記が不明/保持したい固有漢字がある場合、
-   **『漢字本体（Pinyin）+ サフィックス』**の形にする（全角括弧、直後に1回のみ）。
-   - 派生/グレード等のサフィックスは入力通りを後置：PLUS, Pro, MAX, DM-i, EV, PHEV, L, 05/06 など。
-   - 例：
-     "星愿"→"星願（Xingyuan）"
-     "宏光MINIEV"→"宏光（Hongguang）MINIEV"
-     "星越L"→"星越（Xingyue）L"
-     "秦PLUS"→"秦（Qin）PLUS"
-     "秦L"→"秦（Qin）L"
-     "宋PLUS"→"宋（Song）PLUS"
-     "宋Pro"→"宋（Song）Pro"
-     "海狮06新能源"→"海狮（Haishi）06新能源"
-     "海豹05 DM-i"→"海豹（Haibao）05 DM-i"
-D) **ブランド名の再付与は禁止**（モデル出力にブランドを繰り返さない）。
+【優先順位】
+1) **日本メーカーの既定カタカナ名を必ず採用**：
+   - "轩逸"→"シルフィー", "凯美瑞"→"カムリ", "卡罗拉锐放"→"カローラクロス",
+     "雅阁"→"アコード", "本田CR-V"→"CR-V", "RAV4荣放"→"RAV4"。
+2) **国際的に定着した英名がある場合は英名**：
+   - 大众系: Lavida（朗逸）, Magotan（迈腾）, Tayron（探岳）, Tharu（途岳）,
+     Passat, Tiguan L, Atlas L（博越L）, Frontlander（锋兰达）
+   - BYD系: Atto 3（元PLUS）, Seal 06（海豹06）, Sea Lion 06（海狮06）, Dolphin（海豚）, Dolphin Mini（元UP）
+3) 2に該当しない**中国語固有名**は
+   **『漢字本体（Pinyin）+ サフィックス』**（全角括弧）で統一：
+   例: "星愿"→"星願（Xingyuan）", "宏光MINIEV"→"宏光（Hongguang）MINIEV",
+       "星越L"→"星越（Xingyue）L", "秦PLUS"→"秦（Qin）PLUS",
+       "秦L"→"秦（Qin）L", "宋PLUS"→"宋（Song）PLUS",
+       "宋Pro"→"宋（Song）Pro", "海豹05 DM-i"→"海豹（Haibao）05 DM-i"。
+4) **取り違え防止（重要）**：
+   - "元UP" は **"Dolphin Mini"**（"元（Yuan）UP" ではない）
+   - "朗逸" は **"Lavida"**
+   - "迈腾" は **"Magotan"**
+   - "锋兰达" は **"Frontlander"**
+   - "缤越" は **"Coolray"**
+5) **括弧位置の揺らぎ禁止**：
+   - 常に「**本体（Pinyin）**」の直後にサフィックス（"PLUS", "Pro", "L", "DM-i", "MINIEV" 等）を続ける。
+   - 例：×「宋(Song)PLUS」→ ○「宋（Song）PLUS」
 
-【品質ガード（再確認の観点）】
-- 出力に中国語が残ってよいのは C の**漢字本体**のみ。ピンインは**全角括弧**で直後に1回だけ付す。
-- 先頭ブランド片の取り残し（"小米SU7"→"SU7" 等）を禁止。
-- "宋(Song)PLUS" など括弧位置の揺らぎは禁止。**必ず『本体（Pinyin）＋サフィックス』**の順。
-- 日本車はローマ字を原則使わず**既定カタカナ**を優先（例外：RAV4等の公式英字名）。
+【Few-shot（厳守例）】
+入力→出力:
+- "轩逸" → "シルフィー"
+- "凯美瑞" → "カムリ"
+- "卡罗拉锐放" → "カローラクロス"
+- "雅阁" → "アコード"
+- "RAV4荣放" → "RAV4"
+- "本田CR-V" → "CR-V"
+- "朗逸" → "Lavida"
+- "迈腾" → "Magotan"
+- "探岳" → "Tayron"
+- "途岳" → "Tharu"
+- "博越L" → "Atlas L"
+- "锋兰达" → "Frontlander"
+- "元PLUS" → "Atto 3"
+- "元UP" → "Dolphin Mini"
+- "海豚" → "Dolphin"
+- "海狮06新能源" → "Sea Lion 06"
+- "海豹06新能源" → "Seal 06"
+- "宏光MINIEV" → "宏光（Hongguang）MINIEV"
+- "秦PLUS" → "秦（Qin）PLUS"
+- "秦L" → "秦（Qin）L"
+- "星愿" → "星願（Xingyuan）"
 
 理解したら、与えられた `items` についてJSONのみを返す。
 """
@@ -104,13 +136,12 @@ def is_latin(x: str) -> bool:
     return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
 
 def load_cache(path: str) -> Dict[str, Dict[str, str]]:
-    # 実行毎にキャッシュ削除（ファイルがあれば消す）
+    # 実行ごとにキャッシュ削除（要求どおり）
     if path and os.path.isfile(path):
         try:
             os.remove(path)
         except Exception:
             pass
-    # 以降は空キャッシュで開始
     return {"brand": {}, "model": {}}
 
 def save_cache(path: str, data: Dict[str, Dict[str, str]]):
@@ -138,7 +169,7 @@ def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
             txt = resp.choices[0].message.content.strip()
             obj = json.loads(txt)
             mp  = obj.get("map", {})
-            # 未応答キーは入力そのまま
+            # 返ってこなかったキーは恒等写像
             return {x: mp.get(x, x) for x in items}
         except Exception:
             if attempt == RETRY - 1:
@@ -151,22 +182,12 @@ def chunked(lst: List[str], n: int):
         yield lst[i:i+n]
 
 def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
-    # 出力側に中国語（漢字）が“残ってはダメ”という意味ではなく、
-    # 規則Cの「漢字本体（Pinyin）＋サフィックス」形式を満たさないラテン偏重や
-    # 説明混入を再問い合わせで矯正する。
-    # ここでは “ピンイン丸出しだけ” を検知して再問い合わせする。
-    need_fix = []
-    for k, v in map_in.items():
-        s = str(v or "")
-        if not s:
-            need_fix.append(k)
-            continue
-        # JSONは満たしている前提。CJKゼロ＆元がCJKのみのときは要再問い合わせ
-        if not HAS_CJK.search(s) and HAS_CJK.search(str(k)):
-            need_fix.append(k)
-    if not need_fix:
+    # CJKが残っていても、“日本語既定/英名優先/漢字（Pinyin）ルール”に該当し得るので
+    # もう一度だけ該当キーを再問い合わせ
+    bad = [k for k, v in map_in.items() if HAS_CJK.search(str(v or "")) and not is_latin(str(v or ""))]
+    if not bad:
         return map_in
-    fix = call_llm(need_fix, prompt, model)
+    fix = call_llm(bad, prompt, model)
     map_in.update(fix)
     return map_in
 
