@@ -106,7 +106,6 @@ def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
             txt = resp.choices[0].message.content.strip()
             obj = json.loads(txt)
             mp  = obj.get("map", {})
-            # 未返答は原文
             return {x: mp.get(x, x) for x in items}
         except Exception:
             if attempt == RETRY - 1:
@@ -119,7 +118,6 @@ def chunked(lst: List[str], n: int):
         yield lst[i:i+n]
 
 def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
-    # 値にCJKが残っているキーだけ再問い合わせ
     bad = [k for k, v in map_in.items() if HAS_CJK.search(str(v or ""))]
     if not bad:
         return map_in
@@ -151,29 +149,23 @@ def main():
 
     # ----- brand -----
     brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
-    need   = [b for b in brands if not is_latin(b) and b not in cache["brand"]]
+    need = [b for b in brands if b not in cache["brand"]]
     brand_map = dict(cache["brand"])
     for batch in chunked(need, BATCH):
         part = call_llm(batch, PROMPT_BRAND, args.model)
         brand_map.update(part)
         brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
         cache["brand"] = brand_map; save_cache(args.cache, cache)
-    for b in brands:
-        if is_latin(b) and b not in brand_map:
-            brand_map[b] = b
 
     # ----- model -----
     models = sorted(set(str(x) for x in df[args.model_col].dropna()))
-    need   = [m for m in models if not is_latin(m) and m not in cache["model"]]
+    need = [m for m in models if m not in cache["model"]]
     model_map = dict(cache["model"])
     for batch in chunked(need, BATCH):
         part = call_llm(batch, PROMPT_MODEL, args.model)
         model_map.update(part)
         model_map = requery_nonlatin(model_map, PROMPT_MODEL, args.model)
         cache["model"] = model_map; save_cache(args.cache, cache)
-    for m in models:
-        if is_latin(m) and m not in model_map:
-            model_map[m] = m
 
     # ----- apply -----
     df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
