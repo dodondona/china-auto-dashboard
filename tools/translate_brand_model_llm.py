@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-LLMで中国名→グローバル英名に正規化（辞書なし・ルール＋少量例で一般化）
+LLMで中国名→グローバル英名に正規化（ルール＋代表例＋輸出名優先）
 - ブランド/モデルをユニーク抽出→LLMにバッチ問い合わせ
 - 厳格JSONで受け取り、CJKが残った項目だけ再問い合わせ
-- 毎回キャッシュを削除して新規に再生成（プロンプト変更即反映）
+- キャッシュは毎回削除して再生成（プロンプト変更即反映）
 """
 
 import argparse, json, os, time, sys
@@ -21,106 +21,105 @@ BATCH = 50
 RETRY = 3
 SLEEP = 1.0
 
-# --- ブランド用プロンプト（ルール＋代表例で一般化） ---
+# --- ブランド変換プロンプト ---
 PROMPT_BRAND = """
-あなたは自動車ブランド名の正規化を行う変換器です。入力は中国語や混在表記のブランド名です。
-以下の規則に厳密に従い、日本語の最終表示用に統一してください。出力は JSON のみ。
+あなたは自動車ブランド名の正規化を行う変換器です。
+入力は中国語・英語・日本語が混ざったブランド名です。
+以下の規則に厳密に従い、出力は JSON のみ。
 
 【出力仕様】
-- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
-- 入力に含まれる全てのキーを必ず含めること。
-- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
-- 出力は単一文字列のみ。括弧/注釈を付けない。
+- 厳密に: {"map": {"<入力>": "<出力>", ...}}
+- 入力すべてを含め、JSON以外の文字（注釈・コードブロック等）禁止。
+- 出力は単一文字列。
 
-【基本方針】
-1) 原則は「グローバルで通用する英語(ラテン)表記」を返す（例: BYD, NIO, Zeekr, Xiaomi, Volkswagen, Audi, BMW, Mercedes-Benz）。
-2) それが不明な場合は「日本で広く通用する日本語ブランド名」を採用（例: トヨタ、ホンダ、日産、三菱、マツダ、スバル、スズキ、ダイハツ）。
-3) それも不明な場合は「簡体字→日本語の字形（新字体）への自然置換」を行った漢字表記にする（例: 东风日产→東風日産、红旗→紅旗、长安→長安）。
-4) 記号・英数字・スペースは温存（AITO, Li Auto など）。
-5) ハルシネーションは禁止だが、確信が薄い場合でも「広く使われるグローバル綴りの推定」を優先し、漢字のままを避ける努力をする。
+【ブランドの優先順序】
+A) グローバルで通用する英語(ラテン)表記が明確なら、その綴りをそのまま採用（例: BYD, NIO, XPeng, Zeekr, Li Auto, Geely, Chery, Haval, Volkswagen, Audi, BMW, Mercedes-Benz）。
+B) **日本メーカー（トヨタ、ホンダ、日産、三菱、マツダ、スバル、スズキ、ダイハツ）は必ずカタカナ表記**にする。
+C) 上記以外で国際的ラテン表記が不明な場合は、簡体字→日本語の字形（新字体）へ自然置換（例: 红旗→紅旗、长安→長安、东风→東風）。
+D) 中国ブランドでも、**輸出市場で統一されたグローバル英名が存在する場合はそちらを優先**（例: 比亚迪→BYD, 吉利→Geely, 奇瑞→Chery, 哈弗→Haval）。
+E) 記号・英数字・スペースは保持。
+F) ハルシネーション禁止。確信が持てない場合は入力をそのまま返すが、上記ルールに最大限従う。
 
-【代表例】（網羅ではない・辞書ではない。パターンを学習して一般化すること）
-- 极氪 → Zeekr
-- 岚图 → Voyah
-- 哪吒 → Neta
-- 深蓝 → Deepal
-- 问界 → AITO
-- 智己 → IM Motors
-- 腾势 → DENZA
-- 红旗 → Hongqi
-- 吉利 → Geely
+【代表例】
+- 比亚迪 → BYD
+- 吉利汽车 → Geely
 - 吉利银河 → Geely Galaxy
-- 长安 → Changan
-- 五菱汽车 → Wuling
 - 奇瑞 → Chery
 - 哈弗 → Haval
+- 红旗 → Hongqi
+- 五菱汽车 → Wuling
+- 长安 → Changan
+- 岚图 → Voyah
+- 深蓝 → Deepal
+- 哪吒 → Neta
+- 腾势 → Denza
+- 智己 → IM Motors
+- 小鹏 → XPeng
+- 小米汽车 → Xiaomi
+- 特斯拉 → Tesla
+- 丰田 → トヨタ
+- 本田 → ホンダ
+- 日产 → 日産
 - 大众 → Volkswagen
 - 奔驰 → Mercedes-Benz
 - 宝马 → BMW
 - 别克 → Buick
 - 奥迪 → Audi
-- 丰田 → トヨタ
-- 本田 → ホンダ
-- 日产 → 日産
-- 东风风神 → Dongfeng Aeolus
 
-上記の規則と代表例に従い、与えられた `items` を同様の基準で変換し、JSONのみを返す。
+これらの規則と例を参考に、与えられた `items` を同様に統一し、JSONのみ返答。
 """
 
-# --- モデル用プロンプト（ルール＋代表例で一般化） ---
+# --- モデル変換プロンプト ---
 PROMPT_MODEL = """
-あなたは自動車のモデル（車名/シリーズ名）の正規化を行う変換器です。入力は中国語や混在表記のモデル名です。
-以下の規則に厳密に従い、日本語の最終表示用に統一してください。出力は JSON のみ。
+あなたは自動車のモデル（車名/シリーズ名）を正規化する変換器です。
+入力は中国語・英語・日本語混在です。以下の規則に厳密に従い、JSONのみで返答。
 
 【出力仕様】
-- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
-- 入力に含まれる全てのキーを必ず含めること。
-- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
-- 出力は単一文字列のみ。括弧/注釈を付けない。
+- 厳密に: {"map": {"<入力>": "<出力>", ...}}
+- 入力すべてを含めること。
+- JSON以外の文字禁止。
+- 出力は単一文字列。
 
-【基本方針】
-E) グローバルで通用するラテン表記があればそれを採用（例: Model 3, Han, Seal, 001, SU7, Song PLUS, AION S Plus）。
-F) 日本メーカーの定番モデルはカタカナ（例: シルフィー, アコード, カムリ, カローラ, シビック, フィット, プリウス, アルファード, ヤリス）。
-G) 中国語固有シリーズで国際ラテンが不明なら、簡体字→日本語字形（新字体）へ自然置換（轩逸→軒逸, 星愿→星願, 海狮→海獅）。
-H) グレード/派生（Pro, MAX, Plus, DM-i, EV, PHEV 等）は入力どおり維持。
-I) 先頭にブランド片が付く混在（本田CR-V 等）はモデル名のみ（CR-V）を採用。
-J) ハルシネーションは禁止だが、**確信が薄い場合でも、広く使われるグローバル綴りの推定を優先**し、漢字のままを避ける努力をする（例示に倣う）。
+【変換方針】
+E) グローバルで通用するラテン表記があればそのまま採用（例: Model 3, Han, Seal, Dolphin, 001, SU7）。
+F) **日本メーカーの定番モデルはカタカナ表記を優先**（例: カローラ, アコード, シビック, フィット, プリウス, シルフィー, カムリ）。
+G) 中国語固有シリーズで国際ラテンが不明なら、簡体字→日本語字形（轩逸→軒逸, 星愿→星願, 海狮→海獅）。
+H) グレード/派生（Pro, MAX, Plus, DM-i, EV, PHEV 等）は保持。
+I) ブランド名混在（本田CR-V等）はモデルのみを残す（CR-V）。
+J) **グローバル（輸出）向け英名が存在する場合は中国国内名より優先**。
+   特に BYD, Geely, Chery, Haval などは以下に従う：
+   - 元PLUS → Atto 3
+   - 元UP → Dolphin Mini
+   - 海豚 → Dolphin
+   - 海豹 → Seal
+   - 海狮 → Sea Lion
+   - 宋PLUS → Song PLUS
+   - 宋Pro → Song Pro
+   - 唐 → Tang
+   - 秦 → Qin
+   - 汉 → Han
+   - 星越L → Xingyue L
+   - 博越L → Boyue L
+   - 缤越 → Binyue
+   - 瑞虎8 → Tiggo 8
+   - 艾瑞泽8 → Arrizo 8
+   - 朗逸 → Lavida
+   - 速腾 → Sagitar
+   - 探岳 → Tayron
+   - 途岳 → Tharu
+   - 迈腾 → Magotan
+   - 奔驰C级 → C-Class
+   - 宝马3系 → 3 Series
+   - 红旗H5 → Hongqi H5
+   - 五菱缤果 → Bingo
+   - 哈弗大狗 → Big Dog
+K) ハルシネーション禁止。確信が持てない場合は入力をそのまま返すが、上記のように可能な限りグローバル輸出名を採用。
 
-【代表例】（網羅ではない・辞書ではない。パターンを学習して一般化すること）
-- 秦PLUS → Qin PLUS
-- 秦L → Qin L
-- 海豹 → Seal
-- 海豹05 DM-i → Seal 05 DM-i
-- 海豹06新能源 → Seal 06
-- 海豚 → Dolphin
-- 海狮06新能源 → Sea Lion 06
-- 朗逸 → Lavida
-- 速腾 → Sagitar
-- 帕萨特 → Passat
-- 探岳 → Tayron
-- 途岳 → Tharu
-- 星越L → Xingyue L
-- 博越L → Boyue L
-- 缤越 → Binyue
-- 瑞虎8 → Tiggo 8
-- 艾瑞泽8 → Arrizo 8
-- 五菱缤果 → Bingo
-- 哈弗大狗 → Big Dog
-- 锋兰达 → Frontlander
-- 卡罗拉锐放 → Corolla Cross
-- 本田CR-V → CR-V
-- 奔驰C级 → C-Class
-- 宝马3系 → 3 Series
-- 红旗H5 → Hongqi H5
-- 问界M8 → M8
-- 小米SU7 → SU7
-- 银河A7 → A7
-
-上記の規則と代表例に従い、与えられた `items` を同様の基準で変換し、JSONのみを返す。
+上記ルール＋例に従い、与えられた `items` を統一してJSONのみ返答。
 """
 
 def load_cache(path: str) -> Dict[str, Dict[str, str]]:
-    # キャッシュを毎回リセット
+    # キャッシュは毎回削除
     if path and os.path.exists(path):
         try:
             os.remove(path)
@@ -146,14 +145,14 @@ def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
                 model=model,
                 messages=[
                     {"role": "system", "content": "Reply with strict JSON only. No prose."},
-                    {"role": "user",   "content": user},
+                    {"role": "user", "content": user},
                 ],
                 temperature=0,
                 response_format={"type": "json_object"},
             )
             txt = resp.choices[0].message.content.strip()
             obj = json.loads(txt)
-            mp  = obj.get("map", {})
+            mp = obj.get("map", {})
             return {x: mp.get(x, x) for x in items}
         except Exception:
             if attempt == RETRY - 1:
@@ -166,7 +165,6 @@ def chunked(lst: List[str], n: int):
         yield lst[i:i+n]
 
 def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
-    # 出力にCJKが残ったキーのみ再問い合わせ（1回）
     bad = [k for k, v in map_in.items() if HAS_CJK.search(str(v or ""))]
     if not bad:
         return map_in
@@ -192,12 +190,11 @@ def main():
 
     df = pd.read_csv(args.input)
     if args.brand_col not in df.columns or args.model_col not in df.columns:
-        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}")
+        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'.")
 
-    # 🔁 キャッシュリセット
     cache = load_cache(args.cache)
 
-    # ----- brand -----
+    # --- ブランド変換 ---
     brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
     brand_map = {}
     for batch in chunked(brands, BATCH):
@@ -206,7 +203,7 @@ def main():
         brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
         cache["brand"] = brand_map; save_cache(args.cache, cache)
 
-    # ----- model -----
+    # --- モデル変換 ---
     models = sorted(set(str(x) for x in df[args.model_col].dropna()))
     model_map = {}
     for batch in chunked(models, BATCH):
@@ -215,13 +212,13 @@ def main():
         model_map = requery_nonlatin(model_map, PROMPT_MODEL, args.model)
         cache["model"] = model_map; save_cache(args.cache, cache)
 
-    # ----- apply -----
+    # --- 適用 ---
     df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
     df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"[OK] LLM-normalized (rules+examples, fresh): {args.input} -> {args.output} (rows={len(df)})")
+    print(f"[OK] LLM-normalized (export/global-name priority): {args.input} -> {args.output} (rows={len(df)})")
 
 if __name__ == "__main__":
     main()
