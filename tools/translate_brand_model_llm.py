@@ -5,7 +5,7 @@
 LLMで中国名→グローバル英名に正規化（辞書最小）
 - ブランド/モデルをユニーク抽出→LLMにバッチ問い合わせ
 - 厳格JSONで受け取り、CJKが残った項目だけ再問い合わせ
-- 既にLatinは素通し、なければピンイン(Title Case)へフォールバック
+- 毎回キャッシュを削除して新規に再生成（プロンプト変更即反映）
 """
 
 import argparse, json, os, time, sys
@@ -69,17 +69,15 @@ I) 先頭に中国語ブランド片が付いている場合（例: "本田CR-V"
 理解したら、与えられた `items` についてJSONのみを返す。
 """
 
-def is_latin(x: str) -> bool:
-    return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
-
 def load_cache(path: str) -> Dict[str, Dict[str, str]]:
-    if not path or not os.path.isfile(path):
-        return {"brand": {}, "model": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"brand": {}, "model": {}}
+    # キャッシュを毎回リセット
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+            print(f"[INFO] Cache file {path} deleted for fresh run.")
+        except Exception as e:
+            print(f"[WARN] Cache delete failed: {e}")
+    return {"brand": {}, "model": {}}
 
 def save_cache(path: str, data: Dict[str, Dict[str, str]]):
     if not path:
@@ -145,13 +143,13 @@ def main():
     if args.brand_col not in df.columns or args.model_col not in df.columns:
         raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}")
 
+    # 🔁 キャッシュリセット
     cache = load_cache(args.cache)
 
     # ----- brand -----
     brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
-    need = [b for b in brands if b not in cache["brand"]]
-    brand_map = dict(cache["brand"])
-    for batch in chunked(need, BATCH):
+    brand_map = {}
+    for batch in chunked(brands, BATCH):
         part = call_llm(batch, PROMPT_BRAND, args.model)
         brand_map.update(part)
         brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
@@ -159,9 +157,8 @@ def main():
 
     # ----- model -----
     models = sorted(set(str(x) for x in df[args.model_col].dropna()))
-    need = [m for m in models if m not in cache["model"]]
-    model_map = dict(cache["model"])
-    for batch in chunked(need, BATCH):
+    model_map = {}
+    for batch in chunked(models, BATCH):
         part = call_llm(batch, PROMPT_MODEL, args.model)
         model_map.update(part)
         model_map = requery_nonlatin(model_map, PROMPT_MODEL, args.model)
@@ -173,7 +170,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"[OK] LLM-normalized: {args.input} -> {args.output} (rows={len(df)})")
+    print(f"[OK] LLM-normalized (fresh): {args.input} -> {args.output} (rows={len(df)})")
 
 if __name__ == "__main__":
     main()
