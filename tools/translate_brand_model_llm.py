@@ -23,33 +23,50 @@ SLEEP = 1.0
 
 # --- プロンプト（短く・強い指示） ---
 PROMPT_BRAND = """
-You normalize CAR BRAND names used in Mainland China to GLOBAL English.
+あなたは自動車ブランド名の正規化を行う変換器です。入力は中国語や混在表記のブランド名です。
+以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
 
-CONTRACT
-- Return ONLY JSON: {"map": {"<input>": "<globalEnglishOrPinyin>", ...}}
-- MUST include a key for EVERY input exactly as received.
-- No prose.
+【出力仕様】
+- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
+- 入力に含まれる全てのキーを必ず含めること。
+- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
 
-RULES (priority)
-1) If input is already Latin, keep as-is.
-2) If a globally established English brand exists, use that canonical spelling.
-3) Otherwise output a Hanyu Pinyin transliteration in Title Case (no tones). Do NOT return Chinese characters.
+【共通ルール】
+1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
+2) 記号・英数字・スペースは温存（例: "AITO", "BAIC", "Li Auto"）。
+3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
+
+【ブランドの優先順序】
+A) **グローバルで通用するラテン表記が明確**なら、その綴りをそのまま採用（例: "BYD", "NIO", "Li Auto", "XPeng", "Zeekr", "Xiaomi", "Volkswagen", "Audi", "BMW"）。
+B) Aに該当せず、**日本で広く通用する日本語ブランド名**が明確な場合は日本語表記（例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ"）。※確信がなければ適用しない。
+C) それ以外（中国語のみ等）で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**に自然置換した漢字表記にする（例: "东风日产"→"東風日産", "红旗"→"紅旗", "长安"→"長安"）。
+D) ジョイント・ベンチャー名（例: "东风日产", "一汽丰田"）は、A/B/Cの方針で**単一の最上位ブランド表示**に統一してよいが、確信なき場合はCを採用。
+
+理解したら、与えられた `items` についてJSONのみを返す。
 """
 
 PROMPT_MODEL = """
-You normalize CAR MODEL names sold in China to GLOBAL English.
+あなたは自動車のモデル（車名/シリーズ名）の正規化を行う変換器です。入力は中国語や混在表記のモデル名です。
+以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
 
-CONTRACT
-- Return ONLY JSON: {"map": {"<input>": "<globalEnglishOrPinyin>", ...}}
-- MUST include EVERY input exactly as received.
-- No prose.
+【出力仕様】
+- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
+- 入力に含まれる全てのキーを必ず含めること。
+- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
 
-RULES (priority)
-1) If model is already Latin (e.g., "Model Y", "A6L"), keep as-is.
-2) If a widely used global English model name exists, use it.
-3) If a Chinese brand fragment is prefixed (e.g., 本田CR-V), remove the brand part; keep the model (=> "CR-V").
-4) Preserve meaningful suffixes when part of the marketed name: "PLUS", "Pro", "DM-i".
-5) Otherwise output Hanyu Pinyin (Title Case, with natural spacing). Do NOT return Chinese characters.
+【共通ルール】
+1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
+2) 記号・英数字・スペースは温存（例: "Model 3", "AION S Plus", "001", "SU7", "e:HEV", "DM-i", "Pro", "MAX" などは変えない）。
+3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
+
+【モデルの優先順序】
+E) **グローバルで通用するラテン表記のモデル名**がある場合は、そのラテン表記をそのまま採用（例: "Model 3", "Han", "Seal", "001", "SU7", "Song PLUS", "AION S Plus"）。
+F) **日本市場で長年に通用する日本メーカーの定番モデル名**はカタカナ表記を優先（例: シルフィー/Sylphy, アコード/Accord, カムリ/Camry, カローラ/Corolla, シビック/Civic, フィット/Fit, プリウス/Prius, アルファード/Alphard, ヤリス/Yaris）。※確信がなければ E を優先しラテン表記のまま。
+G) 中国語の固有シリーズ名で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**へ自然置換した漢字表記にする（例: "轩逸"→"軒逸", "星愿"→"星願", "海狮"→"海獅"）。
+H) グレード/派生（"Pro", "MAX", "Plus", "DM-i", "EV", "PHEV" 等）は入力のまま維持。
+I) 先頭に中国語ブランド片が付いている場合（例: "本田CR-V"）はブランド片を除去し、モデル名のみを残す（"CR-V"）。
+
+理解したら、与えられた `items` についてJSONのみを返す。
 """
 
 def is_latin(x: str) -> bool:
