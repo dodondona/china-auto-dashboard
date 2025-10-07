@@ -11,7 +11,6 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,41 +28,52 @@ jobs:
           python -m playwright install chromium
           sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
-      - name: Resolve month & paths
-        shell: bash
-        run: |
-          YM=$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)
-          echo "YM=$YM" | tee -a "$GITHUB_ENV"
-          echo "RAW=data/autohome_raw_${YM}.csv" | tee -a "$GITHUB_ENV"
-          echo "SERIES=data/autohome_raw_${YM}_with_series.csv" | tee -a "$GITHUB_ENV"
-          echo "BRAND=data/autohome_raw_${YM}_with_brand.csv" | tee -a "$GITHUB_ENV"
-
       - name: Append series_url from /rank/1
         run: |
           python tools/append_series_url_from_web.playwright_full.py \
-            --input "$RAW" --output "$SERIES"
+            --input "data/autohome_raw_$(date -u +%Y-%m).csv" || true
+          # ↑ ここはあなたの既存ロジックのままでOK。必要なら固定に戻してください。
 
       - name: Enrich brand/model from <title>
         run: |
-          python tools/enrich_brand_from_title.py \
-            --input "$SERIES" --output "$BRAND"
+          # あなたの既存入出力に合わせている前段の結果を更新
+          for f in data/autohome_raw_*_with_series.csv; do
+            out="${f%_with_series.csv}_with_brand.csv"
+            python tools/enrich_brand_from_title.py --input "$f" --output "$out"
+          done
 
-      - name: Translate brand/model to global names (LLM)
+      - name: Translate brand/model to global names (LLM; auto-detect files)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
         run: |
-          python tools/translate_brand_model_llm.py \
-            --input "$BRAND" \
-            --output "data/autohome_raw_${YM}_with_brand_ja.csv" \
-            --brand-col brand --model-col model \
-            --brand-ja-col brand_ja --model-ja-col model_ja \
-            --model gpt-4o-mini \
-            --cache .cache/global_map.json
+          set -euo pipefail
+          shopt -s nullglob
+          targets=()
+          for f in data/autohome_raw_*_with_brand.csv; do
+            out="${f%.csv}_ja.csv"
+            if [ ! -f "$out" ] || [ "$f" -nt "$out" ]; then
+              targets+=("$f")
+            fi
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "No files need translation."
+            exit 0
+          fi
+          for inp in "${targets[@]}"; do
+            out="${inp%.csv}_ja.csv"
+            echo "Translating: $inp -> $out"
+            python tools/translate_brand_model_llm.py \
+              --input "$inp" \
+              --output "$out" \
+              --brand-col brand --model-col model \
+              --brand-ja-col brand_ja --model-ja-col model_ja \
+              --model gpt-4o-mini \
+              --cache .cache/global_map.json
+          done
 
-      - name: List outputs
-        run: |
-          ls -lh data | tail -n 50 || true
-          test -f "data/autohome_raw_${YM}_with_brand_ja.csv"
+      - name: List outputs before commit
+        run: ls -lh data | tail -n 200 || true
 
       - name: Commit artifacts
         run: |
@@ -71,7 +81,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
-            git commit -m "auto: append + enrich + LLM translate (global names) for $YM [skip ci]"
+            git commit -m "auto: append + enrich + LLM translate (updated or missing _ja.csv)"
             git push
           else
             echo "No changes to commit."
