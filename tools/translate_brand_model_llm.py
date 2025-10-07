@@ -21,11 +21,10 @@ BATCH = 50
 RETRY = 3
 SLEEP = 1.0
 
-# =================== プロンプト（v8：ChatGPT本体同等理解版） ===================
+# =================== プロンプト（v7：一般化ルールを強化） ===================
 
 PROMPT_BRAND = """
-あなたはChatGPT本体と同等の理解力を持ち、文脈・語感・国際的な通称に基づいて最適な変換を行う変換器です。
-出力は厳密に JSON のみ。
+あなたは自動車ブランド名の正規化を行う変換器です。出力は厳密に JSON のみ。
 
 【出力仕様】
 - 形式: {"map": {"<入力>": "<出力>", ...}}
@@ -59,8 +58,7 @@ C) 出力は単一文字列のみ。
 """
 
 PROMPT_MODEL = """
-あなたはChatGPT本体と同等の理解力を持ち、文脈・語感・国際的な通称に基づいて最適な変換を行う変換器です。
-出力は厳密に JSON のみ。
+あなたは自動車モデル名（車名/シリーズ名）の正規化を行う変換器です。出力は厳密に JSON のみ。
 
 【出力仕様】
 - 形式: {"map": {"<入力>": "<出力>", ...}}
@@ -103,4 +101,79 @@ C) **グローバル名が不明で中国語固有名**の場合は、**簡体�
 理解したら、与えられた items（モデル名配列）に対して JSON のみ返す。
 """
 
-# （以下 main 関数などはそのまま）
+
+# =================== 以降は既存どおり（変更なし） ===================
+
+def is_latin(x: str) -> bool:
+    return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
+
+def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
+    from openai import OpenAI
+    client = OpenAI()
+    user = prompt + "\nInput list (JSON array):\n" + json.dumps(items, ensure_ascii=False)
+    for attempt in range(RETRY):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Reply with strict JSON only. No prose."},
+                    {"role": "user",   "content": user},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            txt = resp.choices[0].message.content.strip()
+            obj = json.loads(txt)
+            mp  = obj.get("map", {})
+            return {x: mp.get(x, x) for x in items}
+        except Exception:
+            if attempt == RETRY - 1:
+                raise
+            time.sleep(SLEEP * (attempt + 1))
+    return {x: x for x in items}
+
+def chunked(lst: List[str], n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--brand-col", default="brand")
+    ap.add_argument("--model-col", default="model")
+    ap.add_argument("--brand-ja-col", default="brand_ja")
+    ap.add_argument("--model-ja-col", default="model_ja")
+    ap.add_argument("--model", default=DEF_MODEL)
+    args = ap.parse_args()
+
+    if not os.getenv("OPENAI_API_KEY"):
+        print("ERROR: OPENAI_API_KEY is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    df = pd.read_csv(args.input)
+    if args.brand_col not in df.columns or args.model_col not in df.columns:
+        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}")
+
+    # brand
+    brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
+    brand_map = {}
+    for batch in chunked(brands, BATCH):
+        brand_map.update(call_llm(batch, PROMPT_BRAND, args.model))
+
+    # model
+    models = sorted(set(str(x) for x in df[args.model_col].dropna()))
+    model_map = {}
+    for batch in chunked(models, BATCH):
+        model_map.update(call_llm(batch, PROMPT_MODEL, args.model))
+
+    # apply
+    df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
+    df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
+
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    df.to_csv(args.output, index=False, encoding="utf-8-sig")
+    print(f"[OK] LLM-normalized: {args.input} -> {args.output} (rows={len(df)})")
+
+if __name__ == "__main__":
+    main()
