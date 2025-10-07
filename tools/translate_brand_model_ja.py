@@ -2,201 +2,153 @@
 # -*- coding: utf-8 -*-
 
 """
-translate_brand_model_ja.py
+LLMで中国名→グローバル英名へ正規化するスクリプト（辞書極小）
+- ブランド/モデルをユニーク抽出してLLMにバッチ問い合わせ
+- 返答はJSONのみ（{"map": {...}}）を強制
+- 英数字（Latin）のものはそのまま
+- グローバル英名が存在しない/不確実なら原文のまま（作り話を禁止）
+- brand_ja / model_ja に結果を書き出す（既存カラムは保持）
 
-中国語のブランド/車種名を「グローバル名優先 → 例外はカタカナ → それ以外は原文」
-のルールで日本語列を付与する軽量スクリプト。
-
-入出力:
-  - ディレクトリ内の CSV から最新のもの（パターン指定で複数のうち最終更新が新しい）を選び、
-    brand_ja / model_ja 列を追加して別名で保存します。
-  - 既存列名は保持します。未知値は元の値を温存します。
-
-想定カラム:
-  - brand / model （存在しない場合は大小文字ゆらぎを吸収します）
-
-使い方例:
-  python scripts/translate_brand_model_ja.py \
-    --inp data --pattern "autohome_raw_*.csv" --out-suffix "_ja"
-
-依存:
-  pandas, unidecode, opencc-python-reimplemented
+例:
+  python tools/translate_brand_model_llm.py \
+    --input data/autohome_raw_2025-09_with_brand.csv \
+    --output data/autohome_raw_2025-09_with_brand_ja.csv \
+    --brand-col brand --model-col model \
+    --model gpt-4o-mini --cache .cache/global_map.json
 """
 
-import argparse
-import glob
-import os
-import re
-import sys
-from datetime import datetime
-
+import argparse, json, os, re, time, sys
+from typing import Dict, List
 import pandas as pd
-from unidecode import unidecode
-try:
-    from opencc import OpenCC
-    _CC = OpenCC('s2tjp')  # 簡体→日本語向け繁体（近似）
-except Exception:
-    _CC = None  # なくても動く（原文のままにする）
 
-# --- 1) ブランドの中国語 → グローバル英語名 ---
-BRAND_CN_TO_GLOBAL = {
-    "比亚迪": "BYD",
-    "丰田": "Toyota",
-    "一汽丰田": "Toyota",
-    "广汽丰田": "Toyota",
-    "本田": "Honda",
-    "东风本田": "Honda",
-    "广汽本田": "Honda",
-    "日产": "Nissan",
-    "东风日产": "Nissan",
-    "大众": "Volkswagen",
-    "上汽大众": "Volkswagen",
-    "一汽-大众": "Volkswagen",
-    "别克": "Buick",
-    "雪佛兰": "Chevrolet",
-    "宝马": "BMW",
-    "奔驰": "Mercedes-Benz",
-    "奥迪": "Audi",
-    "保时捷": "Porsche",
-    "理想": "Li Auto",
-    "蔚来": "NIO",
-    "小鹏": "Xpeng",
-    "吉利": "Geely",
-    "长安": "Changan",
-    "奇瑞": "Chery",
-    "红旗": "Hongqi",
-    "问界": "AITO",
-    "华为": "Huawei",  # 製品ブランドとして
-    "极氪": "Zeekr",
-    "极狐": "Arcfox",
-    "腾势": "DENZA",
-    "哪吒": "Nezha",
-    "小米": "Xiaomi",
-}
+LATIN_RE = re.compile(r"^[A-Za-z0-9\s\-\+\/\.\(\)]+$")
 
-# --- 2) 車種の中国語 → グローバル英語名（最小限・安全寄り） ---
-MODEL_CN_TO_GLOBAL = {
-    # 日系（確度高）
-    "轩逸": "Sylphy",
-    "卡罗拉": "Corolla",
-    "凯美瑞": "Camry",
-    "雅阁": "Accord",
-    "思域": "Civic",
-    "天籁": "Altima",
-    # BYD 系（直訳英語が定着）
-    "海狮": "Sea Lion",
-    "海豹": "Seal",
-    "海豚": "Dolphin",
-    "汉": "Han",
-    "秦": "Qin",
-    "宋": "Song",
-    "唐": "Tang",
-    "元": "Yuan",
-    # 汎用的に見かけるもの
-    "途观": "Tiguan",
-    "帕萨特": "Passat",
-    "迈腾": "Magotan",
-    "奥迪A4L": "A4L",
-    "奥迪A6L": "A6L",
-}
+DEFAULT_MODEL = "gpt-4o-mini"
+BATCH = 60
+RETRY = 3
+SLEEP = 1.0
 
-# --- 3) 「グローバル英語でもカタカナで出したい」例外 ---
-GLOBAL_EN_TO_KATA = {
-    "Sylphy": "シルフィ",
-    "Accord": "アコード",
-    "Camry": "カムリ",
-    # 必要に応じて追加してください
-}
+PROMPT_BRAND = (
+    "You normalize CAR BRAND names used in Mainland China to their established GLOBAL English brand names.\n"
+    "Return ONLY a JSON object: {\"map\": {\"<input>\": \"<globalEnglishOrSame>\", ...}}\n"
+    "- Keep items that are already Latin unchanged.\n"
+    "- If there is no widely established global English brand name, return the original Chinese (do NOT invent).\n"
+    "- No explanations or extra text; JSON only."
+)
 
-LATIN_RE = re.compile(r"^[A-Za-z0-9\s\-\+\/\.]+$")
+PROMPT_MODEL = (
+    "You normalize CAR MODEL names sold in China to their widely used GLOBAL English model names when such exist.\n"
+    "Return ONLY a JSON object: {\"map\": {\"<input>\": \"<globalEnglishOrSame>\", ...}}\n"
+    "- Keep items that are already Latin (e.g., \"Model Y\", \"A6L\") unchanged.\n"
+    "- If a brand fragment is prepended in Chinese (e.g., 本田CR-V), remove the brand part and keep the model (\"CR-V\").\n"
+    "- Preserve meaningful suffixes that are part of the marketed name (e.g., PLUS / Pro / DM-i) only when appropriate.\n"
+    "- If no established global English model exists, return the original Chinese (do NOT invent).\n"
+    "- No explanations or extra text; JSON only."
+)
 
+def is_latin(x: str) -> bool:
+    return isinstance(x, str) and LATIN_RE.match(x.strip() or "")
 
-def prefer_global_brand(brand_raw: str) -> str:
-    """ブランドはグローバル英語優先、なければ原文（必要なら簡→日繁変換）。"""
-    if not isinstance(brand_raw, str):
-        return brand_raw
-    brand_raw = brand_raw.strip()
-    if brand_raw in BRAND_CN_TO_GLOBAL:
-        return BRAND_CN_TO_GLOBAL[brand_raw]
-    # すでにラテン文字ならそのまま
-    if LATIN_RE.match(brand_raw):
-        return brand_raw
-    # 可能なら簡→日繁（厳密ではないため“参考程度”）
-    if _CC:
+def load_cache(path: str) -> Dict[str, Dict[str, str]]:
+    if not path or not os.path.isfile(path):
+        return {"brand": {}, "model": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"brand": {}, "model": {}}
+
+def save_cache(path: str, cache: Dict[str, Dict[str, str]]):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
+    from openai import OpenAI
+    client = OpenAI()
+    user = prompt + "\nInput list (JSON array):\n" + json.dumps(items, ensure_ascii=False)
+
+    for attempt in range(RETRY):
         try:
-            return _CC.convert(brand_raw)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Reply with strict JSON only. No prose."},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            txt = resp.choices[0].message.content.strip()
+            obj = json.loads(txt)
+            mp = obj.get("map", {})
+            # 未返答は原文にフォールバック
+            return {x: mp.get(x, x) for x in items}
         except Exception:
-            pass
-    return brand_raw
+            if attempt == RETRY - 1:
+                raise
+            time.sleep(SLEEP * (attempt + 1))
+    return {x: x for x in items}
 
-
-def prefer_global_model(model_raw: str) -> str:
-    """
-    モデルは:
-      1) 中国語→グローバル英語に変換できればそれを採用
-      2) ただし例外はカタカナに置換（Sylphy/Accord/Camry 等）
-      3) 変換できなければ、ラテン文字はそのまま / それ以外は原文（必要なら簡→日繁）
-    """
-    if not isinstance(model_raw, str):
-        return model_raw
-    text = model_raw.strip()
-    if text in MODEL_CN_TO_GLOBAL:
-        en = MODEL_CN_TO_GLOBAL[text]
-        return GLOBAL_EN_TO_KATA.get(en, en)
-
-    if LATIN_RE.match(text):
-        # 例: "SEAL DM-i", "Model Y" 等はそのまま
-        return text
-
-    # 未知の中国語は原文維持（安全）
-    if _CC:
-        try:
-            return _CC.convert(text)
-        except Exception:
-            pass
-    return text
-
-
-def find_latest_csv(directory: str, pattern: str) -> str:
-    paths = glob.glob(os.path.join(directory, pattern))
-    if not paths:
-        raise FileNotFoundError(f"No CSV matched: {os.path.join(directory, pattern)}")
-    # 最終更新日時が新しいもの
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return paths[0]
-
+def chunked(lst: List[str], n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inp", required=True, help="入力ディレクトリ")
-    ap.add_argument("--pattern", default="*.csv", help="入力CSVのglobパターン")
-    ap.add_argument("--out-suffix", default="_ja", help="出力ファイル名のサフィックス")
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--brand-col", default="brand")
+    ap.add_argument("--model-col", default="model")
+    ap.add_argument("--brand-ja-col", default="brand_ja")
+    ap.add_argument("--model-ja-col", default="model_ja")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--cache", default=".cache/global_map.json")
     args = ap.parse_args()
 
-    src = find_latest_csv(args.inp, args.pattern)
-    df = pd.read_csv(src)
+    if not os.getenv("OPENAI_API_KEY"):
+        print("ERROR: OPENAI_API_KEY is not set.", file=sys.stderr)
+        sys.exit(1)
 
-    # カラム名ゆらぎ対応
-    cols = {c.lower(): c for c in df.columns}
-    brand_col = cols.get("brand") or cols.get("brand_cn") or "brand"
-    model_col = cols.get("model") or cols.get("model_cn") or "model"
+    df = pd.read_csv(args.input)
+    if args.brand_col not in df.columns or args.model_col not in df.columns:
+        raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}' columns. got={list(df.columns)}")
 
-    if brand_col not in df.columns or model_col not in df.columns:
-        raise RuntimeError(
-            f"CSVに brand/model カラムが見つかりません: columns={list(df.columns)}"
-        )
+    cache = load_cache(args.cache)
 
-    # 変換
-    df["brand_ja"] = df[brand_col].map(prefer_global_brand)
-    df["model_ja"] = df[model_col].map(prefer_global_model)
+    # ---- brand
+    brands_all = [str(x) for x in df[args.brand_col].dropna().tolist()]
+    uniq_brand = sorted(set(brands_all))
+    need_brand = [b for b in uniq_brand if not is_latin(b) and b not in cache["brand"]]
+    brand_map = dict(cache["brand"])
+    for batch in chunked(need_brand, BATCH):
+        brand_map.update(call_llm(batch, PROMPT_BRAND, args.model))
+        cache["brand"] = brand_map; save_cache(args.cache, cache)
+    for b in uniq_brand:
+        if is_latin(b) and b not in brand_map:
+            brand_map[b] = b
 
-    # 出力名
-    base = os.path.splitext(os.path.basename(src))[0]
-    out = os.path.join(os.path.dirname(src), f"{base}{args.out_suffix}.csv")
-    df.to_csv(out, index=False, encoding="utf-8-sig")
+    # ---- model
+    models_all = [str(x) for x in df[args.model_col].dropna().tolist()]
+    uniq_model = sorted(set(models_all))
+    need_model = [m for m in uniq_model if not is_latin(m) and m not in cache["model"]]
+    model_map = dict(cache["model"])
+    for batch in chunked(need_model, BATCH):
+        model_map.update(call_llm(batch, PROMPT_MODEL, args.model))
+        cache["model"] = model_map; save_cache(args.cache, cache)
+    for m in uniq_model:
+        if is_latin(m) and m not in model_map:
+            model_map[m] = m
 
-    print(f"[OK] {src} -> {out}  (rows={len(df)})")
+    # ---- apply
+    df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
+    df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
 
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    df.to_csv(args.output, index=False, encoding="utf-8-sig")
+    print(f"[OK] LLM-normalized: {args.input} -> {args.output} (rows={len(df)})")
 
 if __name__ == "__main__":
     main()
