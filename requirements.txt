@@ -1,5 +1,6 @@
 # 既存
 openai>=1.40.0
+anthropic>=0.26.0
 pillow
 playwright
 google-generativeai>=0.7.2
