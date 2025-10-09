@@ -54,8 +54,11 @@ jobs:
           # 2. 仮想環境を有効化
           source .venv-translate/bin/activate
           
-          # 3. この独立環境に、最新のGeminiライブラリとpandasだけをインストール
+          # 3. この独立環境に、コアな認証ライブラリとGeminiライブラリをインストール
           pip install --upgrade pip
+          # ▼▼▼【重要】この行を追加して、認証ライブラリも最新化します ▼▼▼
+          pip install --upgrade google-auth google-api-python-client
+          # ▲▲▲【重要】この行を追加しました ▲▲▲
           pip install "google-generativeai>=0.8.0" pandas
 
           # 4. どのバージョンがインストールされたか最終確認
