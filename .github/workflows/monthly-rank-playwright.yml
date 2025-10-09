@@ -38,22 +38,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 1. Create a virtual environment
+          # 1. 仮想環境を作成
           python -m venv .venv-translate
-          # 2. Activate it
-          source .venv-translate/bin/activate
-          # 3. Install ALL necessary libraries inside the venv
-          pip install --upgrade pip
-          pip install "google-generativeai>=0.8.0" pandas google-auth google-api-python-client
+          # 2. 仮想環境の中に、最新ライブラリをインストール
+          .venv-translate/bin/pip install --upgrade pip
+          .venv-translate/bin/pip install "google-generativeai>=0.8.0" pandas
           
-          # 4. Run the translation loop
+          # 3. 翻訳ループを実行
           shopt -s nullglob
           for inp in data/autohome_raw_*_with_brand.csv; do
             out="${inp%.csv}_ja.csv"
             if [ ! -f "$out" ] || [ "$inp" -nt "$out" ]; then
               echo "Translating: $inp -> $out"
-              # Use the python from the virtual environment to run the script
-              python tools/translate_brand_model_llm.py \
+              # ▼▼▼【重要】仮想環境内のpythonを直接指定して実行 ▼▼▼
+              .venv-translate/bin/python tools/translate_brand_model_llm.py \
                 --input "$inp" --output "$out" \
                 --brand-col brand --model-col model \
                 --brand-ja-col brand_ja --model-ja-col model_ja \
