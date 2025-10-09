@@ -12,8 +12,10 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      # LLM用キー（必要に応じてどちらか／両方）
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
@@ -24,6 +26,7 @@ jobs:
         with:
           python-version: "3.11"
 
+      # pipキャッシュは使うが、アプリ側の自前キャッシュは後続で都度削除
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -33,54 +36,81 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install playwright openai anthropic pandas
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # 最低限: Playwright + データ処理 + OpenAI/Anthropic クライアント
+            pip install playwright pandas openai anthropic
+          fi
           python -m playwright install chromium
 
-      # —— ここで毎回キャッシュを削除（ユーザー要望：逐一削除）——
-      - name: Remove cache (always fresh)
+      # 逐一キャッシュ削除（要望どおり）
+      - name: Remove app caches (always fresh)
         run: |
+          set -euo pipefail
           rm -rf .cache || true
-          rm -rf cache || true
+          rm -rf tools/.cache || true
+          rm -rf ~/.cache/ms-playwright || true
+          mkdir -p data
 
-      # ランキング抽出＋<title>からのbrand/model整備（既存スクリプトをそのまま使用）
-      - name: Extract & enrich rank list (with retries)
+      - name: Extract & enrich rank list (with retries, PC site)
+        id: extract
         run: |
-          set -e
-          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
+          set -euo pipefail
+          MONTH="$(date +'%Y-%m')"
+          OUT_CSV="data/autohome_raw_${MONTH}_with_brand.csv"
+
           for i in 1 2 3; do
             echo "Attempt #$i"
             python tools/append_series_url_and_enrich_title_llm.py \
               --rank-url "https://www.autohome.com.cn/rank/1" \
-              --output "$OUT" \
-              --model "gpt-4o-mini" && break || sleep 15
+              --output "${OUT_CSV}" \
+              --timeout-ms 120000 && break || sleep 20
           done
-          echo "ENRICHED_CSV=$OUT" >> $GITHUB_ENV
 
-      # Claude 3.5 Sonnet での翻訳（既存 translate_brand_model_llm.py をそのまま利用）
-      # ※ 余計なオプションは付けず、キャッシュは外部で削除済み
-      - name: Translate brand/model names (Claude 3.5 Sonnet)
+          if [ ! -s "${OUT_CSV}" ]; then
+            echo "Extraction failed or empty CSV."
+            exit 2
+          fi
+
+          echo "out_csv=${OUT_CSV}" >> "$GITHUB_OUTPUT"
+
+      # Claude 3.5 Sonnet でブランド/車種のグローバル名・日文表記を整形
+      # ※ スクリプトは tools/translate_brand_model_llm.py に固定（パス間違い対策）
+      - name: Translate brand/model names (Claude 3.5)
         run: |
-          IN="$ENRICHED_CSV"
-          OUT="${IN/_with_brand.csv/_with_brand_ja.csv}"
-          python translate_brand_model_llm.py \
-            --input "$IN" \
-            --output "$OUT" \
-            --brand-col brand \
-            --model-col model \
-            --brand-ja-col brand_ja \
-            --model-ja-col model_ja \
+          set -euo pipefail
+          IN="${{ steps.extract.outputs.out_csv }}"
+          MONTH="$(date +'%Y-%m')"
+          OUT="data/autohome_raw_${MONTH}_with_brand_ja.csv"
+
+          # 念のためキャッシュ削除（毎回フレッシュ）
+          rm -rf .cache || true
+          rm -rf tools/.cache || true
+
+          python tools/translate_brand_model_llm.py \
+            --input "${IN}" \
+            --output "${OUT}" \
             --provider anthropic \
-            --model-name "claude-3-5-sonnet-20241022"
-          echo "FINAL_CSV=$OUT" >> $GITHUB_ENV
+            --model "claude-3-5-sonnet-latest" \
+            --strict-rules
+
+          test -s "${OUT}"
 
       - name: List outputs before commit
-        run: ls -la data | sed -n '1,200p'
+        run: |
+          set -euo pipefail
+          ls -alh data | sed 's/^/  /'
+          echo
+          tail -n +1 data/* | head -n 100 || true
 
       - name: Commit & push results
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$FINAL_CSV" data/debug_rankpage_*.html || true
-          git commit -m "monthly: extract + enrich + translate ($(date +'%Y-%m'))" || echo "Nothing to commit"
+          git add data/*.csv data/*.html || true
+          git commit -m "monthly rank extract + translate (LLM) $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit."
           git push
