@@ -32,15 +32,12 @@ jobs:
           else
             pip install playwright pandas openai anthropic lxml requests
           fi
-          # Playwright のブラウザ本体を必ず取得
           python -m playwright install --with-deps chromium
 
       - name: Extract & enrich rank list (with retries)
         run: |
           set -euo pipefail
-          # 出力先ファイル名（YYYY-MM）
           OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
-          # PC 版を開く設定はスクリプト側で user_agent/viewport を固定化（tools/append_series_url_and_enrich_title_llm.py）
           for i in 1 2 3; do
             echo "Attempt #$i"
             python tools/append_series_url_and_enrich_title_llm.py \
@@ -49,18 +46,20 @@ jobs:
               --model "gpt-4o-mini" && break || sleep 10
           done
 
+      - name: Clear LLM translate cache (best effort)
+        run: |
+          rm -rf .llm_cache cache tools/.llm_cache tools/cache || true
+
       - name: Translate brand/model names (Claude 3.5 Sonnet)
         run: |
           set -euo pipefail
           IN="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
           OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand_ja.csv"
-          # tools/translate_brand_model_llm.py を Anthropic モードで実行
           python tools/translate_brand_model_llm.py \
-            --in "$IN" \
-            --out "$OUT" \
+            --input "$IN" \
+            --output "$OUT" \
             --provider "anthropic" \
-            --model "claude-3-5-sonnet-20241022" \
-            --clear-cache
+            --model "claude-3-5-sonnet-20241022"
 
       - name: List outputs before commit
         run: |
