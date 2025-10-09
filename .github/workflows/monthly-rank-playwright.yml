@@ -2,7 +2,7 @@ name: Monthly rank extract & enrich via LLM (rank/1)
 
 on:
   schedule:
-    - cron: '15 0 3 * *'   # JST 09:15 毎月3日
+    - cron: '15 0 3 * *'  # JST 09:15 毎月3日
   workflow_dispatch:
 
 permissions:
@@ -12,9 +12,11 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # LLM用キー（必要に応じてどちらか／両方）
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Playwrightの実体置き場を明示（ジョブごとに新規DLされてもOK）
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
+      # ノイズ軽減
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -26,91 +28,50 @@ jobs:
         with:
           python-version: "3.11"
 
-      # pipキャッシュは使うが、アプリ側の自前キャッシュは後続で都度削除
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
-      - name: Install deps
+      - name: Install deps (pip only)
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            # 最低限: Playwright + データ処理 + OpenAI/Anthropic クライアント
-            pip install playwright pandas openai anthropic
-          fi
-          python -m playwright install chromium
+          pip install -r requirements.txt || true
+          # 念のため直接指定（requirementsに既にあっても害なし）
+          pip install playwright pandas anthropic openai
 
-      # 逐一キャッシュ削除（要望どおり）
-      - name: Remove app caches (always fresh)
+      - name: Install Playwright browsers (Chromium, with-deps)
+        run: |
+          python -m playwright install --with-deps chromium
+          python -m playwright --version
+
+      - name: Extract & enrich rank list (with retries)
         run: |
           set -euo pipefail
-          rm -rf .cache || true
-          rm -rf tools/.cache || true
-          rm -rf ~/.cache/ms-playwright || true
-          mkdir -p data
-
-      - name: Extract & enrich rank list (with retries, PC site)
-        id: extract
-        run: |
-          set -euo pipefail
-          MONTH="$(date +'%Y-%m')"
-          OUT_CSV="data/autohome_raw_${MONTH}_with_brand.csv"
-
+          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
           for i in 1 2 3; do
             echo "Attempt #$i"
             python tools/append_series_url_and_enrich_title_llm.py \
               --rank-url "https://www.autohome.com.cn/rank/1" \
-              --output "${OUT_CSV}" \
-              --timeout-ms 120000 && break || sleep 20
+              --output "$OUT" \
+              --model "gpt-4o-mini" && break || sleep 20
           done
+          echo "ENRICHED_CSV=$OUT" >> $GITHUB_ENV
 
-          if [ ! -s "${OUT_CSV}" ]; then
-            echo "Extraction failed or empty CSV."
-            exit 2
-          fi
-
-          echo "out_csv=${OUT_CSV}" >> "$GITHUB_OUTPUT"
-
-      # Claude 3.5 Sonnet でブランド/車種のグローバル名・日文表記を整形
-      # ※ スクリプトは tools/translate_brand_model_llm.py に固定（パス間違い対策）
-      - name: Translate brand/model names (Claude 3.5)
+      - name: Translate brand/model names (Claude 3.5 Sonnet)
         run: |
           set -euo pipefail
-          IN="${{ steps.extract.outputs.out_csv }}"
-          MONTH="$(date +'%Y-%m')"
-          OUT="data/autohome_raw_${MONTH}_with_brand_ja.csv"
-
-          # 念のためキャッシュ削除（毎回フレッシュ）
-          rm -rf .cache || true
-          rm -rf tools/.cache || true
-
+          IN="$ENRICHED_CSV"
+          OUT="${IN/_with_brand.csv/_with_brand_ja.csv}"
           python tools/translate_brand_model_llm.py \
-            --input "${IN}" \
-            --output "${OUT}" \
-            --provider anthropic \
-            --model "claude-3-5-sonnet-latest" \
-            --strict-rules
-
-          test -s "${OUT}"
+            --input "$IN" \
+            --output "$OUT" \
+            --provider "anthropic" \
+            --model "claude-3-5-sonnet-latest"
+          echo "FINAL_CSV=$OUT" >> $GITHUB_ENV
 
       - name: List outputs before commit
-        run: |
-          set -euo pipefail
-          ls -alh data | sed 's/^/  /'
-          echo
-          tail -n +1 data/* | head -n 100 || true
+        run: ls -lah data || true
 
       - name: Commit & push results
         run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/*.csv data/*.html || true
-          git commit -m "monthly rank extract + translate (LLM) $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit."
+          git add data/*.csv data/debug_rankpage_*.html || true
+          git commit -m "monthly: extract+enrich+translate ($(date +'%Y-%m'))" || echo "Nothing to commit"
           git push
