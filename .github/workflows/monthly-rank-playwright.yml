@@ -1,45 +1,88 @@
-name: monthly-rank-playwright
+name: Monthly append series_url & enrich brand/series (rank/1 + LLM global translation)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 21 10 * *"
+    - cron: "15 1 2 * *"  # 毎月2日 10:15 JST
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: checkout
+      - name: Checkout
         uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: setup-python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-          cache: "pip"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      - name: install-dependencies
+      - name: Install deps
         run: |
-          pip install -r requirements.txt
-          playwright install --with-deps
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt || true
+          # 必要なライブラリを直接インストール
+          python -m pip install pandas google-generativeai playwright beautifulsoup4 requests lxml regex
+          python -m playwright install chromium
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
-      - name: fetch-autohome-rank-data
+      - name: Append series_url from /rank/1
         run: |
-          python tools/autohome_rank_playwright.py
+          python tools/append_series_url_from_web.playwright_full.py \
+            --input "data/autohome_raw_$(date -u +%Y-%m).csv" || true
+          
+      - name: Enrich brand/model from <title>
+        run: |
+          for f in data/autohome_raw_*_with_series.csv; do
+            out="${f%_with_series.csv}_with_brand.csv"
+            python tools/enrich_brand_from_title.py --input "$f" --output "$out"
+          done
 
-      - name: append-and-enrich-with-llm-translate
+      # --- ここから変更 ---
+      - name: Translate brand/model to global names (LLM; auto-detect files)
         env:
-          # Secret名を「GEMENI」に修正しました
-          GEMINI_API_KEY: ${{ secrets.GEMENI }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI }} # Secret名をGEMINIに
+        shell: bash
         run: |
-          python tools/translate_brand_model_llm.py data/latest_autohome_rank.csv data/latest_autohome_rank_enriched.csv
+          set -euo pipefail
+          shopt -s nullglob
+          targets=()
+          for f in data/autohome_raw_*_with_brand.csv; do
+            out="${f%.csv}_ja.csv"
+            if [ ! -f "$out" ] || [ "$f" -nt "$out" ]; then
+              targets+=("$f")
+            fi
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "No files need translation."
+            exit 0
+          fi
+          for inp in "${targets[@]}"; do
+            out="${inp%.csv}_ja.csv"
+            echo "Translating: $inp -> $out"
+            python tools/translate_brand_model_llm.py \
+              --input "$inp" \
+              --output "$out" \
+              --brand-col brand --model-col model \
+              --brand-ja-col brand_ja --model-ja-col model_ja \
+              --cache .cache/global_map.json
+          done
+      # --- ここまで変更 ---
 
-      - name: update-vlm-data-and-commit
+      - name: List outputs before commit
+        run: ls -lh data | tail -n 200 || true
+
+      - name: Commit artifacts
         run: |
-          python vlm_rank_reader.py
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .
-          git diff --staged --quiet || git commit -m "auto: append + enrich + LLM translate (updated or missing_ja.csv)"
-          git push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "auto: append + enrich + LLM translate (updated or missing _ja.csv)"
+            git push
+          else
+            echo "No changes to commit."
+          fi
