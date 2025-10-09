@@ -2,7 +2,7 @@ name: Monthly rank extract & enrich via LLM (rank/1)
 
 on:
   schedule:
-    - cron: '15 0 3 * *'  # JST 09:15 毎月3日
+    - cron: '15 0 3 * *'   # JST 09:15 毎月3日
   workflow_dispatch:
 
 permissions:
@@ -14,8 +14,6 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
-      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
@@ -26,49 +24,52 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install playwright pandas anthropic openai
-
-      - name: Install Playwright browsers (Chromium)
-        run: |
+          python -m pip install -U pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install playwright pandas openai anthropic lxml requests
+          fi
+          # Playwright のブラウザ本体を必ず取得
           python -m playwright install --with-deps chromium
-          python -m playwright --version
 
       - name: Extract & enrich rank list (with retries)
         run: |
           set -euo pipefail
+          # 出力先ファイル名（YYYY-MM）
           OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
+          # PC 版を開く設定はスクリプト側で user_agent/viewport を固定化（tools/append_series_url_and_enrich_title_llm.py）
           for i in 1 2 3; do
             echo "Attempt #$i"
             python tools/append_series_url_and_enrich_title_llm.py \
               --rank-url "https://www.autohome.com.cn/rank/1" \
               --output "$OUT" \
-              --model "gpt-4o-mini" && break || sleep 20
+              --model "gpt-4o-mini" && break || sleep 10
           done
-          echo "ENRICHED_CSV=$OUT" >> $GITHUB_ENV
 
       - name: Translate brand/model names (Claude 3.5 Sonnet)
         run: |
           set -euo pipefail
-          IN="$ENRICHED_CSV"
-          OUT="${IN/_with_brand.csv/_with_brand_ja.csv}"
+          IN="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
+          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand_ja.csv"
+          # tools/translate_brand_model_llm.py を Anthropic モードで実行
           python tools/translate_brand_model_llm.py \
-            --input "$IN" \
-            --output "$OUT" \
+            --in "$IN" \
+            --out "$OUT" \
             --provider "anthropic" \
-            --model "claude-3-5-sonnet-latest"
-          echo "FINAL_CSV=$OUT" >> $GITHUB_ENV
+            --model "claude-3-5-sonnet-20241022" \
+            --clear-cache
 
       - name: List outputs before commit
-        run: ls -lah data || true
+        run: |
+          ls -lah data || true
 
       - name: Commit & push results
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/*.csv data/debug_rankpage_*.html || true
-          git commit -m "monthly: extract+enrich+translate ($(date +'%Y-%m'))" || echo "Nothing to commit"
-          git push
+          git add data/autohome_raw_*_with_brand*.csv data/debug_rankpage_*.html || true
+          git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "No changes to commit."
+          git push || true
