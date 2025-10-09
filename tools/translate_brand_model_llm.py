@@ -52,7 +52,9 @@ def translate_with_gemini(text, cache):
 def main():
     parser = argparse.ArgumentParser(description="Translate brand/model names using Gemini.")
     parser.add_argument("--input", required=True, help="Input CSV file path")
-    parser.add_action("--output", required=True, help="Output CSV file path")
+    # ▼▼▼【重要】ここのタイプミスを修正しました (add_action -> add_argument) ▼▼▼
+    parser.add_argument("--output", required=True, help="Output CSV file path")
+    # ▲▲▲【重要】ここのタイプミスを修正しました ▲▲▲
     parser.add_argument("--brand-col", required=True, help="Column name for brand")
     parser.add_argument("--model-col", required=True, help="Column name for model")
     parser.add_argument("--brand-ja-col", required=True, help="Column name for translated brand")
