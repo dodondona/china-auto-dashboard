@@ -12,7 +12,8 @@ if not api_key:
     raise ValueError("APIキーが設定されていません。環境変数 'GEMINI_API_KEY' を確認してください。")
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-pro') # または 'gemini-1.5-flash' など
+# モデルを最新・高速・低コストの 'gemini-1.5-flash' にアップグレード
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def load_cache(path):
     if os.path.exists(path):
@@ -58,9 +59,9 @@ def main():
     parser.add_argument("--model-ja-col", required=True, help="Column name for translated model")
     parser.add_argument("--cache", help="Cache file path for translations")
     # model引数はGeminiでは使わないが、ymlから渡されるので受け取るだけ
-    parser.add_argument("--model", help="LLM model name (ignored for Gemini script)")
+    parser.add_unrecognized_args() # 未知の引数を無視する
     
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     df = pd.read_csv(args.input)
     cache = load_cache(args.cache) if args.cache else {}
