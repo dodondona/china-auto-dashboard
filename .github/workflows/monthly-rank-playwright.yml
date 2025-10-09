@@ -15,6 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          # Personal Access Tokenの利用を推奨しますが、なければ削除しても動作する場合があります
           token: ${{ secrets.GH_PAT }}
 
       - name: Setup Python
@@ -41,29 +42,24 @@ jobs:
             python tools/enrich_brand_from_title.py --input "$f" --output "$out"
           done
 
+      # --- ご提示のデバッグ用コードを組み込んだステップ ---
       - name: Translate brand/model to global names (LLM)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI }}
         shell: bash
         run: |
           set -euo pipefail
+          # 1. 仮想環境を作成
           python -m venv .venv-translate
+          # 2. 仮想環境を有効化
           source .venv-translate/bin/activate
+          # 3. 最新ライブラリをインストール
           pip install --upgrade pip
-          pip install "google-generativeai>=0.8.0" pandas google-auth google-api-python-client
-          
-          shopt -s nullglob
-          for inp in data/autohome_raw_*_with_brand.csv; do
-            out="${inp%.csv}_ja.csv"
-            if [ ! -f "$out" ] || [ "$inp" -nt "$out" ]; then
-              echo "Translating: $inp -> $out"
-              python tools/translate_brand_model_llm.py \
-                --input "$inp" --output "$out" \
-                --brand-col brand --model-col model \
-                --brand-ja-col brand_ja --model-ja-col model_ja \
-                --cache .cache/global_map.json
-            fi
-          done
+          pip install --upgrade "google-generativeai>=0.8.0" google-auth google-api-python-client
+
+          # 4. 利用可能なモデルの一覧を表示する
+          echo "--- Checking available models ---"
+          python -c "import os; import google.generativeai as genai; genai.configure(api_key=os.environ.get('GEMINI_API_KEY')); [print(m.name) for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]"
 
       - name: Commit and push artifacts
         run: |
