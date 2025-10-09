@@ -1,7 +1,7 @@
 # 既存ライブラリ
 pillow
 playwright
-google-generativeai>=0.8.0
+# google-generativeai>=0.8.0  <- この行を削除またはコメントアウト
 pandas
 beautifulsoup4>=4.12.3
 requests>=2.32.0
