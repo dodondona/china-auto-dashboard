@@ -34,47 +34,44 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install playwright pandas anthropic openai
-          python -m playwright install --with-deps chromium
+          pip install playwright openai pandas anthropic
+          python -m playwright install chromium
 
       - name: Extract & enrich rank list (with retries)
         run: |
           set -euo pipefail
-          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
           for i in 1 2 3; do
             echo "Attempt #$i"
             python tools/append_series_url_and_enrich_title_llm.py \
               --rank-url "https://www.autohome.com.cn/rank/1" \
-              --output "$OUT" \
-              --model "gpt-4o-mini" && break || sleep 10
+              --output "data/autohome_raw_$(date +'%Y-%m')_with_brand.csv" \
+              --model "gpt-4o-mini" && break || sleep 15
           done
           echo "Saved file:"
-          ls -l "$OUT" || true
-          head -n 5 "$OUT" || true
+          ls -l data/autohome_raw_*_with_brand.csv | tail -n 3
+          head -n 5 data/autohome_raw_*_with_brand.csv || true
 
       - name: Clear LLM translate cache (best effort)
         run: |
           rm -rf .llm_cache cache tools/.llm_cache tools/cache || true
 
-      - name: Translate brand/model names (Claude 3.5 Sonnet)
+      - name: Translate brand/model names (Claude 3.5)
         run: |
           set -euo pipefail
-          IN="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
-          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand_ja.csv"
+          IN=$(ls data/autohome_raw_*_with_brand.csv | tail -n 1)
+          OUT="${IN/_with_brand.csv/_with_brand_ja.csv}"
           python tools/translate_brand_model_llm.py \
             --input "$IN" \
             --output "$OUT" \
             --provider anthropic \
-            --model "claude-3-5-sonnet-20241022"
-          echo "Translated file:"
-          ls -l "$OUT" || true
-          head -n 10 "$OUT" || true
+            --model "claude-3-5-sonnet-latest"
+          echo "Translated file: $OUT"
+          head -n 5 "$OUT" || true
 
       - name: Commit & push results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/autohome_raw_*_with_brand.csv data/autohome_raw_*_with_brand_ja.csv || true
-          git add data/debug_rankpage_*.html || true
+          git add data/autohome_raw_*_with_brand*.csv || true
           git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "Nothing to commit"
           git push
