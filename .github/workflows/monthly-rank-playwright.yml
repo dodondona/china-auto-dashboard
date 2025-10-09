@@ -23,9 +23,8 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # ここではGeminiライブラリを除いたものをインストール
           python -m pip install -r requirements.txt
-          python -m pip install playwright beautifulsoup4 requests lxml regex
+          python -m pip install --upgrade "google-generativeai>=0.8.0" playwright beautifulsoup4 requests lxml regex google-auth google-api-python-client
           python -m playwright install chromium
           sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
@@ -47,25 +46,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # 1. 翻訳処理のためだけの、完全に独立したPython仮想環境を作成
           python -m venv .venv-translate
-
-          # 2. 仮想環境を有効化
           source .venv-translate/bin/activate
-          
-          # 3. この独立環境に、コアな認証ライブラリとGeminiライブラリをインストール
           pip install --upgrade pip
-          # ▼▼▼【重要】この行を追加して、認証ライブラリも最新化します ▼▼▼
-          pip install --upgrade google-auth google-api-python-client
-          # ▲▲▲【重要】この行を追加しました ▲▲▲
-          pip install "google-generativeai>=0.8.0" pandas
-
-          # 4. どのバージョンがインストールされたか最終確認
+          pip install --upgrade "google-generativeai>=0.8.0" pandas google-auth google-api-python-client
           echo "Checking installed version in virtual environment..."
           pip show google-generativeai
-
-          # 5. 翻訳処理を実行
           shopt -s nullglob
           targets=()
           for f in data/autohome_raw_*_with_brand.csv; do
@@ -92,14 +78,26 @@ jobs:
       - name: List outputs before commit
         run: ls -lh data | tail -n 200 || true
 
+      # --- ここから変更 ---
       - name: Commit artifacts
         run: |
+          echo "--- Checking repository status before commit ---"
+          echo ""
+          echo "Listing files in the data directory:"
+          ls -l data
+          echo ""
+          echo "--- git status output ---"
+          git status --porcelain
+          echo ""
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
+            echo "Changes detected. Proceeding with commit."
             git add -A
             git commit -m "auto: append + enrich + LLM translate (updated or missing _ja.csv)"
             git push
           else
-            echo "No changes to commit."
+            echo "No changes detected to commit."
           fi
+      # --- ここまで変更 ---
