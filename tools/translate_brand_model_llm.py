@@ -1,76 +1,78 @@
 import os
 import sys
 import time
-import google.generativeai as genai
+import json
+import argparse
 import pandas as pd
+import google.generativeai as genai
 
-# --- ここから変更 ---
-
-# GitHub ActionsのSecretsからAPIキーを設定
+# --- Gemini API セットアップ ---
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("APIキーが設定されていません。環境変数 'GEMINI_API_KEY' を確認してください。")
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-pro') # または 'gemini-1.5-flash' など
 
-def get_eng_name_gemini(cn_name: str) -> str:
-    """
-    Gemini APIを使用して中国語の名前を英語名に変換する。
-    """
-    if not cn_name or pd.isna(cn_name):
+def load_cache(path):
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_cache(path, cache):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+def translate_with_gemini(text, cache):
+    if not text or pd.isna(text):
         return ""
+    if text in cache:
+        return cache[text]
     
     try:
-        # よりシンプルで安定した結果を得るためのプロンプト
-        prompt = f'Translate the following Chinese car brand or model name to its global English name. Return only the single most common English name and nothing else. Chinese name: "{cn_name}"'
-        
+        prompt = f'Translate the following Chinese car brand or model name to its global English name. Return only the single most common English name and nothing else. Chinese name: "{text}"'
         response = model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0 # 創造性を抑え、最も可能性の高い単語を返させる
-            )
+            generation_config=genai.types.GenerationConfig(temperature=0.0)
         )
+        translated_text = response.text.strip().replace('"', '').replace("'", "")
         
-        eng_name = response.text.strip().replace('"', '').replace("'", "")
-        print(f"Gemini 変換: {cn_name} -> {eng_name}", flush=True)
-        return eng_name
+        print(f"Gemini 変換: {text} -> {translated_text}", flush=True)
+        cache[text] = translated_text
+        time.sleep(1) # APIレート制限のための待機
+        return translated_text
         
     except Exception as e:
-        print(f"Gemini APIエラー ({cn_name}): {e}", flush=True)
-        # エラー時は元の名前を返すか、空文字を返すか選択できます。
-        # ここでは空文字を返して後続処理で対応できるようにします。
-        return ""
+        print(f"Gemini APIエラー ({text}): {e}", flush=True)
+        return "" # エラー時は空文字を返す
 
-# --- ここまで変更 ---
+def main():
+    parser = argparse.ArgumentParser(description="Translate brand/model names using Gemini.")
+    parser.add_argument("--input", required=True, help="Input CSV file path")
+    parser.add_argument("--output", required=True, help="Output CSV file path")
+    parser.add_argument("--brand-col", required=True, help="Column name for brand")
+    parser.add_argument("--model-col", required=True, help="Column name for model")
+    parser.add_argument("--brand-ja-col", required=True, help="Column name for translated brand")
+    parser.add_argument("--model-ja-col", required=True, help="Column name for translated model")
+    parser.add_argument("--cache", help="Cache file path for translations")
+    # model引数はGeminiでは使わないが、ymlから渡されるので受け取るだけ
+    parser.add_argument("--model", help="LLM model name (ignored for Gemini script)")
+    
+    args = parser.parse_args()
 
-def translate_and_enrich_csv(input_path, output_path):
-    df = pd.read_csv(input_path)
+    df = pd.read_csv(args.input)
+    cache = load_cache(args.cache) if args.cache else {}
 
-    if 'brand_en' not in df.columns:
-        df['brand_en'] = ''
-    if 'model_en' not in df.columns:
-        df['model_en'] = ''
+    df[args.brand_ja_col] = df[args.brand_col].apply(lambda x: translate_with_gemini(x, cache))
+    df[args.model_ja_col] = df[args.model_col].apply(lambda x: translate_with_gemini(x, cache))
 
-    for index, row in df.iterrows():
-        # 既に翻訳済みの場合はスキップ
-        if pd.isna(row['brand_en']) or row['brand_en'] == '':
-            df.loc[index, 'brand_en'] = get_eng_name_gemini(row['brand'])
-            time.sleep(1)  # APIレート制限のための待機
-        
-        if pd.isna(row['model_en']) or row['model_en'] == '':
-            df.loc[index, 'model_en'] = get_eng_name_gemini(row['model'])
-            time.sleep(1)
+    if args.cache:
+        save_cache(args.cache, cache)
 
-    df.to_csv(output_path, index=False)
-    print(f"翻訳・拡充済みのファイルを保存しました: {output_path}")
+    df.to_csv(args.output, index=False)
+    print(f"翻訳完了。出力ファイル: {args.output}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("使い方: python translate_brand_model_llm.py <入力CSVパス> <出力CSVパス>")
-        sys.exit(1)
-    
-    input_csv_path = sys.argv[1]
-    output_csv_path = sys.argv[2]
-    
-    translate_and_enrich_csv(input_csv_path, output_csv_path)
+    main()
