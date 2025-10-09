@@ -29,8 +29,17 @@ jobs:
           python -m playwright install chromium
           sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
-      - name: (Data processing steps)
-        # ... (append_series_url and enrich_brand steps are unchanged) ...
+      - name: Append series_url from /rank/1
+        run: |
+          python tools/append_series_url_from_web.playwright_full.py \
+            --input "data/autohome_raw_$(date -u +%Y-%m).csv" || true
+          
+      - name: Enrich brand/model from <title>
+        run: |
+          for f in data/autohome_raw_*_with_series.csv; do
+            out="${f%_with_series.csv}_with_brand.csv"
+            python tools/enrich_brand_from_title.py --input "$f" --output "$out"
+          done
 
       - name: Translate brand/model to global names (LLM)
         env:
@@ -38,20 +47,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 1. 仮想環境を作成
           python -m venv .venv-translate
-          # 2. 仮想環境の中に、最新ライブラリをインストール
-          .venv-translate/bin/pip install --upgrade pip
-          .venv-translate/bin/pip install "google-generativeai>=0.8.0" pandas
+          source .venv-translate/bin/activate
+          pip install --upgrade pip
+          pip install "google-generativeai>=0.8.0" pandas google-auth google-api-python-client
           
-          # 3. 翻訳ループを実行
           shopt -s nullglob
           for inp in data/autohome_raw_*_with_brand.csv; do
             out="${inp%.csv}_ja.csv"
             if [ ! -f "$out" ] || [ "$inp" -nt "$out" ]; then
               echo "Translating: $inp -> $out"
-              # ▼▼▼【重要】仮想環境内のpythonを直接指定して実行 ▼▼▼
-              .venv-translate/bin/python tools/translate_brand_model_llm.py \
+              python tools/translate_brand_model_llm.py \
                 --input "$inp" --output "$out" \
                 --brand-col brand --model-col model \
                 --brand-ja-col brand_ja --model-ja-col model_ja \
