@@ -24,17 +24,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install playwright openai pandas anthropic
+          pip install playwright openai anthropic pandas
           python -m playwright install chromium
 
       - name: Extract & enrich rank list (with retries)
@@ -45,33 +38,28 @@ jobs:
             python tools/append_series_url_and_enrich_title_llm.py \
               --rank-url "https://www.autohome.com.cn/rank/1" \
               --output "data/autohome_raw_$(date +'%Y-%m')_with_brand.csv" \
-              --model "gpt-4o-mini" && break || sleep 15
+              --model "gpt-4o-mini" && break || sleep 10
           done
-          echo "Saved file:"
-          ls -l data/autohome_raw_*_with_brand.csv | tail -n 3
+          ls -l data/*with_brand.csv
+          echo "==== preview ===="
           head -n 5 data/autohome_raw_*_with_brand.csv || true
 
-      - name: Clear LLM translate cache (best effort)
-        run: |
-          rm -rf .llm_cache cache tools/.llm_cache tools/cache || true
-
-      - name: Translate brand/model names (Claude 3.5)
+      - name: Translate brand/model names (Claude 3.5 Sonnet)
         run: |
           set -euo pipefail
-          IN=$(ls data/autohome_raw_*_with_brand.csv | tail -n 1)
-          OUT="${IN/_with_brand.csv/_with_brand_ja.csv}"
-          python tools/translate_brand_model_llm.py \
-            --input "$IN" \
-            --output "$OUT" \
-            --provider anthropic \
-            --model "claude-3-5-sonnet-latest"
-          echo "Translated file: $OUT"
+          IN="data/autohome_raw_$(date +'%Y-%m')_with_brand.csv"
+          OUT="data/autohome_raw_$(date +'%Y-%m')_with_brand_ja.csv"
+          for i in 1 2 3; do
+            python tools/translate_brand_model_llm.py \
+              --input "$IN" --output "$OUT" \
+              --model "claude-3-5-sonnet-20241022" && break || sleep 2
+          done
           head -n 5 "$OUT" || true
 
       - name: Commit & push results
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/autohome_raw_*_with_brand*.csv || true
-          git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "Nothing to commit"
+          git add data/autohome_raw_*_with_brand.csv data/autohome_raw_*_with_brand_ja.csv
+          git commit -m "monthly: scrape + enrich (OpenAI) & translate (Claude) $(date +'%Y-%m')" || echo "Nothing to commit"
           git push
