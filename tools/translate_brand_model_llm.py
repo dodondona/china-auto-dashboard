@@ -58,9 +58,8 @@ def main():
     parser.add_argument("--brand-ja-col", required=True, help="Column name for translated brand")
     parser.add_argument("--model-ja-col", required=True, help="Column name for translated model")
     parser.add_argument("--cache", help="Cache file path for translations")
-    # model引数はGeminiでは使わないが、ymlから渡されるので受け取るだけ
-    parser.add_unrecognized_args() # 未知の引数を無視する
     
+    # ymlから渡される未知の引数(modelなど)を無視して、定義済みの引数だけを解析する
     args, _ = parser.parse_known_args()
 
     df = pd.read_csv(args.input)
