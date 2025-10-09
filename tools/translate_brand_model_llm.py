@@ -12,8 +12,8 @@ if not api_key:
     raise ValueError("APIキーが設定されていません。環境変数 'GEMINI_API_KEY' を確認してください。")
 
 genai.configure(api_key=api_key)
-# インストールされている古いライブラリ(v0.4.1)で動作するモデル名 'gemini-1.0-pro' を指定
-model = genai.GenerativeModel('gemini-1.0-pro')
+# 最新の独立環境で動かすので、最新モデル名を指定
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def load_cache(path):
     if os.path.exists(path):
@@ -42,7 +42,7 @@ def translate_with_gemini(text, cache):
         
         print(f"Gemini 変換: {text} -> {translated_text}", flush=True)
         cache[text] = translated_text
-        time.sleep(1) # APIレート制限のための待機
+        time.sleep(1.1) # APIレート制限のための待機
         return translated_text
         
     except Exception as e:
@@ -52,7 +52,7 @@ def translate_with_gemini(text, cache):
 def main():
     parser = argparse.ArgumentParser(description="Translate brand/model names using Gemini.")
     parser.add_argument("--input", required=True, help="Input CSV file path")
-    parser.add_argument("--output", required=True, help="Output CSV file path")
+    parser.add_action("--output", required=True, help="Output CSV file path")
     parser.add_argument("--brand-col", required=True, help="Column name for brand")
     parser.add_argument("--model-col", required=True, help="Column name for model")
     parser.add_argument("--brand-ja-col", required=True, help="Column name for translated brand")
