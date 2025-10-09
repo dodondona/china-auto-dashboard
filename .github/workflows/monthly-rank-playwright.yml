@@ -24,14 +24,17 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install deps
         run: |
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install playwright pandas openai anthropic lxml requests
-          fi
+          python -m pip install --upgrade pip
+          pip install playwright pandas anthropic openai
           python -m playwright install --with-deps chromium
 
       - name: Extract & enrich rank list (with retries)
@@ -45,6 +48,9 @@ jobs:
               --output "$OUT" \
               --model "gpt-4o-mini" && break || sleep 10
           done
+          echo "Saved file:"
+          ls -l "$OUT" || true
+          head -n 5 "$OUT" || true
 
       - name: Clear LLM translate cache (best effort)
         run: |
@@ -58,17 +64,17 @@ jobs:
           python tools/translate_brand_model_llm.py \
             --input "$IN" \
             --output "$OUT" \
-            --provider "anthropic" \
+            --provider anthropic \
             --model "claude-3-5-sonnet-20241022"
-
-      - name: List outputs before commit
-        run: |
-          ls -lah data || true
+          echo "Translated file:"
+          ls -l "$OUT" || true
+          head -n 10 "$OUT" || true
 
       - name: Commit & push results
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/autohome_raw_*_with_brand*.csv data/debug_rankpage_*.html || true
-          git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "No changes to commit."
-          git push || true
+          git add data/autohome_raw_*_with_brand.csv data/autohome_raw_*_with_brand_ja.csv || true
+          git add data/debug_rankpage_*.html || true
+          git commit -m "monthly rank extract + LLM enrich ($(date +'%Y-%m'))" || echo "Nothing to commit"
+          git push
