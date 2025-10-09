@@ -14,9 +14,7 @@ jobs:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # Playwrightの実体置き場を明示（ジョブごとに新規DLされてもOK）
       PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
-      # ノイズ軽減
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -28,14 +26,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (pip only)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
-          # 念のため直接指定（requirementsに既にあっても害なし）
           pip install playwright pandas anthropic openai
 
-      - name: Install Playwright browsers (Chromium, with-deps)
+      - name: Install Playwright browsers (Chromium)
         run: |
           python -m playwright install --with-deps chromium
           python -m playwright --version
