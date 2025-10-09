@@ -41,7 +41,6 @@ jobs:
             python tools/enrich_brand_from_title.py --input "$f" --output "$out"
           done
 
-      # --- ここから変更 ---
       - name: Translate brand/model to global names (LLM; auto-detect files)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI }}
@@ -86,7 +85,6 @@ jobs:
               --brand-ja-col brand_ja --model-ja-col model_ja \
               --cache .cache/global_map.json
           done
-      # --- ここまで変更 ---
 
       - name: List outputs before commit
         run: ls -lh data | tail -n 200 || true
