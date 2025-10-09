@@ -1,249 +1,311 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 append_series_url_and_enrich_title_llm.py
------------------------------------------------------
-- autohome.com.cn/rank/1 を Playwright で開く
-- ランキング各行を DOM から列挙し、button[data-series-id] から series_url を生成
-- rank は data-rank-num があればそれを、無ければ「行の見た目の順位」や出現順で補完
-- 各 series_url を開き <title> を取得
-- title を LLM で解析して brand/model を推定
-- rank / series_url / count / title / brand / model を CSV へ
 
-依存:
-  pip install playwright openai pandas
-  playwright install chromium
+Autohome 月間ランキング一覧を Playwright で PC版として開き、
+rank / brand / model / count / series_url / title_raw を抽出して CSV 出力する。
+
+※ このスクリプトは「抽出専用」です。翻訳や表記ゆらぎの処理は
+   translate_brand_model_llm.py（Claude/GPT など）側で実行します。
+
+Usage:
+  python tools/append_series_url_and_enrich_title_llm.py \
+    --rank-url "https://www.autohome.com.cn/rank/1" \
+    --output "data/autohome_raw_2025-08_with_brand.csv"
+
+Options:
+  --rank-url     ランキングのベースURL（PC）。月別ページでも可。
+  --output       出力CSVパス
+  --timeout-ms   セレクタ待ちタイムアウト（ms）[default: 120000]
+  --headless     ヘッドレス実行（デフォルト: True）--no-headless で可視化
 """
 
-import os
-import re
-import json
+from __future__ import annotations
 import argparse
-from pathlib import Path
+import csv
+import dataclasses
+import re
+import sys
+from typing import List, Dict, Any, Optional
+from urllib.parse import urljoin, urlparse
 
-import pandas as pd
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-from openai import OpenAI
+from playwright.sync_api import sync_playwright
 
-UA_MOBILE = (
-    "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Mobile Safari/537.36"
+# =========================
+# Dataclass
+# =========================
+
+@dataclasses.dataclass
+class RankRow:
+    rank_seq: int
+    rank: int
+    brand: str
+    model: str
+    count: int
+    series_url: str
+    brand_conf: float
+    series_conf: float
+    title_raw: str
+
+
+# =========================
+# Helpers
+# =========================
+
+PC_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 
-PROMPT_BRAND_MODEL = (
-    "你将看到一个汽车车系页面的标题，请从标题中解析出【品牌名】和【车系名】。\n"
-    "严格以 JSON 输出：{\"brand\":\"品牌名\",\"model\":\"车系名\"}\n"
-    "若无法判断，留空字符串。"
-)
+def force_pc_url(url: str) -> str:
+    """m.autohome → www.autohome に強制"""
+    parsed = urlparse(url)
+    host = parsed.netloc.replace("m.autohome.com.cn", "www.autohome.com.cn")
+    return parsed._replace(netloc=host).geturl()
 
-def goto_with_retries(page, url: str, timeout_ms: int = 120000):
-    """www と m を順に試す。"""
-    candidates = [url]
-    if "www.autohome.com.cn" in url:
-        candidates.append(url.replace("www.autohome.com.cn", "m.autohome.com.cn"))
-    last_err = None
-    for u in candidates:
-        try:
-            page.goto(u, wait_until="load", timeout=timeout_ms)
-            return u
-        except Exception as e:
-            last_err = e
-            page.wait_for_timeout(1000)
-    raise last_err or RuntimeError("Failed to open page")
+def to_int(text: str) -> int:
+    t = re.sub(r"[^\d]", "", text or "")
+    return int(t) if t else 0
 
-def wait_rank_dom_ready(page, timeout_ms=120000):
-    """
-    ランキングの行が現れるまで待つ。
-    data-rank-num が無い構成もあるので、複数セレクタで待機。
-    """
+def text_or_empty(el) -> str:
+    if not el:
+        return ""
     try:
-        page.wait_for_selector("div.rank-num, em.rank, [data-rank-num], button[data-series-id]",
-                               timeout=timeout_ms, state="visible")
-    except PWTimeout as e:
-        # デバッグ用にHTMLを保存
-        Path("data").mkdir(parents=True, exist_ok=True)
-        with open("data/debug_rankpage_error.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        raise e
-
-def scroll_to_bottom(page, idle_ms=700, max_rounds=50):
-    """無限スクロールの末尾まで読む。"""
-    prev = -1
-    stable = 0
-    for _ in range(max_rounds):
-        page.mouse.wheel(0, 24000)
-        page.wait_for_timeout(idle_ms)
-        n = page.evaluate("() => document.querySelectorAll('button[data-series-id]').length")
-        if n == prev:
-            stable += 1
-        else:
-            stable = 0
-        prev = n
-        if stable >= 3:
-            break
-    return prev
-
-def safe_int(x):
-    try:
-        return int(str(x).strip())
+        return (el.inner_text() or "").strip()
     except Exception:
-        return None
+        try:
+            return (el.text_content() or "").strip()
+        except Exception:
+            return ""
 
-def nearest_row_container(el):
-    """行コンテナっぽい上位要素を返す（セレクタ揺れ対策）。"""
-    c = el
-    for _ in range(6):
-        if c is None:
-            break
-        # 行内に見える典型的要素があればここを行とみなす
-        if c.query_selector("button[data-series-id]") and (
-            c.get_attribute("data-rank-num") or
-            c.query_selector("div.rank-num, em.rank") or
-            c.query_selector(".tw-text-lg.tw-font-medium")
-        ):
-            return c
-        c = c.evaluate_handle("n => n.parentElement").as_element()
-    return el
+def abs_url(base: str, href: str) -> str:
+    if not href:
+        return ""
+    return urljoin(base, href)
 
-def parse_rank_from_container(container):
-    """data-rank-num > 可視の順位 > None の順に取得。"""
-    attr = container.get_attribute("data-rank-num")
-    rk = safe_int(attr)
-    if rk is not None:
-        return rk
-    badge = container.query_selector("div.rank-num, em.rank")
-    if badge:
-        txt = (badge.inner_text() or "").strip()
-        rk = safe_int(re.sub(r"[^\d]", "", txt))
-        if rk is not None:
-            return rk
-    return None
+def safe_get_attr(el, name: str) -> str:
+    try:
+        return (el.get_attribute(name) or "").strip()
+    except Exception:
+        return ""
 
-def parse_count_from_container(container):
-    txt = (container.inner_text() or "").strip()
-    m = re.search(r"(\d{4,6})\s*车系销量", txt)
-    return safe_int(m.group(1)) if m else None
 
-def extract_rank_and_links(page):
+# =========================
+# Extraction
+# =========================
+
+def extract_rows(page) -> List[RankRow]:
     """
-    行を列挙し、rank / series_url / count を抽出。
-    - ラインの基準は button[data-series-id]
-    - rankは data-rank-num → 表示順位 → 出現順
+    Autohome のランキング DOM は複数パターンがあるため、
+    代表的なパターンを順にトライする。
+    戻り値は RankRow の配列。
     """
-    buttons = page.query_selector_all("button[data-series-id]") or []
-    rows = []
-    for idx, btn in enumerate(buttons, start=1):
-        sid = btn.get_attribute("data-series-id")
-        series_url = f"https://www.autohome.com.cn/{sid}/" if sid else None
-        cont = nearest_row_container(btn)
-        rk = parse_rank_from_container(cont)
-        if rk is None:
-            rk = idx
-        count = parse_count_from_container(cont)
-        rows.append({"rank": rk, "series_url": series_url, "count": count})
+    rows: List[RankRow] = []
+    base_url = page.url
+
+    # ---- セレクタ候補（上から順に試す） ----
+    # 1) PC版 旧構造: <table class="rank-list"> / <tr>
+    # 2) PC版 新構造: <div class="rank-list"> / <div class="item"> など
+    # 3) 汎用: data-series-id を持つ要素 + 同一行内のテキスト
+    patterns: List[Dict[str, Any]] = [
+        {
+            "name": "table_tr",
+            "container": "table.rank-list, table#rankList",
+            "row": "tr",
+            "rank": "td:nth-child(1), .rank-num, em.rank",
+            "brand": "td:nth-child(2) .brand, td:nth-child(2) a, td:nth-child(2)",
+            "model": "td:nth-child(3) .model, td:nth-child(3) a, td:nth-child(3)",
+            "count": "td:nth-child(4), .amount, .count",
+            "series_link": "td a[href*='/series/'], a.series-link",
+            "title": "td:nth-child(2), td:nth-child(3), .title",
+        },
+        {
+            "name": "div_items",
+            "container": "div.rank-list, ul.rank-list, div#rankList",
+            "row": "div.item, li.item, li, div.row",
+            "rank": ".rank-num, em.rank, [data-rank-num]",
+            "brand": ".brand, .series .brand, .info .brand",
+            "model": ".model, .series .name, .info .model",
+            "count": ".amount, .count, .num",
+            "series_link": "a[href*='/series/'], a[data-series-id]",
+            "title": ".title, .series, .info",
+        },
+        {
+            "name": "generic_series_attr",
+            "container": "body",
+            "row": "[data-series-id]",
+            "rank": "[data-rank-num], .rank-num, em.rank",
+            "brand": ".brand, .series .brand, .info .brand",
+            "model": ".model, .series .name, .info .model",
+            "count": ".amount, .count, .num",
+            "series_link": "a[href], a",
+            "title": ".title, .series, .info, :scope",
+        },
+    ]
+
+    for pat in patterns:
+        containers = page.locator(pat["container"])
+        if containers.count() == 0:
+            continue
+
+        # 最初に見つかったコンテナで行を探索
+        container = containers.first
+        row_loc = container.locator(pat["row"])
+        n = row_loc.count()
+        if n == 0:
+            continue
+
+        for i in range(n):
+            item = row_loc.nth(i)
+
+            rank_txt = text_or_empty(item.locator(pat["rank"]).first)
+            brand_txt = text_or_empty(item.locator(pat["brand"]).first)
+            model_txt = text_or_empty(item.locator(pat["model"]).first)
+            count_txt = text_or_empty(item.locator(pat["count"]).first)
+            title_txt = text_or_empty(item.locator(pat["title"]).first)
+
+            # link
+            link_el = item.locator(pat["series_link"]).first
+            href = safe_get_attr(link_el, "href")
+            if not href:
+                # data-series-id をもっていれば /series/{id}/ 形式を組み立て
+                dsid = safe_get_attr(item, "data-series-id") or safe_get_attr(link_el, "data-series-id")
+                if dsid:
+                    href = f"/series/{dsid}.html"
+            series_url = abs_url(base_url, href)
+
+            # brand / model が空で、title から拾えるなら保険で切り出し（簡易）
+            if not brand_txt or not model_txt:
+                # 「【MODEL】BRAND_～」形式のタイトルに対応（Autohome よくある）
+                # 例: 【秦PLUS】比亚迪_秦PLUS报价_...
+                m = re.search(r"【(.+?)】\s*([^\s_]+)_", title_txt)
+                if m:
+                    model_from_title = m.group(1).strip()
+                    brand_from_title = m.group(2).strip()
+                    brand_txt = brand_txt or brand_from_title
+                    model_txt = model_txt or model_from_title
+
+            # さらに保険：_または空白で分割して先頭を brand 候補に
+            if (not brand_txt) and model_txt:
+                # 例: "比亚迪 秦PLUS" などを想定
+                s = model_txt.split()
+                if len(s) >= 2 and re.search(r"[\u4e00-\u9fff]", s[0]):
+                    brand_txt = s[0]
+                    model_txt = " ".join(s[1:])
+
+            # 整形
+            rank = to_int(rank_txt) if rank_txt else (i + 1)
+            count = to_int(count_txt)
+
+            if not brand_txt and not model_txt and not series_url:
+                # データが成立しない行はスキップ
+                continue
+
+            rows.append(
+                RankRow(
+                    rank_seq=rank,
+                    rank=rank,
+                    brand=brand_txt or "",
+                    model=model_txt or "",
+                    count=count,
+                    series_url=series_url or "",
+                    brand_conf=1.0,   # ここでは 1.0 固定（抽出のみ）
+                    series_conf=1.0,  # 同上
+                    title_raw=title_txt or "",
+                )
+            )
+
+        if rows:
+            break  # 何か取れたら終了
+
     return rows
 
-def get_title_from_series_url(page, url):
-    """個別車系ページの<title>を取得。失敗時は空文字。"""
-    if not url:
-        return ""
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=25000)
-        page.wait_for_timeout(400)
-        return (page.title() or "").strip()
-    except Exception:
-        return ""
 
-def llm_parse_brand_model(client, model_name, title):
-    """LLMにタイトルを渡して brand/model を抽出。"""
-    if not title:
-        return {"brand": "", "model": ""}
-    try:
-        resp = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": PROMPT_BRAND_MODEL},
-                {"role": "user", "content": title},
-            ],
-            temperature=0,
-            max_tokens=200,
-        )
-        out = (resp.choices[0].message.content or "").strip()
-        m = re.search(r"\{.*\}", out, re.S)
-        data = json.loads(m.group(0)) if m else {}
-        return {
-            "brand": (data.get("brand") or "").strip(),
-            "model": (data.get("model") or "").strip(),
-        }
-    except Exception:
-        return {"brand": "", "model": ""}
+# =========================
+# Main
+# =========================
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rank-url", default="https://www.autohome.com.cn/rank/1")
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--model", default="gpt-4o-mini")
-    ap.add_argument("--max-series", type=int, default=60)
+    ap.add_argument("--rank-url", required=True, help="Autohome rank base URL (PC)")
+    ap.add_argument("--output", required=True, help="CSV output path")
+    ap.add_argument("--timeout-ms", type=int, default=120000)
+    ap.add_argument("--headless", dest="headless", action="store_true", default=True)
+    ap.add_argument("--no-headless", dest="headless", action="store_false")
     args = ap.parse_args()
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    rank_url = force_pc_url(args.rank_url)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        ctx = browser.new_context(
-            user_agent=UA_MOBILE,
-            viewport={"width": 480, "height": 960},
+        browser = p.chromium.launch(headless=args.headless)
+        context = browser.new_context(
+            user_agent=PC_UA,
+            viewport={"width": 1440, "height": 900},
             locale="zh-CN",
-            timezone_id="Asia/Shanghai",
         )
-        page = ctx.new_page()
+        page = context.new_page()
 
-        # ランキングページ
-        print(f"🌐 Loading {args.rank_url}")
-        goto_with_retries(page, args.rank_url, timeout_ms=120000)
-        wait_rank_dom_ready(page, timeout_ms=120000)
-        total = scroll_to_bottom(page)
-        print(f"🧩 detected buttons(data-series-id): {total}")
+        # PC版を明示
+        page.goto(rank_url, wait_until="domcontentloaded")
+        # モバイルに飛ばされた場合に備えて再度PCへ
+        if "m.autohome.com.cn" in page.url:
+            page.goto(force_pc_url(page.url), wait_until="domcontentloaded")
 
-        base_rows = extract_rank_and_links(page)
-        if not base_rows:
-            # デバッグダンプ
-            Path("data").mkdir(parents=True, exist_ok=True)
-            with open("data/debug_rankpage_empty.html", "w", encoding="utf-8") as f:
-                f.write(page.content())
-            # フェイルセーフ（空でもrankだけ採番）
-            items = page.query_selector_all("[data-rank-num]") or []
-            base_rows = [{"rank": i, "series_url": None, "count": None} for i, _ in enumerate(items, start=1)]
+        # 想定される要素のどれかが現れるまで待機（OR待ち）
+        selectors_to_wait = [
+            "table.rank-list",
+            "table#rankList",
+            "div.rank-list",
+            "ul.rank-list",
+            "[data-series-id]",
+        ]
+        # いずれかがヒットするまで総当たり
+        success = False
+        for sel in selectors_to_wait:
+            try:
+                page.wait_for_selector(sel, timeout=args.timeout_ms, state="visible")
+                success = True
+                break
+            except Exception:
+                pass
 
-        # 各 series_url の <title> 取得
-        print("🔎 Fetching <title> from series_url ...")
-        subset = sorted(base_rows, key=lambda r: r["rank"])[: args.max_series]
-        for r in subset:
-            r["title"] = get_title_from_series_url(page, r.get("series_url"))
-            page.wait_for_timeout(250)
+        if not success:
+            # 最後にページ読み込み完了は保証しておく
+            try:
+                page.wait_for_load_state("networkidle", timeout=15_000)
+            except Exception:
+                pass
+
+        rows = extract_rows(page)
 
         browser.close()
 
-    # LLM で brand/model を解析
-    print("🤖 Parsing brand/model via LLM...")
-    for r in subset:
-        r.update(llm_parse_brand_model(client, args.model, r.get("title", "")))
+    # CSV 出力
+    fieldnames = [
+        "rank_seq",
+        "rank",
+        "brand",
+        "model",
+        "count",
+        "series_url",
+        "brand_conf",
+        "series_conf",
+        "title_raw",
+    ]
+    with open(args.output, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(dataclasses.asdict(r))
 
-    # rank列の保証と安定ソート
-    rows_fixed = []
-    for i, r in enumerate(subset, start=1):
-        rk = safe_int(r.get("rank")) or i
-        rows_fixed.append({**r, "rank": rk})
-    df = pd.DataFrame(rows_fixed)
-    if "rank" not in df.columns or df["rank"].isna().all():
-        df["rank"] = range(1, len(df) + 1)
-    df = df.sort_values("rank").reset_index(drop=True)
+    print(f"Saved {len(rows)} rows -> {args.output}")
 
-    df.to_csv(out, index=False, encoding="utf-8-sig")
-    print(f"✅ Saved: {out}  (rows={len(df)})")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(2)
