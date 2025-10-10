@@ -21,6 +21,47 @@ BATCH = 50
 RETRY = 3
 SLEEP = 1.0
 
+# --- 確実に変換する辞書（LLMの前に適用） ---
+BRAND_DICT = {
+    "吉利汽车": "Geely",
+    "吉利银河": "Geely",
+    "吉利": "Geely",
+    "五菱汽车": "Wuling",
+    "五菱": "Wuling",
+    "小米汽车": "Xiaomi",
+    "小米": "Xiaomi",
+    "零跑汽车": "Leapmotor",
+    "零跑": "Leapmotor",
+    "奇瑞": "Chery",
+    "哈弗": "Haval",
+    "长安启源": "Changan",
+    "长安": "Changan",
+    "红旗": "Hongqi",
+    "小鹏": "XPeng",
+    "理想": "Li Auto",
+    "蔚来": "NIO",
+    "比亚迪": "BYD",
+    "特斯拉": "Tesla",
+    "AITO": "AITO",
+}
+
+MODEL_DICT = {
+    "轩逸": "Sylphy",
+    "朗逸": "Lavida",
+    "速腾": "Sagitar",
+    "帕萨特": "Passat",
+    "途观": "Tiguan",
+    "迈腾": "Magotan",
+    "探岳": "Tharu",
+    "途岳": "T-Cross",
+    "卡罗拉": "Corolla",
+    "凯美瑞": "Camry",
+    "雅阁": "Accord",
+    "锋兰达": "Frontlander",
+    "RAV4荣放": "RAV4",
+    "卡罗拉锐放": "Corolla Cross",
+}
+
 # --- プロンプト（短く・強い指示） ---
 PROMPT_BRAND = """
 あなたは自動車ブランド名の正規化を行う変換器です。入力は中国語や混在表記のブランド名です。
@@ -38,14 +79,6 @@ PROMPT_BRAND = """
 
 【ブランドの優先順序（必ず上から順に判定）】
 A) **グローバルで通用するラテン表記が存在する場合は必ずそれを採用**（例: "BYD", "NIO", "XPeng", "Zeekr", "Leapmotor", "Chery", "Geely", "Haval", "Xiaomi", "AITO"）。
-   - 「吉利汽车」「吉利银河」→「Geely」
-   - 「小米汽车」→「Xiaomi」
-   - 「零跑汽车」→「Leapmotor」
-   - 「奇瑞」→「Chery」
-   - 「哈弗」→「Haval」
-   - 「长安」「长安启源」→「Changan」
-   - 「五菱汽车」→「Wuling」
-   - 「红旗」→「Hongqi」
 
 B) Aに該当せず、**日本で広く通用する日本語ブランド名**が明確な場合は日本語表記（例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ"、"フォルクスワーゲン", "メルセデス・ベンツ", "BMW", "アウディ", "ビュイック"）。
 
@@ -69,17 +102,7 @@ PROMPT_MODEL = """
 3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
 
 【モデルの優先順序（必ず上から順に判定）】
-I) **先頭のブランド片を必ず削除**（最優先）:
-   - 「小米SU7」→「SU7」
-   - 「本田CR-V」→「CR-V」
-   - 「长安Lumin」→「Lumin」
-   - 「长安CS75 PLUS」→「CS75 PLUS」
-   - 「零跑C10」→「C10」
-   - 「小鹏MONA M03」→「MONA M03」
-   - 「哈弗大狗」→「大狗」
-   - 「五菱缤果」→「缤果」
-
-E) ブランド片削除後、**グローバルで通用するラテン表記のモデル名**がある場合は、そのまま採用（例: "Model 3", "Han", "Seal", "SU7", "Song PLUS", "CR-V"）。
+E) **グローバルで通用するラテン表記のモデル名**がある場合は、そのラテン表記をそのまま採用（例: "Model 3", "Han", "Seal", "SU7", "Song PLUS", "CR-V", "Sylphy", "Lavida", "Tiguan", "Passat"）。
 
 F) **日本市場で長年通用する定番モデル名**はカタカナ表記を優先（例: アコード, カムリ, カローラ, RAV4, パサート）。※確信がなければ E を優先。
 
@@ -94,14 +117,21 @@ def is_latin(x: str) -> bool:
     return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
 
 def strip_brand_prefix(model: str, brand: str) -> str:
-    """モデル名からブランド片を削除"""
+    """モデル名からブランド片を削除（複数パターン対応）"""
     model = str(model).strip()
     brand = str(brand).strip()
     
-    # ブランド名で始まる場合は削除
-    if model.startswith(brand):
-        cleaned = model[len(brand):].strip()
-        return cleaned if cleaned else model
+    # 中国語ブランド名も考慮
+    brand_variants = [brand]
+    if brand in BRAND_DICT:
+        # 辞書のキーを全て試す
+        brand_variants.extend([k for k in BRAND_DICT.keys() if BRAND_DICT[k] == BRAND_DICT.get(brand, brand)])
+    
+    for b in brand_variants:
+        if model.startswith(b):
+            cleaned = model[len(b):].strip()
+            if cleaned:
+                return cleaned
     
     return model
 
@@ -158,6 +188,13 @@ def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[st
     map_in.update(fix)
     return map_in
 
+def apply_dict_first(items: List[str], dictionary: Dict[str, str]) -> Dict[str, str]:
+    """辞書を優先的に適用"""
+    result = {}
+    for item in items:
+        result[item] = dictionary.get(item, item)
+    return result
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -182,8 +219,14 @@ def main():
 
     # ----- brand -----
     brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
-    need = [b for b in brands if b not in cache["brand"]]
     brand_map = dict(cache["brand"])
+    
+    # 辞書を優先的に適用
+    dict_mapped = apply_dict_first(brands, BRAND_DICT)
+    brand_map.update(dict_mapped)
+    
+    # 辞書にないものだけLLMに問い合わせ
+    need = [b for b in brands if b not in cache["brand"] and b not in BRAND_DICT]
     for batch in chunked(need, BATCH):
         part = call_llm(batch, PROMPT_BRAND, args.model)
         brand_map.update(part)
@@ -197,8 +240,14 @@ def main():
     )
     
     models = sorted(set(str(x) for x in df['model_cleaned'].dropna()))
-    need = [m for m in models if m not in cache["model"]]
     model_map = dict(cache["model"])
+    
+    # 辞書を優先的に適用
+    dict_mapped = apply_dict_first(models, MODEL_DICT)
+    model_map.update(dict_mapped)
+    
+    # 辞書にないものだけLLMに問い合わせ
+    need = [m for m in models if m not in cache["model"] and m not in MODEL_DICT]
     for batch in chunked(need, BATCH):
         part = call_llm(batch, PROMPT_MODEL, args.model)
         model_map.update(part)
