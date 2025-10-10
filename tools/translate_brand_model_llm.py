@@ -12,7 +12,11 @@ from tqdm import tqdm
 
 def lookup_wikipedia(term: str):
     import wikipediaapi
-    wiki = wikipediaapi.Wikipedia('zh')
+    # Wikipedia API の User-Agent ポリシー対応
+    wiki = wikipediaapi.Wikipedia(
+        language='zh',
+        user_agent='china-auto-dashboard/1.0 (https://github.com/dodondona/china-auto-dashboard; contact: github-actions)'
+    )
     p = wiki.page(term)
     if not p.exists():
         return None
@@ -78,8 +82,8 @@ def main():
         cache = {}
 
     df = pd.read_csv(args.input)
-    brands = df[args.brand_col].dropna().unique().tolist()
-    models = df[args.model_col].dropna().unique().tolist()
+    brands = df[args.brand-col].dropna().unique().tolist()
+    models = df[args.model-col].dropna().unique().tolist()
 
     brand_map, model_map = {}, {}
 
