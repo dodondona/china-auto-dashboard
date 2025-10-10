@@ -16,7 +16,7 @@ import regex as re2  # pip install regex
 LATIN_RE = re2.compile(r"^[\p{Latin}\p{Number}\s\-\+\/\.\(\)]+$")
 HAS_CJK  = re2.compile(r"\p{Han}")
 
-DEF_MODEL = "gpt-4o-mini"
+DEF_MODEL = "gpt-4o"
 BATCH = 50
 RETRY = 3
 SLEEP = 1.0
