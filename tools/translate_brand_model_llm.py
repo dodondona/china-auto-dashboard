@@ -31,23 +31,19 @@ except Exception:
     OPENAI_AVAILABLE = False
 
 # ========== optional: official lookup (CSE) ==========
-# tools/official_lookup.py を優先、無い場合は no-op を定義
 def _noop_brand(brand_raw: str, brand_guess: str) -> str:
-    # 公式が使えない場合は、推定値を返すだけ
     return brand_guess or brand_raw
 
 def _noop_model(brand_en: str, model_raw: str, model_guess: str) -> str:
     return model_guess or model_raw
 
 try:
-    # まず tools 配下からの import を試す
     from tools.official_lookup import (
         official_brand_name_if_needed,
         official_model_name_if_needed,
     )
 except Exception:
     try:
-        # スクリプト直下に official_lookup.py がある場合
         import sys
         sys.path.append(os.path.dirname(__file__))
         from official_lookup import (
@@ -55,35 +51,22 @@ except Exception:
             official_model_name_if_needed,
         )
     except Exception:
-        # どちらも無ければ no-op
         official_brand_name_if_needed = _noop_brand
         official_model_name_if_needed = _noop_model
 
 
 # ========== ユーティリティ ==========
 def _is_clean_ascii_name(s: str) -> bool:
-    """
-    “英名らしい短いラベル” かどうかのゆるい判定。
-    - ASCII主体（日本語/中国語が混入していない）
-    - 長すぎない（<= 40）
-    - 英数開始、以降は英数 / 空白 / .-+/& を許容
-    """
     if not s:
         return False
     s = s.strip()
     if len(s) > 40:
         return False
-    # 日本語/中国語(漢字/かな)があればNG
     if re.search(r"[\u3040-\u30ff\u4e00-\u9fff\u3400-\u4dbf]", s):
         return False
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .\-+/&]*", s))
 
-
 def _shrink_brand(s: str) -> str:
-    """
-    説明混じりや多言語混入から “先頭の英語固有名(1–2語)” を抽出。
-    無ければ先頭トークン。
-    """
     s = (s or "").strip()
     if not s:
         return s
@@ -93,40 +76,25 @@ def _shrink_brand(s: str) -> str:
     head = re.split(r"[、，。,(（,]\s*|\s{2,}", s, maxsplit=1)[0].strip()
     return head
 
-
 def _normalize_model_loose(s: str) -> str:
-    """
-    モデル名の軽い正規化。ブランド重複の剥離、代表的ゆれの統一。
-    """
     if not s:
         return s
     s = s.strip()
-
-    # 先頭ブランドの重複を剥がす（英名想定）
     s = re.sub(
         r"^(BYD|Geely(?: Galaxy)?|Wuling|Chery|Changan(?: Qiyuan)?|Haval|Hongqi|Leapmotor|XPeng|Xiaomi(?: Auto)?|Toyota|Nissan|Volkswagen|Honda|Audi|Buick|Mercedes\-Benz|BMW)\s+",
         "",
         s,
         flags=re.I,
     )
-
-    # 中国語→英語の代表的ゆれ（最小限）
-    s = re.sub(r"(?:逸动|逸動)", "Eado", s)  # 長安 逸動 -> Eado
+    s = re.sub(r"(?:逸动|逸動)", "Eado", s)
     s = re.sub(r"カローラ\s*クロス", "Corolla Cross", s, flags=re.I)
-
-    # BYD 系列のゆれ
-    # Sealion / Seal 06
     s = re.sub(r"Sealion\s*0?\s*6(?:\s*New\s*Energy)?", "Sealion 06", s, flags=re.I)
     s = re.sub(r"Seal\s*0?\s*6(?:\s*New\s*Energy)?", "Seal 06", s, flags=re.I)
-    # 海豹05 -> Seal 05 DM-i
     if re.fullmatch(r"Seal\s*0?\s*5", s, flags=re.I):
         s = "Seal 05 DM-i"
     s = re.sub(r"(?:海豹\s*0?\s*5).*", "Seal 05 DM-i", s)
-
-    # 余計な二重空白
     s = re.sub(r"\s{2,}", " ", s).strip()
     return s
-
 
 def _load_cache(path: str) -> Dict[str, Any]:
     if not path or not os.path.exists(path):
@@ -136,13 +104,11 @@ def _load_cache(path: str) -> Dict[str, Any]:
             data = json.load(f)
         if not isinstance(data, dict):
             return {"_version": 2, "brand": {}, "model": {}}
-        # バージョン違いや古い形式への対処
         if "_version" not in data or "brand" not in data or "model" not in data:
             return {"_version": 2, "brand": {}, "model": {}}
         return data
     except Exception:
         return {"_version": 2, "brand": {}, "model": {}}
-
 
 def _save_cache(path: str, data: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -161,17 +127,10 @@ def _llm_client():
     except Exception:
         return None
 
-
 def llm_translate_brand_model(brand_cn: str, model_cn: str, llm_model: str) -> Dict[str, str]:
-    """
-    LLMでの補完（最終手段）。JSONで {"brand_en": "...", "model_en": "..."} を返す。
-    使えない場合は素通し。
-    """
     out = {"brand_en": "", "model_en": ""}
-
     if not (OPENAI_AVAILABLE and llm_model and _llm_client()):
         return out
-
     client = _llm_client()
     if client is None:
         return out
@@ -194,7 +153,6 @@ def llm_translate_brand_model(brand_cn: str, model_cn: str, llm_model: str) -> D
         "- Do not include Chinese or Japanese characters in the output.\n"
         "- Respond JSON only."
     )
-
     try:
         rsp = client.chat.completions.create(
             model=llm_model,
@@ -215,7 +173,6 @@ def llm_translate_brand_model(brand_cn: str, model_cn: str, llm_model: str) -> D
             out["model_en"] = _normalize_model_loose(me)
     except Exception:
         pass
-
     return out
 
 
@@ -230,10 +187,12 @@ def parse_args():
     p.add_argument("--model-ja-col", dest="model_ja_col", default="model_ja")
     p.add_argument("--cache", default=".cache/global_map.json")
     p.add_argument("--sleep", type=float, default=0.1)
-    # NOTE: --model は yml で渡されているため残す（--model-col とは別物）
+    # YAMLで渡される LLM モデル指定（--model-col とは別物）
     p.add_argument("--model", dest="llm_model", default="", help="LLM model name (e.g., gpt-4o)")
+    # --- 追加：YAML互換のために受け付けるだけのダミーフラグ ---
+    p.add_argument("--use-wikidata", action="store_true", help="(ignored for backward compatibility)")
+    p.add_argument("--use-official", action="store_true", help="(ignored for backward compatibility)")
     return p.parse_args()
-
 
 def main():
     args = parse_args()
@@ -243,14 +202,12 @@ def main():
     print(f"Translating: {inp} -> {out}")
 
     df = pd.read_csv(inp)
-    # 必須列チェック
     for col in [args.brand_col, args.model_col]:
         if col not in df.columns:
             raise RuntimeError(
                 f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}"
             )
 
-    # 出力列が無ければ作る（既存は壊さない）
     if args.brand_ja_col not in df.columns:
         df[args.brand_ja_col] = ""
     if args.model_ja_col not in df.columns:
@@ -264,7 +221,6 @@ def main():
     brand_cache: Dict[str, str] = cache.get("brand", {})
     model_cache: Dict[str, str] = cache.get("model", {})
 
-    # ---- まずブランドを正規化（uniqueで省エネ） ----
     brands = pd.Series(df[args.brand_col].astype(str).fillna("")).unique().tolist()
     brand_map: Dict[str, str] = {}
 
@@ -275,7 +231,6 @@ def main():
             brand_map[b] = ""
             continue
 
-        # キャッシュ利用（健全性を確認）
         cached = brand_cache.get(key)
         if not _is_clean_ascii_name(cached):
             cached = None
@@ -284,21 +239,13 @@ def main():
             brand_map[b] = cached
             continue
 
-        # 既存の brand_ja やタイトルから拾える場合
         guess = ""
-        # b 自体が既に英語になっている可能性
         if _is_clean_ascii_name(b):
             guess = b
-        # 既存列から抽出
-        # …必要があればここに他列からのヒントを追加…
-
-        # ざっくり縮約
         guess = _shrink_brand(guess or b)
 
-        # 公式で補完（CSE; 足りない時だけ）
         brand_fixed = official_brand_name_if_needed(b, guess)
         if not _is_clean_ascii_name(brand_fixed):
-            # LLM（最後の手段）
             if args.llm_model:
                 got = llm_translate_brand_model(b, "", args.llm_model)
                 be = got.get("brand_en", "")
@@ -308,33 +255,27 @@ def main():
         brand_fixed = _shrink_brand(brand_fixed)
         brand_map[b] = brand_fixed
 
-        # キャッシュ保存（健全なものだけ）
         if _is_clean_ascii_name(brand_fixed):
             brand_cache[key] = brand_fixed
 
         time.sleep(args.sleep)
 
-    # 行に反映（brand_ja を英名に統一）
     df[args.brand_ja_col] = df[args.brand_col].astype(str).map(lambda x: brand_map.get(x, x))
 
-    # ---- 次にモデルを正規化（行ごと。ブランド依存のため） ----
     print("\nmodel:")
     for idx, row in tqdm(df.iterrows(), total=len(df)):
         brand_raw = str(row[args.brand_col] or "")
         model_raw = str(row[args.model_col] or "")
 
-        # 現時点のブランド英名
         brand_en = str(row[args.brand_ja_col] or "").strip()
         if not _is_clean_ascii_name(brand_en):
             brand_en = _shrink_brand(brand_en or brand_raw)
 
-        # 既存のモデル値を取得・ゆるく正規化
         current_model = str(row.get(args.model_ja_col, "") or "").strip()
         if not current_model:
             current_model = model_raw
         current_model = _normalize_model_loose(current_model)
 
-        # キャッシュキーは brand|model にして衝突を避ける
         mc_key = f"{brand_raw}|{model_raw}"
         cached_model = model_cache.get(mc_key)
         if not _is_clean_ascii_name(cached_model):
@@ -348,14 +289,12 @@ def main():
             decided_model = cached_model
             decided_src = "cache"
         else:
-            # まず公式（CSE）
             try_official = official_model_name_if_needed(brand_en, model_raw, current_model)
             if _is_clean_ascii_name(try_official):
                 model_official = _normalize_model_loose(try_official)
                 decided_model = model_official
                 decided_src = "official"
             else:
-                # LLM（最後の手段）
                 if args.llm_model:
                     got = llm_translate_brand_model(brand_raw, model_raw, args.llm_model)
                     me = got.get("model_en", "")
@@ -363,33 +302,27 @@ def main():
                         decided_model = _normalize_model_loose(me)
                         decided_src = "llm"
 
-            # まだ決まらなければ current を採用
             if not decided_model:
                 decided_model = current_model
                 decided_src = decided_src or "current"
 
-            # キャッシュ保存（健全なものだけ）
             if _is_clean_ascii_name(decided_model):
                 model_cache[mc_key] = decided_model
 
-        # 書き戻し
         df.at[idx, args.model_ja_col] = decided_model
         if model_official and _is_clean_ascii_name(model_official):
             df.at[idx, "model_official_en"] = model_official
         else:
-            # 公式が取れなかった場合でも、英名なら補助的に入れておく（空でもOK）
             df.at[idx, "model_official_en"] = decided_model if _is_clean_ascii_name(decided_model) else ""
         df.at[idx, "source_model"] = decided_src
 
         if args.sleep:
             time.sleep(args.sleep / 10.0)
 
-    # キャッシュ保存
     cache["brand"] = brand_cache
     cache["model"] = model_cache
     _save_cache(args.cache, cache)
 
-    # CSV出力
     df.to_csv(out, index=False, encoding="utf-8")
     print(f"Wrote: {out}")
 
