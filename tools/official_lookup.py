@@ -4,7 +4,7 @@
 公式サイト(メーカー直営ドメイン)を優先してモデル英字名を取得する最小実装。
 - Google Programmable Search Engine (Custom Search JSON API) を利用
 - ページから JSON-LD / OpenGraph / H1 / <title> を順に抽出し、スコアリングして最良候補を採用
-- 依存: requests, beautifulsoup4, lxml, regex(標準reでもOK・ここではre)
+- 依存: requests, beautifulsoup4, lxml, re
 
 環境変数:
   GOOGLE_API_KEY : Custom Search API の APIキー
@@ -12,7 +12,10 @@
 """
 
 from __future__ import annotations
-import os, re, json, time
+import os
+import re
+import json
+import time
 import requests
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -29,7 +32,7 @@ OFFICIAL_DOMAINS = {
     # Nissan
     "nissan.com.cn", "nissan-global.com",
     # Volkswagen (一汽/上汽 含む)
-    "vw.com.cn", "saicvolkswagen.com.cn", "fawev.com", "faw-vw.com",
+    "vw.com.cn", "saicvolkswagen.com.cn", "faw-vw.com",
     # Geely / Galaxy
     "geely.com", "galaxy.geely.com",
     # Wuling (SGMW)
@@ -44,13 +47,13 @@ OFFICIAL_DOMAINS = {
 # ノイズ語（タイトルなどから除去）
 NOISE_WORDS = [
     r"Official\s*Site", r"Official", r"官网", r"首页", r"报价", r"参数", r"配置", r"车型",
-    r"价格", r"预约", r"预售", r"新闻", r"活动", r"试驾", r"Overview", r"Price", r"Specs",
-    r"全新", r"上市", r"焕新", r"发布", r"了解更多", r"立即", r"预约试驾",
+    r"价格", r"预约", r"预售", r"新闻", r"资讯", r"活动", r"试驾", r"Overview", r"Price", r"Specs",
+    r"全新", r"上市", r"焕新", r"发布", r"了解更多", r"立即", r"预约试驾", r"官方网站", r"参数配置表",
 ]
 
 # 自動車以外の誤爆抑制
 BAD_HINTS = [
-    "歌词", "楽曲", "歌曲", "专辑", "アルバム", "映画", "ドラマ", "预告", "OST", "周边",
+    "歌词", "楽曲", "歌曲", "专辑", "アルバム", "映画", "ドラマ", "预告", "OST",
     "disambiguation", "曖昧さ回避",
 ]
 
@@ -58,8 +61,15 @@ UA = "china-auto-dashboard/1.0 (+https://github.com/dodondona/china-auto-dashboa
 
 
 def _http_get(url: str, timeout: float = 12.0) -> str | None:
+    """HTTP GET with encoding fix (文字化け対策)."""
     try:
         resp = requests.get(url, timeout=timeout, headers={"User-Agent": UA})
+        # サーバーのencoding宣言が怪しいことがあるのでapparent_encodingを尊重
+        if not resp.encoding:
+            resp.encoding = resp.apparent_encoding
+        else:
+            if "ISO-8859" in resp.encoding.upper():
+                resp.encoding = resp.apparent_encoding
         if resp.status_code == 200 and resp.text:
             return resp.text
     except Exception:
@@ -70,7 +80,6 @@ def _http_get(url: str, timeout: float = 12.0) -> str | None:
 def _domain_ok(url: str) -> bool:
     try:
         netloc = urlparse(url).netloc.lower()
-        # サブドメインを含めて official ドメインに一致するか
         return any(netloc.endswith(d) for d in OFFICIAL_DOMAINS)
     except Exception:
         return False
@@ -81,14 +90,16 @@ def _cleanup_name(name: str) -> str | None:
         return None
     s = re.sub(r"\s+", " ", str(name)).strip()
 
-    # ノイズ語を末尾から削る（過剰削除を防ぐため弱めのルール）
+    # ノイズ語を軽く除去
     for w in NOISE_WORDS:
         s = re.sub(rf"\b{w}\b", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s{2,}", " ", s).strip()
-    # ニセの括弧書き/曖昧文字を落とす
+
+    # 非自動車系ヒントがあれば破棄
     if any(bad.lower() in s.lower() for bad in BAD_HINTS):
         return None
-    # タイトルに「|」「-」区切りがある場合、先頭側を優先
+
+    # 区切り「 | 」や「 - 」があれば先頭を優先
     if " | " in s:
         s = s.split(" | ")[0].strip()
     if " - " in s and len(s.split(" - ")[0]) >= 3:
@@ -113,18 +124,18 @@ def _best_name_from_html(html: str) -> dict:
             data = json.loads(tag.string or "")
         except Exception:
             continue
-        # @graph or list で来るケースもある
+
         def _collect(d):
-            if not isinstance(d, dict): return
-            t = (d.get("@type") or d.get("type") or "")
-            # Vehicle/Product/Article など。name を候補に。
-            if isinstance(t, list):
-                t = " ".join(t)
+            if not isinstance(d, dict):
+                return
+            t = d.get("@type") or d.get("type") or ""
+            # name / headline
             nm = d.get("name") or d.get("headline")
             if nm:
                 cname = _cleanup_name(nm)
                 if cname:
                     out["jsonld_name"].append(cname)
+            # 探索
             for k in ("item", "mainEntityOfPage", "brand"):
                 if isinstance(d.get(k), dict):
                     _collect(d[k])
@@ -132,9 +143,11 @@ def _best_name_from_html(html: str) -> dict:
                 for x in d["@graph"]:
                     if isinstance(x, dict):
                         _collect(x)
+
         if isinstance(data, list):
             for it in data:
-                if isinstance(it, dict): _collect(it)
+                if isinstance(it, dict):
+                    _collect(it)
         elif isinstance(data, dict):
             _collect(data)
 
@@ -155,86 +168,119 @@ def _best_name_from_html(html: str) -> dict:
     return out
 
 
+# モデルらしい英字トークン検出
+MODEL_TOKEN = re.compile(
+    r"""(?x)
+    (?:\bModel\s+[3YSX]\b) |                              # Tesla
+    (?:\b[A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9+-]+){0,3}\b)   # 一般的な車名の英字（最大4語）
+    """
+)
+
+def _extract_model_like(name: str, model_zh: str) -> str | None:
+    """クリーニング済みタイトルから“車名らしい英字”だけを抽出。"""
+    if not name:
+        return None
+    s = name.strip()
+
+    # BYD 海洋系列の正規化（0埋めや表記ブレ）
+    s = re.sub(r"\bsealion\s*0*6\b", "Sealion 06", s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*6\b",   "Seal 06",    s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*5\b",   "Seal 05",    s, flags=re.I)
+
+    # Tesla優先
+    m = re.search(r"\bModel\s+[3YSX]\b", s, flags=re.I)
+    if m:
+        return re.sub(r"\bModel\s+([3ysx])\b", lambda mm: f"Model {mm.group(1).upper()}", m.group(0), flags=re.I)
+
+    # 一般英字トークン（最短・最左）
+    ms = list(MODEL_TOKEN.finditer(s))
+    if ms:
+        return ms[0].group(0).strip()
+
+    return None
+
+
+def _pick_name(data: dict, model_zh: str) -> str | None:
+    """抽出した構造化情報から最も良い“英字名”を1つ返す。"""
+    # JSON-LD
+    if data.get("jsonld_name"):
+        for nm in data["jsonld_name"]:
+            cand = _extract_model_like(nm, model_zh)
+            if cand:
+                return cand
+    # og:title, h1, title
+    for k in ("og_title", "h1", "title"):
+        nm = data.get(k)
+        if nm:
+            cand = _extract_model_like(nm, model_zh)
+            if cand:
+                return cand
+    return None
+
+
 def _score_candidate(url: str, data: dict, brand_zh: str, model_zh: str, picked: str | None) -> int:
-    """
-    候補ページの信頼度スコア。
-    """
+    """候補ページの信頼度スコア。"""
     score = 0
     if _domain_ok(url):
         score += 40
-    # JSON-LD が豊富なら加点
     if data.get("jsonld_name"):
         score += 20
-    # og/h1/title がそれらしい
     for k in ("og_title", "h1", "title"):
         if data.get(k):
             score += 5
 
-    # URL/タイトルにモデル語を含むと加点
     u = url.lower()
     if str(model_zh):
         mz = str(model_zh).lower()
         if mz in u:
             score += 10
-    if picked:
-        p = picked.lower()
-        if any(w in p for w in [str(model_zh).lower()]):
-            score += 5
 
-    # ニュース/リスト/販売店は減点
+    if picked:
+        p = picked.strip()
+        # 英字比率が低い/長すぎる場合は減点（中国語のまま等を避ける）
+        ascii_ratio = sum(1 for ch in p if ord(ch) < 128) / max(1, len(p))
+        if ascii_ratio < 0.6:
+            score -= 20
+        if len(p) > 30:
+            score -= 10
+
     if any(seg in u for seg in ["/news", "/dealer", "/list", "/download", "/join", "/jobs", "/about"]):
         score -= 15
 
     return score
 
 
-def _pick_name(data: dict) -> str | None:
-    """
-    抽出した構造化情報から最も良い名前を1つ返す。
-    """
-    # JSON-LD に良いのがあれば最優先（複数あれば先頭）
-    if data.get("jsonld_name"):
-        return data["jsonld_name"][0]
-    # 以降は順に
-    for k in ("og_title", "h1", "title"):
-        if data.get(k):
-            return data[k]
-    return None
-
-
 def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
-    """
-    ブランド別の軽い整形（辞書化はしない、最小限）。
-    """
+    """ブランド別・最小の表記ゆれ補正（辞書化はしない方針で軽く）。"""
     s = model_en.strip()
 
     # Tesla: "Model y" -> "Model Y"
     if brand_zh in {"特斯拉", "Tesla", "テスラ"}:
         s = re.sub(r"\bModel\s*([3ysx])\b", lambda m: f"Model {m.group(1).upper()}", s, flags=re.I)
 
-    # BYD 海洋系列: Seagull/Dolphin/Seal/Sealion + number
+    # BYD 海洋系列
     s = re.sub(r"\bsealion\s*0*6\b", "Sealion 06", s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*6\b", "Seal 06", s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*5\b", "Seal 05", s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*6\b",   "Seal 06",    s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*5\b",   "Seal 05",    s, flags=re.I)
 
-    # VW China 固有の英名をそのまま
+    # VW China 固有名
     s = re.sub(r"\bsagitar\b", "Sagitar", s, flags=re.I)
     s = re.sub(r"\bmagotan\b", "Magotan", s, flags=re.I)
-    s = re.sub(r"\btayron\b", "Tayron", s, flags=re.I)
-    s = re.sub(r"\btharu\b", "Tharu", s, flags=re.I)
-    s = re.sub(r"\blavida\b", "Lavida", s, flags=re.I)
+    s = re.sub(r"\btayron\b",  "Tayron",  s, flags=re.I)
+    s = re.sub(r"\btharu\b",   "Tharu",   s, flags=re.I)
+    s = re.sub(r"\blavida\b",  "Lavida",  s, flags=re.I)
     s = re.sub(r"\btiguan\s*l\b", "Tiguan L", s, flags=re.I)
 
     # Toyota China
-    s = re.sub(r"\bfrontlander\b", "Frontlander", s, flags=re.I)
-    s = re.sub(r"\bcorolla\s*cross\b", "Corolla Cross", s, flags=re.I)
-    s = re.sub(r"\bcamry\b", "Camry", s, flags=re.I)
-    s = re.sub(r"\brav4\b", "RAV4", s, flags=re.I)
+    s = re.sub(r"\bfrontlander\b",     "Frontlander",    s, flags=re.I)
+    s = re.sub(r"\bcorolla\s*cross\b", "Corolla Cross",  s, flags=re.I)
+    s = re.sub(r"\bcamry\b",           "Camry",          s, flags=re.I)
+    s = re.sub(r"\brav4\b",            "RAV4",           s, flags=re.I)
 
     # Chery / Changan
     s = re.sub(r"\btiggo\s*8\b", "Tiggo 8", s, flags=re.I)
-    s = re.sub(r"\barrizo\s*8\b", "Arrizo 8", s, flags=re.I)  # 誤綴り救済
-    s = re.sub(r"\beado\b", "Eado", s, flags=re.I)
+    s = re.sub(r"\barrizo\s*8\b","Arrizo 8", s, flags=re.I)  # 誤綴り救済
+    s = re.sub(r"\beado\b",      "Eado",     s, flags=re.I)
 
     return s.strip()
 
@@ -242,12 +288,11 @@ def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
 def _build_query(brand_zh: str, model_zh: str) -> str:
     """
     CSEに渡すクエリ文字列（CSE自体は既に公式サイト限定で構成している想定）。
+    中国語名＋推定英字の両方を含めてヒット率を上げる。
     """
     terms = []
     if model_zh:
         terms.append(f"\"{model_zh}\"")
-    # 既知の英字候補も併記（軽い網を張る）
-    # 例: 海狮06 → "Sealion 06", 海豹06 → "Seal 06", 速腾 → "Sagitar", 锋兰达 → "Frontlander" 等
     hint_map = {
         "海狮": "Sealion",
         "海豹": "Seal",
@@ -271,7 +316,6 @@ def _build_query(brand_zh: str, model_zh: str) -> str:
     for zh, en in hint_map.items():
         if zh in str(model_zh):
             terms.append(f"\"{en}\"")
-    # ブランド名はそのまま（CSE側がサイトを限定）
     if brand_zh:
         terms.append(f"\"{brand_zh}\"")
     return " ".join(terms)
@@ -314,14 +358,13 @@ def find_official_english(brand_zh: str, model_zh: str, sleep_sec: float = 0.25)
             continue
 
         data = _best_name_from_html(html)
-        picked = _pick_name(data)
-        picked = _cleanup_name(picked) if picked else None
+        picked = _pick_name(data, model_zh)   # ★ 英字モデル名だけを抽出
         if not picked:
             continue
 
         picked = _normalize_known_patterns(brand_zh, picked)
-
         sc = _score_candidate(link, data, brand_zh, model_zh, picked)
+
         if sc > best_score:
             best_score = sc
             best = picked
