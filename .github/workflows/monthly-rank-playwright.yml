@@ -50,6 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          rm -f .cache/global_map.json || true
           targets=()
           for f in data/autohome_raw_*_with_brand.csv; do
             out="${f%.csv}_ja.csv"
