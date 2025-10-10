@@ -3,18 +3,27 @@
 """
 translate_brand_model_llm.py
 ブランド名・車種名の翻訳を行い、日本語またはグローバル名を付与する。
+（LLM翻訳の前に、公式サイトからの英字名を優先的に取得）
+
+Usage:
+  python translate_brand_model_llm.py \
+    --input data/autohome_raw_2025-08_with_brand.csv \
+    --output data/autohome_raw_2025-08_with_brand_ja.csv \
+    --brand-col brand --model-col model \
+    --brand-ja-col brand_ja --model-ja-col model_ja \
+    --model gpt-4o \
+    --cache .cache/global_map.json
 """
 
 import os, sys, csv, json, time, argparse
 from tqdm import tqdm
 from openai import OpenAI
 
-# ✅ tools ディレクトリをパスに追加
+# tools ディレクトリをパスに追加（ModuleNotFoundError対策）
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-# ✅ 公式サイト英字取得モジュールを読み込み
+# 公式サイト英字取得モジュール
 from tools.official_lookup import find_official_english
-
 
 
 def read_csv(path):
@@ -73,6 +82,9 @@ def main():
     ap.add_argument("--cache", default=".cache/global_map.json")
     ap.add_argument("--sleep", type=float, default=0.1)
     ap.add_argument("--model", default="gpt-4o")
+    # ▼ 互換性のために追加（挙動は変えずに無視）
+    ap.add_argument("--use-wikidata", action="store_true")
+    ap.add_argument("--use-official", action="store_true")
     args = ap.parse_args()
 
     rows = read_csv(args.input)
@@ -84,6 +96,7 @@ def main():
 
     print(f"Translating: {args.input} -> {args.output}")
 
+    # ブランド側：既存のLLM翻訳ロジック（そのまま）
     for key in tqdm(all_brands, desc="brand"):
         if key in cache:
             continue
@@ -95,17 +108,19 @@ def main():
         time.sleep(args.sleep)
         save_cache(args.cache, cache)
 
+    # モデル側：まず公式サイトで英字名を試し、ダメならLLMへ（既存方針どおり）
     for key in tqdm(all_models, desc="model"):
         if key in cache:
             continue
 
-        # ✅ まず公式サイトから英字名を試す（成功すればLLM翻訳をスキップ）
+        # 公式サイトから英字名を優先取得
         official_name = find_official_english("", key)
         if official_name:
             cache[key] = official_name
             save_cache(args.cache, cache)
             continue
 
+        # 公式で決まらなければ LLM
         cache[key] = translate_with_llm(
             client, args.model,
             key,
@@ -115,6 +130,7 @@ def main():
         time.sleep(args.sleep)
         save_cache(args.cache, cache)
 
+    # 書き出し
     out = []
     for r in rows:
         brand = r.get(args.brand_col, "")
