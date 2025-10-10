@@ -3,24 +3,18 @@
 """
 translate_brand_model_llm.py
 ブランド名・車種名の翻訳を行い、日本語またはグローバル名を付与する。
-（LLM翻訳の前に、公式サイトからの英字名を優先的に取得）
-
-Usage:
-  python translate_brand_model_llm.py \
-    --input data/autohome_raw_2025-08_with_brand.csv \
-    --output data/autohome_raw_2025-08_with_brand_ja.csv \
-    --brand-col brand --model-col model \
-    --brand-ja-col brand_ja --model-ja-col model_ja \
-    --model gpt-4o \
-    --cache .cache/global_map.json
 """
 
-import os, csv, json, time, argparse
+import os, sys, csv, json, time, argparse
 from tqdm import tqdm
 from openai import OpenAI
 
-# ✅ 公式サイト英字取得モジュールを追加
+# ✅ tools ディレクトリをパスに追加
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+# ✅ 公式サイト英字取得モジュールを読み込み
 from tools.official_lookup import find_official_english
+
 
 
 def read_csv(path):
