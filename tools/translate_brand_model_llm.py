@@ -76,8 +76,8 @@ def _shrink_brand(s: str) -> str:
     s = (s or "").strip()
     if not s:
         return s
-    # 最初の区切り（スペース/括弧/読点）まで
-    s = re.split(r"[、，。,(（]\s*|\s{2,}", s, maxsplit=1)[0]
+    # ASCIIカンマ(,)も分割対象に含める
+    s = re.split(r"[、，。,(（,]\s*|\s{2,}", s, maxsplit=1)[0].strip()
     return s
 
 
@@ -123,8 +123,15 @@ def main():
         if key in cache:
             continue
 
-        # 公式サイトから英字名を優先取得
-        official_name = find_official_english("", key)
+        # ★ ブランド名も渡す（ヒット率/正確性が大幅に上がる）
+        brand_zh_for_this_model = None
+        # rowsから同モデルのブランドを1件拾う（代表値）
+        for r in rows:
+            if r.get(args.model_col) == key:
+                brand_zh_for_this_model = r.get(args.brand_col, "")
+                break
+
+        official_name = find_official_english(brand_zh_for_this_model or "", key)
         if official_name:
             cache[key] = official_name
             save_cache(args.cache, cache)
