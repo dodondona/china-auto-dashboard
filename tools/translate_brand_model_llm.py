@@ -12,7 +12,6 @@ if not api_key:
     raise ValueError("APIキーが設定されていません。環境変数 'GEMINI_API_KEY' を確認してください。")
 
 genai.configure(api_key=api_key)
-# 最新の独立環境で動かすので、最新モデル名を指定
 model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def load_cache(path):
@@ -42,28 +41,31 @@ def translate_with_gemini(text, cache):
         
         print(f"Gemini 変換: {text} -> {translated_text}", flush=True)
         cache[text] = translated_text
-        time.sleep(1.1) # APIレート制限のための待機
+        time.sleep(1.1)
         return translated_text
         
     except Exception as e:
         print(f"Gemini APIエラー ({text}): {e}", flush=True)
-        return "" # エラー時は空文字を返す
+        return ""
 
 def main():
     parser = argparse.ArgumentParser(description="Translate brand/model names using Gemini.")
-    parser.add_argument("--input", required=True, help="Input CSV file path")
-    # ▼▼▼【重要】ここのタイプミスを修正しました (add_action -> add_argument) ▼▼▼
-    parser.add_argument("--output", required=True, help="Output CSV file path")
-    # ▲▲▲【重要】ここのタイプミスを修正しました ▲▲▲
-    parser.add_argument("--brand-col", required=True, help="Column name for brand")
-    parser.add_argument("--model-col", required=True, help="Column name for model")
-    parser.add_argument("--brand-ja-col", required=True, help="Column name for translated brand")
-    parser.add_argument("--model-ja-col", required=True, help="Column name for translated model")
-    parser.add_argument("--cache", help="Cache file path for translations")
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--brand-col", required=True)
+    parser.add_argument("--model-col", required=True)
+    parser.add_argument("--brand-ja-col", required=True)
+    parser.add_argument("--model-ja-col", required=True)
+    parser.add_argument("--cache")
     
     args, _ = parser.parse_known_args()
 
-    df = pd.read_csv(args.input)
+    try:
+        df = pd.read_csv(args.input, engine='python', on_bad_lines='skip')
+    except FileNotFoundError:
+        print(f"入力ファイルが見つかりません: {args.input}")
+        sys.exit(0)
+    
     cache = load_cache(args.cache) if args.cache else {}
 
     df[args.brand_ja_col] = df[args.brand_col].apply(lambda x: translate_with_gemini(x, cache))
