@@ -1,176 +1,150 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-translate_brand_model_llm.py
-ブランド名・車種名の翻訳を行い、日本語またはグローバル名を付与する。
-（LLM翻訳の前に、公式サイトからの英字名を優先的に取得）
-
-Usage:
-  python translate_brand_model_llm.py \
-    --input data/autohome_raw_2025-08_with_brand.csv \
-    --output data/autohome_raw_2025-08_with_brand_ja.csv \
-    --brand-col brand --model-col model \
-    --brand-ja-col brand_ja --model-ja-col model_ja \
-    --model gpt-4o \
-    --cache .cache/global_map.json
-"""
-
-import os, sys, csv, json, time, argparse, re
+# tools/translate_brand_model_llm.py
+# 公式検索(CSE)を先に試し、ダメなら“現在の値”をゆるく正規化して使う最小差分版。
+# 注意: キャッシュは一切使いません（--cache 引数は受けるが無視します）。
+from __future__ import annotations
+import os
+import re
+import sys
+import time
+import json
+import argparse
+from typing import Dict, Any
+import pandas as pd
 from tqdm import tqdm
-from openai import OpenAI
 
-# tools ディレクトリをパスに追加（ModuleNotFoundError対策）
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+# --- add: safe import for official lookup (CSE) ---
+try:
+    from tools.official_lookup import (
+        official_brand_name_if_needed,
+        official_model_name_if_needed,
+    )
+except Exception:
+    sys.path.append(os.path.dirname(__file__))
+    from official_lookup import (
+        official_brand_name_if_needed,
+        official_model_name_if_needed,
+    )
+# -----------------------------------------------
 
-# 公式サイト英字取得 + 正規化
-from tools.official_lookup import find_official_english, _normalize_known_patterns
+ASCII_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .\-+/&]*$")
 
-
-def read_csv(path):
-    with open(path, encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
-
-
-def write_csv(path, rows, fieldnames):
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def load_cache(path):
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_cache(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def translate_with_llm(client, model, text, prompt=""):
-    if not text:
-        return ""
-    try:
-        rsp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": text}
-            ],
-            temperature=0
-        )
-        return rsp.choices[0].message.content.strip()
-    except Exception:
-        return ""
-
+def _is_clean_ascii_name(s: str) -> bool:
+    if not s: return False
+    s = s.strip()
+    if len(s) > 40: return False
+    if re.search(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]", s):
+        return False
+    return bool(ASCII_NAME.fullmatch(s))
 
 def _shrink_brand(s: str) -> str:
-    """ブランド名がLLMで長文化したときに先頭語で切る（見た目だけ整える）。"""
-    s = (s or "").strip()
-    if not s:
-        return s
-    # ASCIIカンマ(,)も分割対象に含める
-    s = re.split(r"[、，。,(（,]\s*|\s{2,}", s, maxsplit=1)[0].strip()
+    if not s: return s
+    s = s.strip()
+    m = re.search(r"\b([A-Z][A-Za-z.-]{1,20}(?:\s+[A-Z][A-Za-z.-]{1,20})?)\b", s)
+    if m:
+        return m.group(1).strip()
+    head = re.split(r"[、，。,(（,]\s*|\s{2,}", s, maxsplit=1)[0].strip()
+    return head
+
+def _normalize_model_loose(s: str) -> str:
+    if not s: return s
+    s = s.strip()
+    # 先頭ブランドを剥がす（一般形）
+    s = re.sub(r"^(BYD|Geely(?: Galaxy)?|Wuling|Chery|Changan(?: Qiyuan)?|Haval|Hongqi|Leapmotor|XPeng|Xiaomi(?: Auto)?|Toyota|Nissan|Volkswagen|Honda|Audi|Buick|Mercedes\-Benz|BMW)\s+", "", s, flags=re.I)
+    # 代表的な揺れ
+    s = re.sub(r"(?:逸动|逸動)", "Eado", s)
+    s = re.sub(r"カローラ\s*クロス", "Corolla Cross", s, flags=re.I)
+    s = re.sub(r"Sealion\s*0?\s*6(?:\s*New\s*Energy)?", "Sealion 06", s, flags=re.I)
+    s = re.sub(r"Seal\s*0?\s*6(?:\s*New\s*Energy)?", "Seal 06", s, flags=re.I)
+    if re.fullmatch(r"Seal\s*0?\s*5", s, flags=re.I):
+        s = "Seal 05 DM-i"
+    s = re.sub(r"(?:海豹\s*0?\s*5).*", "Seal 05 DM-i", s)
+    s = re.sub(r"\s{2,}", " ", s).strip()
     return s
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--input", required=True, help="input CSV path")
+    p.add_argument("--output", required=True, help="output CSV path")
+    p.add_argument("--brand-col", default="brand")
+    p.add_argument("--model-col", default="model")
+    p.add_argument("--brand-ja-col", default="brand_ja")
+    p.add_argument("--model-ja-col", default="model_ja")
+    p.add_argument("--cache", default=".cache/global_map.json")  # 受けるだけ（無視）
+    p.add_argument("--sleep", type=float, default=0.1)
+    p.add_argument("--model", default="gpt-4o")  # 受けるだけ（LLMは今回未使用）
+    return p.parse_args()
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--brand-col", default="brand")
-    ap.add_argument("--model-col", default="model")
-    ap.add_argument("--brand-ja-col", default="brand_ja")
-    ap.add_argument("--model-ja-col", default="model_ja")
-    ap.add_argument("--cache", default=".cache/global_map.json")
-    ap.add_argument("--sleep", type=float, default=0.1)
-    ap.add_argument("--model", default="gpt-4o")
-    # ▼ 互換性のため（挙動は変えず無視）
-    ap.add_argument("--use-wikidata", action="store_true")
-    ap.add_argument("--use-official", action="store_true")
-    args = ap.parse_args()
+    args = parse_args()
+    if not os.path.exists(args.input):
+        raise FileNotFoundError(args.input)
 
-    rows = read_csv(args.input)
-    cache = load_cache(args.cache)
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    df = pd.read_csv(args.input)
+    # 出力列の存在を担保
+    if args.brand_ja_col not in df.columns:
+        df[args.brand_ja_col] = ""
+    if args.model_ja_col not in df.columns:
+        df[args.model_ja_col] = ""
+    if "model_official_en" not in df.columns:
+        df["model_official_en"] = ""
+    if "source_model" not in df.columns:
+        df["source_model"] = ""
 
-    all_brands = sorted(set(r[args.brand_col] for r in rows if r.get(args.brand_col)))
-    all_models = sorted(set(r[args.model_col] for r in rows if r.get(args.model_col)))
+    # --- ブランドを先に一括処理（ユニーク） ---
+    brand_map: Dict[str, str] = {}
+    brands = pd.Series(df[args.brand_col].fillna("")).unique().tolist()
+    for b in tqdm(brands, desc="brand"):
+        b_raw = str(b or "")
+        cur = ""  # 現列は無視してCSE優先でもOKだが、残っていれば使う
+        fixed = official_brand_name_if_needed(b_raw, cur)
+        if not _is_clean_ascii_name(fixed):
+            fixed = _shrink_brand(fixed or b_raw)
+        brand_map[b_raw] = fixed
 
-    print(f"Translating: {args.input} -> {args.output}")
+    # --- 行ごとにモデルを処理 ---
+    out_rows = []
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="model"):
+        row_out = row.to_dict()
+        brand_raw = str(row.get(args.brand_col, "") or "")
+        model_raw = str(row.get(args.model_col, "") or "")
 
-    # ブランド側：既存のLLM翻訳ロジック
-    for key in tqdm(all_brands, desc="brand"):
-        if key in cache:
-            continue
-        cache[key] = translate_with_llm(
-            client, args.model,
-            key,
-            "以下の中国語の自動車メーカー名をグローバル名または日本語表記に翻訳してください。"
-        )
-        time.sleep(args.sleep)
-        save_cache(args.cache, cache)
+        # ブランド確定
+        brand_en = brand_map.get(brand_raw, "")
+        if not _is_clean_ascii_name(brand_en):
+            brand_en = official_brand_name_if_needed(brand_raw, brand_en)
+            if not _is_clean_ascii_name(brand_en):
+                brand_en = _shrink_brand(brand_en or brand_raw)
 
-    # モデル側：まず公式サイトで英字名を試し、ダメならLLMへ
-    for key in tqdm(all_models, desc="model"):
-        if key in cache:
-            continue
+        row_out[args.brand_ja_col] = brand_en
 
-        # ★ ブランド名も渡す（ヒット率/正確性が大幅に上がる）
-        brand_zh_for_this_model = None
-        # rowsから同モデルのブランドを1件拾う（代表値）
-        for r in rows:
-            if r.get(args.model_col) == key:
-                brand_zh_for_this_model = r.get(args.brand_col, "")
-                break
+        # 既存の model_ja をゆるく整形（無ければ原語）
+        model_now = str(row.get(args.model_ja_col, "") or model_raw)
+        model_now = _normalize_model_loose(model_now)
 
-        official_name = find_official_english(brand_zh_for_this_model or "", key)
-        if official_name:
-            cache[key] = official_name
-            save_cache(args.cache, cache)
-            continue
+        # 公式CSE で補強
+        model_official = official_model_name_if_needed(brand_en, model_raw, model_now)
 
-        # 公式で決まらなければ LLM
-        cache[key] = translate_with_llm(
-            client, args.model,
-            key,
-            "以下の中国語の自動車モデル名をグローバル名または日本語表記に翻訳してください。\
-             例：秦PLUS→Qin PLUS, 海豚→Dolphin, 凯美瑞→Camry。なければ簡体字を日本語漢字にしてください。"
-        )
-        time.sleep(args.sleep)
-        save_cache(args.cache, cache)
+        # 公式の方が自然なら採用
+        if _is_clean_ascii_name(model_official) and len(model_official) <= max(12, len(model_now) + 6):
+            final_model = model_official
+            source = "official"
+        else:
+            final_model = model_now
+            source = "llm" if _is_clean_ascii_name(model_now) else "raw"
 
-    # 書き出し
-    out = []
-    for r in rows:
-        brand = r.get(args.brand_col, "")
-        model = r.get(args.model_col, "")
+        row_out[args.model_ja_col] = final_model
+        row_out["model_official_en"] = final_model if source == "official" else ""
+        row_out["source_model"] = source
 
-        bj = cache.get(brand, "")
-        mj = cache.get(model, "")
+        out_rows.append(row_out)
 
-        # ★ LLM/公式のどちらでも同じ最終正規化を適用
-        if mj:
-            mj = _normalize_known_patterns(brand, mj)
+        # レート制御（CSEクォータ対策）
+        if args.sleep and args.sleep > 0:
+            time.sleep(args.sleep)
 
-        # 見た目だけ（ブランド名が長文になったとき先頭トークンで切る）
-        if bj:
-            bj = _shrink_brand(bj)
-
-        r[args.brand_ja_col] = bj
-        r[args.model_ja_col] = mj
-        out.append(r)
-
-    write_csv(args.output, out, fieldnames=list(out[0].keys()))
+    out_df = pd.DataFrame(out_rows)
+    out_df.to_csv(args.output, index=False, encoding="utf-8")
     print(f"Wrote: {args.output}")
-
 
 if __name__ == "__main__":
     main()
