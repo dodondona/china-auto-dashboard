@@ -5,7 +5,8 @@ translate_brand_model_llm.py
 ブランド・車種の中国語表記をWikipedia/Wikidata/公式サイトCSEから自動翻訳して日本語・英字名に変換。
 """
 
-import os, re, csv, json, time, argparse, pandas as pd
+import os, re, csv, json, time, argparse
+import pandas as pd
 from tqdm import tqdm
 
 # === Wikipedia / Wikidata utilities =========================================
@@ -30,7 +31,10 @@ def lookup_wikipedia(term: str):
 def lookup_wikidata(term: str):
     import requests
     try:
-        url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&language=zh&format=json&search={term}"
+        url = (
+            "https://www.wikidata.org/w/api.php"
+            "?action=wbsearchentities&language=zh&format=json&search=" + term
+        )
         res = requests.get(url, timeout=10)
         data = res.json()
         if not data.get('search'):
@@ -77,13 +81,14 @@ def main():
     os.makedirs(os.path.dirname(args.cache), exist_ok=True)
 
     if os.path.exists(args.cache):
-        cache = json.load(open(args.cache, "r", encoding="utf-8"))
+        with open(args.cache, "r", encoding="utf-8") as f:
+            cache = json.load(f)
     else:
         cache = {}
 
     df = pd.read_csv(args.input)
-    brands = df[args.brand-col].dropna().unique().tolist()
-    models = df[args.model-col].dropna().unique().tolist()
+    brands = df[args.brand_col].dropna().unique().tolist()
+    models = df[args.model_col].dropna().unique().tolist()
 
     brand_map, model_map = {}, {}
 
@@ -136,7 +141,8 @@ def main():
     df[args.model_ja_col] = df.apply(_model_name, axis=1)
 
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    json.dump(cache, open(args.cache, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    with open(args.cache, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
 
     print(f"✅ Done. Saved to {args.output}")
 
