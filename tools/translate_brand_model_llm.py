@@ -1,142 +1,117 @@
+# tools/translate_brand_model_wikipedia.py
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
 """
-LLMで中国名→グローバル英名に正規化（辞書最小）
-- ブランド/モデルをユニーク抽出→LLMにバッチ問い合わせ
-- 厳格JSONで受け取り、CJKが残った項目だけ再問い合わせ
-- 既にLatinは素通し、なければピンイン(Title Case)へフォールバック
+translate_brand_model_wikipedia.py
+- 中国語(zh)の ブランド/モデル 名称から、Wikipedia(zh)だけを使って
+  ja/en の言語間リンクタイトルを取得し、表示用の名称に変換します。
+- LLMは使いません。Wikidataも使いません。Wikipedia APIのみ。
+- 既存パイプラインと同じCLIに合わせ、brand_ja / model_ja 列を出力します。
+  （命名は既存に合わせていますが、実際は「jaがあればja、なければen、無ければ原文zh」を入れます。）
+
+使い方:
+  python tools/translate_brand_model_wikipedia.py \
+    --input data/autohome_raw_2025-09_with_brand.csv \
+    --output data/autohome_raw_2025-09_with_brand_ja.csv \
+    --brand-col brand --model-col model \
+    --brand-ja-col brand_ja --model-ja-col model_ja
+
+依存:
+  - requests, pandas（既にrequirements.txtにあり）
 """
 
-import argparse, json, os, time, sys
-from typing import Dict, List
+import os
+import sys
+import time
+import json
+import argparse
+import requests
 import pandas as pd
-import regex as re2  # pip install regex
+from typing import Dict, Optional
 
-LATIN_RE = re2.compile(r"^[\p{Latin}\p{Number}\s\-\+\/\.\(\)]+$")
-HAS_CJK  = re2.compile(r"\p{Han}")
+WIKI_API = "https://zh.wikipedia.org/w/api.php"
 
-DEF_MODEL = "gpt-4o"
-BATCH = 50
-RETRY = 3
-SLEEP = 1.0
+def is_latin(s: str) -> bool:
+    try:
+        s.encode('ascii')
+        return True
+    except Exception:
+        return False
 
-# --- 確実に変換する辞書（LLMの前に適用） ---
-BRAND_DICT = {
-    "吉利汽车": "Geely",
-    "吉利银河": "Geely",
-    "吉利": "Geely",
-    "五菱汽车": "Wuling",
-    "五菱": "Wuling",
-    "小米汽车": "Xiaomi",
-    "小米": "Xiaomi",
-    "零跑汽车": "Leapmotor",
-    "零跑": "Leapmotor",
-    "奇瑞": "Chery",
-    "哈弗": "Haval",
-    "长安启源": "Changan",
-    "长安": "Changan",
-    "红旗": "Hongqi",
-    "小鹏": "XPeng",
-    "理想": "Li Auto",
-    "蔚来": "NIO",
-    "比亚迪": "BYD",
-    "特斯拉": "Tesla",
-    "AITO": "AITO",
-}
+def wiki_query(params: Dict, timeout=15) -> Dict:
+    p = {"format": "json"}
+    p.update(params)
+    r = requests.get(WIKI_API, params=p, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
-MODEL_DICT = {
-    "轩逸": "Sylphy",
-    "朗逸": "Lavida",
-    "速腾": "Sagitar",
-    "帕萨特": "Passat",
-    "途观": "Tiguan",
-    "迈腾": "Magotan",
-    "探岳": "Tharu",
-    "途岳": "T-Cross",
-    "卡罗拉": "Corolla",
-    "凯美瑞": "Camry",
-    "雅阁": "Accord",
-    "锋兰达": "Frontlander",
-    "RAV4荣放": "RAV4",
-    "卡罗拉锐放": "Corolla Cross",
-}
+def get_langlinks_by_title(zh_title: str) -> Dict[str, Optional[str]]:
+    data = wiki_query({
+        "action": "query",
+        "prop": "langlinks",
+        "redirects": 1,
+        "titles": zh_title,
+        "lllimit": "500",
+    })
+    pages = data.get("query", {}).get("pages", {})
+    en = ja = None
+    for _, page in pages.items():
+        if "missing" in page:
+            continue
+        for ll in page.get("langlinks", []) or []:
+            if ll.get("lang") == "en":
+                en = ll.get("*")
+            elif ll.get("lang") == "ja":
+                ja = ll.get("*")
+    return {"en": en, "ja": ja}
 
-# --- プロンプト（短く・強い指示） ---
-PROMPT_BRAND = """
-あなたは自動車ブランド名の正規化を行う変換器です。入力は中国語や混在表記のブランド名です。
-以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
+def search_zh_title(kw: str) -> Optional[str]:
+    data = wiki_query({
+        "action": "query",
+        "list": "search",
+        "srsearch": kw,
+        "srwhat": "nearmatch",
+        "srlimit": 1,
+    })
+    hits = data.get("query", {}).get("search", [])
+    if hits:
+        return hits[0].get("title")
+    data2 = wiki_query({
+        "action": "query",
+        "list": "search",
+        "srsearch": kw,
+        "srlimit": 1,
+    })
+    hits2 = data2.get("query", {}).get("search", [])
+    if hits2:
+        return hits2[0].get("title")
+    return None
 
-【出力仕様】
-- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
-- 入力に含まれる全てのキーを必ず含めること。
-- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
+def resolve_name_via_wikipedia(zh_name: str, sleep_sec: float = 0.1) -> Dict[str, str]:
+    name = str(zh_name or "").strip()
+    if not name:
+        return {"ja": "", "en": ""}
 
-【共通ルール】
-1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
-2) 記号・英数字・スペースは温存。
-3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
+    if is_latin(name):
+        return {"ja": name, "en": name}
 
-【ブランドの優先順序（必ず上から順に判定）】
-A) **グローバルで通用するラテン表記が存在する場合は必ずそれを採用**（例: "BYD", "NIO", "XPeng", "Zeekr", "Leapmotor", "Chery", "Geely", "Haval", "Xiaomi", "AITO"）。
+    langlinks = get_langlinks_by_title(name)
+    if not langlinks.get("en") and not langlinks.get("ja"):
+        t = search_zh_title(name)
+        if t:
+            time.sleep(sleep_sec)
+            langlinks = get_langlinks_by_title(t)
 
-B) Aに該当せず、**日本で広く通用する日本語ブランド名**が明確な場合は日本語表記（例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ"、"フォルクスワーゲン", "メルセデス・ベンツ", "BMW", "アウディ", "ビュイック"）。
+    en = langlinks.get("en")
+    ja = langlinks.get("ja")
+    if ja:
+        return {"ja": ja, "en": en or ja}
+    if en:
+        return {"ja": en, "en": en}
+    return {"ja": name, "en": name}
 
-C) それ以外で**国際的ラテン表記が不明**な場合のみ、**簡体字→日本語の字形（新字体）**に置換した漢字表記にする。
-
-理解したら、与えられた `items` についてJSONのみを返す。
-"""
-
-PROMPT_MODEL = """
-あなたは自動車のモデル（車名/シリーズ名）の正規化を行う変換器です。入力は中国語や混在表記のモデル名です。
-以下の規則に厳密に従い、日本語での最終表示用に統一してください。出力は JSON のみ。
-
-【出力仕様】
-- 返答は厳密に: {"map": {"<入力>": "<出力>", ...}}
-- 入力に含まれる全てのキーを必ず含めること。
-- JSON以外の文字（説明・注釈・コードブロック・末尾カンマ）は一切禁止。
-
-【共通ルール】
-1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
-2) 記号・英数字・スペースは温存。
-3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
-
-【モデルの優先順序（必ず上から順に判定）】
-E) **グローバルで通用するラテン表記のモデル名**がある場合は、そのラテン表記をそのまま採用（例: "Model 3", "Han", "Seal", "SU7", "Song PLUS", "CR-V", "Sylphy", "Lavida", "Tiguan", "Passat"）。
-
-F) **日本市場で長年通用する定番モデル名**はカタカナ表記を優先（例: アコード, カムリ, カローラ, RAV4, パサート）。※確信がなければ E を優先。
-
-G) 中国語の固有シリーズ名で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**へ置換。
-
-H) グレード/派生（"Pro", "MAX", "Plus", "DM-i", "新能源" 等）は維持。
-
-理解したら、与えられた `items` についてJSONのみを返す。
-"""
-
-def is_latin(x: str) -> bool:
-    return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
-
-def strip_brand_prefix(model: str, brand: str) -> str:
-    """モデル名からブランド片を削除（複数パターン対応）"""
-    model = str(model).strip()
-    brand = str(brand).strip()
-    
-    # 中国語ブランド名も考慮
-    brand_variants = [brand]
-    if brand in BRAND_DICT:
-        # 辞書のキーを全て試す
-        brand_variants.extend([k for k in BRAND_DICT.keys() if BRAND_DICT[k] == BRAND_DICT.get(brand, brand)])
-    
-    for b in brand_variants:
-        if model.startswith(b):
-            cleaned = model[len(b):].strip()
-            if cleaned:
-                return cleaned
-    
-    return model
-
-def load_cache(path: str) -> Dict[str, Dict[str, str]]:
-    if not path or not os.path.isfile(path):
+def load_cache(path: str) -> Dict:
+    if not path or not os.path.exists(path):
         return {"brand": {}, "model": {}}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -144,126 +119,52 @@ def load_cache(path: str) -> Dict[str, Dict[str, str]]:
     except Exception:
         return {"brand": {}, "model": {}}
 
-def save_cache(path: str, data: Dict[str, Dict[str, str]]):
-    if not path:
-        return
+def save_cache(path: str, data: Dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def call_llm(items: List[str], prompt: str, model: str) -> Dict[str, str]:
-    from openai import OpenAI
-    client = OpenAI()
-    user = prompt + "\nInput list (JSON array):\n" + json.dumps(items, ensure_ascii=False)
-    for attempt in range(RETRY):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Reply with strict JSON only. No prose."},
-                    {"role": "user",   "content": user},
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
-            txt = resp.choices[0].message.content.strip()
-            obj = json.loads(txt)
-            mp  = obj.get("map", {})
-            return {x: mp.get(x, x) for x in items}
-        except Exception:
-            if attempt == RETRY - 1:
-                raise
-            time.sleep(SLEEP * (attempt + 1))
-    return {x: x for x in items}
-
-def chunked(lst: List[str], n: int):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-def requery_nonlatin(map_in: Dict[str, str], prompt: str, model: str) -> Dict[str, str]:
-    bad = [k for k, v in map_in.items() if HAS_CJK.search(str(v or ""))]
-    if not bad:
-        return map_in
-    fix = call_llm(bad, prompt, model)
-    map_in.update(fix)
-    return map_in
-
-def apply_dict_first(items: List[str], dictionary: Dict[str, str]) -> Dict[str, str]:
-    """辞書を優先的に適用"""
-    result = {}
-    for item in items:
-        result[item] = dictionary.get(item, item)
-    return result
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
+    ap.add_argument("--input", required=True, help="input CSV (must contain brand/model)")
+    ap.add_argument("--output", required=True, help="output CSV")
     ap.add_argument("--brand-col", default="brand")
     ap.add_argument("--model-col", default="model")
     ap.add_argument("--brand-ja-col", default="brand_ja")
     ap.add_argument("--model-ja-col", default="model_ja")
-    ap.add_argument("--model", default=DEF_MODEL)
-    ap.add_argument("--cache", default=".cache/global_map.json")
+    ap.add_argument("--cache", default=".cache/wikipedia_map.json")
+    ap.add_argument("--sleep", type=float, default=0.1, help="per-request sleep seconds")
     args = ap.parse_args()
-
-    if not os.getenv("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY is not set.", file=sys.stderr)
-        sys.exit(1)
 
     df = pd.read_csv(args.input)
     if args.brand_col not in df.columns or args.model_col not in df.columns:
         raise RuntimeError(f"Input must contain '{args.brand_col}' and '{args.model_col}'. columns={list(df.columns)}")
 
     cache = load_cache(args.cache)
+    brand_map: Dict[str, str] = cache.get("brand", {})
+    model_map: Dict[str, str] = cache.get("model", {})
 
-    # ----- brand -----
-    brands = sorted(set(str(x) for x in df[args.brand_col].dropna()))
-    brand_map = dict(cache["brand"])
-    
-    # 辞書を優先的に適用
-    dict_mapped = apply_dict_first(brands, BRAND_DICT)
-    brand_map.update(dict_mapped)
-    
-    # 辞書にないものだけLLMに問い合わせ
-    need = [b for b in brands if b not in cache["brand"] and b not in BRAND_DICT]
-    for batch in chunked(need, BATCH):
-        part = call_llm(batch, PROMPT_BRAND, args.model)
-        brand_map.update(part)
-        brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
-        cache["brand"] = brand_map; save_cache(args.cache, cache)
+    uniq_brands = sorted({str(x) for x in df[args.brand_col].dropna().unique()})
+    uniq_models = sorted({str(x) for x in df[args.model_col].dropna().unique()})
 
-    # ----- model (前処理でブランド片を削除) -----
-    df['model_cleaned'] = df.apply(
-        lambda row: strip_brand_prefix(row[args.model_col], row[args.brand_col]), 
-        axis=1
-    )
-    
-    models = sorted(set(str(x) for x in df['model_cleaned'].dropna()))
-    model_map = dict(cache["model"])
-    
-    # 辞書を優先的に適用
-    dict_mapped = apply_dict_first(models, MODEL_DICT)
-    model_map.update(dict_mapped)
-    
-    # 辞書にないものだけLLMに問い合わせ
-    need = [m for m in models if m not in cache["model"] and m not in MODEL_DICT]
-    for batch in chunked(need, BATCH):
-        part = call_llm(batch, PROMPT_MODEL, args.model)
-        model_map.update(part)
-        model_map = requery_nonlatin(model_map, PROMPT_MODEL, args.model)
-        cache["model"] = model_map; save_cache(args.cache, cache)
+    for b in uniq_brands:
+        if b not in brand_map:
+            res = resolve_name_via_wikipedia(b, sleep_sec=args.sleep)
+            brand_map[b] = res["ja"]
+    cache["brand"] = brand_map; save_cache(args.cache, cache)
 
-    # ----- apply -----
+    for m in uniq_models:
+        if m not in model_map:
+            res = resolve_name_via_wikipedia(m, sleep_sec=args.sleep)
+            model_map[m] = res["ja"]
+    cache["model"] = model_map; save_cache(args.cache, cache)
+
     df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
-    df[args.model_ja_col] = df['model_cleaned'].map(lambda x: model_map.get(str(x), str(x)))
-
-    # model_cleaned列は出力に含めない
-    df = df.drop(columns=['model_cleaned'])
+    df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"[OK] LLM-normalized: {args.input} -> {args.output} (rows={len(df)})")
+    print(f"[OK] Wikipedia-normalized: {args.input} -> {args.output} (rows={len(df)})")
 
 if __name__ == "__main__":
     main()
