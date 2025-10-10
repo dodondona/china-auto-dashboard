@@ -1,7 +1,7 @@
 # tools/official_lookup.py
 # -*- coding: utf-8 -*-
 """
-公式サイト(メーカー直営ドメイン)を優先してモデル英字名を取得する最小実装。
+公式サイト(メーカー直営ドメイン)を優先してモデル英字名を取得する実装。
 - Google Programmable Search Engine (Custom Search JSON API) を利用
 - ページから JSON-LD / OpenGraph / H1 / <title> を順に抽出し、スコアリングして最良候補を採用
 - 依存: requests, beautifulsoup4, lxml, re
@@ -56,6 +56,9 @@ BAD_HINTS = [
     "歌词", "楽曲", "歌曲", "专辑", "アルバム", "映画", "ドラマ", "预告", "OST",
     "disambiguation", "曖昧さ回避",
 ]
+
+# モデル名として単独で拾ってはいけないトークン
+BAD_MODEL_TOKENS = {"ev", "phev", "dm", "dm-i", "new", "energy", "new energy", "plus"}
 
 UA = "china-auto-dashboard/1.0 (+https://github.com/dodondona/china-auto-dashboard)"
 
@@ -128,7 +131,6 @@ def _best_name_from_html(html: str) -> dict:
         def _collect(d):
             if not isinstance(d, dict):
                 return
-            t = d.get("@type") or d.get("type") or ""
             # name / headline
             nm = d.get("name") or d.get("headline")
             if nm:
@@ -182,10 +184,10 @@ def _extract_model_like(name: str, model_zh: str) -> str | None:
         return None
     s = name.strip()
 
-    # BYD 海洋系列の正規化（0埋めや表記ブレ）
-    s = re.sub(r"\bsealion\s*0*6\b", "Sealion 06", s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*6\b",   "Seal 06",    s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*5\b",   "Seal 05",    s, flags=re.I)
+    # BYD 海洋系列の正規化（0埋めや表記ブレ・接尾辞）
+    s = re.sub(r"\b(sealion)\s*0*6\s*(ev|dm-i|dm)?\b", "Sealion 06", s, flags=re.I)
+    s = re.sub(r"\b(seal)\s*0*6\s*(ev|dm-i|dm)?\b",   "Seal 06",    s, flags=re.I)
+    s = re.sub(r"\b(seal)\s*0*5\s*(ev|dm-i|dm)?\b",   "Seal 05",    s, flags=re.I)
 
     # Tesla優先
     m = re.search(r"\bModel\s+[3YSX]\b", s, flags=re.I)
@@ -195,7 +197,17 @@ def _extract_model_like(name: str, model_zh: str) -> str | None:
     # 一般英字トークン（最短・最左）
     ms = list(MODEL_TOKEN.finditer(s))
     if ms:
-        return ms[0].group(0).strip()
+        cand = ms[0].group(0).strip()
+        # 末尾の "New Energy" を落とす
+        cand = re.sub(r"\s+(New\s+Energy)$", "", cand, flags=re.I).strip()
+        # 単独の誤トークンは捨てる
+        if cand.lower() in BAD_MODEL_TOKENS:
+            return None
+        return cand
+
+    # 直訳“Star〜”が混入していれば捨てる（英字にできない＝フォールバックへ）
+    if re.search(r"\bStar\b", s, flags=re.I):
+        return None
 
     return None
 
@@ -259,9 +271,9 @@ def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
         s = re.sub(r"\bModel\s*([3ysx])\b", lambda m: f"Model {m.group(1).upper()}", s, flags=re.I)
 
     # BYD 海洋系列
-    s = re.sub(r"\bsealion\s*0*6\b", "Sealion 06", s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*6\b",   "Seal 06",    s, flags=re.I)
-    s = re.sub(r"\bseal\s*0*5\b",   "Seal 05",    s, flags=re.I)
+    s = re.sub(r"\bsealion\s*0*6(\s*(ev|dm-i|dm))?\b", "Sealion 06", s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*6(\s*(ev|dm-i|dm))?\b",   "Seal 06",    s, flags=re.I)
+    s = re.sub(r"\bseal\s*0*5(\s*(ev|dm-i|dm))?\b",   "Seal 05",    s, flags=re.I)
 
     # VW China 固有名
     s = re.sub(r"\bsagitar\b", "Sagitar", s, flags=re.I)
@@ -281,6 +293,16 @@ def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
     s = re.sub(r"\btiggo\s*8\b", "Tiggo 8", s, flags=re.I)
     s = re.sub(r"\barrizo\s*8\b","Arrizo 8", s, flags=re.I)  # 誤綴り救済
     s = re.sub(r"\beado\b",      "Eado",     s, flags=re.I)
+
+    # Wuling Binguo 表記揺れ
+    s = re.sub(r"\bbingo\b", "Binguo", s, flags=re.I)
+
+    # 末尾の "New Energy" を落とす（残っていれば）
+    s = re.sub(r"\s+(New\s+Energy)$", "", s, flags=re.I).strip()
+
+    # 単独の誤トークンは最終ガード
+    if s.lower() in BAD_MODEL_TOKENS:
+        return ""
 
     return s.strip()
 
@@ -358,13 +380,15 @@ def find_official_english(brand_zh: str, model_zh: str, sleep_sec: float = 0.25)
             continue
 
         data = _best_name_from_html(html)
-        picked = _pick_name(data, model_zh)   # ★ 英字モデル名だけを抽出
+        picked = _pick_name(data, model_zh)   # 英字モデル名だけを抽出
         if not picked:
             continue
 
         picked = _normalize_known_patterns(brand_zh, picked)
-        sc = _score_candidate(link, data, brand_zh, model_zh, picked)
+        if not picked:
+            continue
 
+        sc = _score_candidate(link, data, brand_zh, model_zh, picked)
         if sc > best_score:
             best_score = sc
             best = picked
