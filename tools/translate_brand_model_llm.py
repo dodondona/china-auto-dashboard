@@ -33,14 +33,23 @@ PROMPT_BRAND = """
 
 【共通ルール】
 1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
-2) 記号・英数字・スペースは温存（例: "AITO", "BAIC", "Li Auto"）。
+2) 記号・英数字・スペースは温存。
 3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
 
-【ブランドの優先順序】
-A) **グローバルで通用するラテン表記が明確**なら、その綴りをそのまま採用（例: "BYD", "NIO", "Li Auto", "XPeng", "Zeekr", "Xiaomi", "Volkswagen", "Audi", "BMW"）。
-B) Aに該当せず、**日本で広く通用する日本語ブランド名**が明確な場合は日本語表記（例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ"）。※確信がなければ適用しない。
-C) それ以外（中国語のみ等）で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**に自然置換した漢字表記にする（例: "东风日产"→"東風日産", "红旗"→"紅旗", "长安"→"長安"）。
-D) ジョイント・ベンチャー名（例: "东风日产", "一汽丰田"）は、A/B/Cの方針で**単一の最上位ブランド表示**に統一してよいが、確信なき場合はCを採用。
+【ブランドの優先順序（必ず上から順に判定）】
+A) **グローバルで通用するラテン表記が存在する場合は必ずそれを採用**（例: "BYD", "NIO", "XPeng", "Zeekr", "Leapmotor", "Chery", "Geely", "Haval", "Xiaomi", "AITO"）。
+   - 「吉利汽车」「吉利银河」→「Geely」
+   - 「小米汽车」→「Xiaomi」
+   - 「零跑汽车」→「Leapmotor」
+   - 「奇瑞」→「Chery」
+   - 「哈弗」→「Haval」
+   - 「长安」「长安启源」→「Changan」
+   - 「五菱汽车」→「Wuling」
+   - 「红旗」→「Hongqi」
+
+B) Aに該当せず、**日本で広く通用する日本語ブランド名**が明確な場合は日本語表記（例: "トヨタ", "ホンダ", "日産", "三菱", "マツダ", "スバル", "スズキ", "ダイハツ"、"フォルクスワーゲン", "メルセデス・ベンツ", "BMW", "アウディ", "ビュイック"）。
+
+C) それ以外で**国際的ラテン表記が不明**な場合のみ、**簡体字→日本語の字形（新字体）**に置換した漢字表記にする。
 
 理解したら、与えられた `items` についてJSONのみを返す。
 """
@@ -56,21 +65,45 @@ PROMPT_MODEL = """
 
 【共通ルール】
 1) でたらめ禁止。確信が持てない場合は**入力をそのまま返す**。
-2) 記号・英数字・スペースは温存（例: "Model 3", "AION S Plus", "001", "SU7", "e:HEV", "DM-i", "Pro", "MAX" などは変えない）。
+2) 記号・英数字・スペースは温存。
 3) 出力は**単一文字列**のみ。括弧/注釈を付けない。
 
-【モデルの優先順序】
-E) **グローバルで通用するラテン表記のモデル名**がある場合は、そのラテン表記をそのまま採用（例: "Model 3", "Han", "Seal", "001", "SU7", "Song PLUS", "AION S Plus"）。
-F) **日本市場で長年に通用する日本メーカーの定番モデル名**はカタカナ表記を優先（例: シルフィー/Sylphy, アコード/Accord, カムリ/Camry, カローラ/Corolla, シビック/Civic, フィット/Fit, プリウス/Prius, アルファード/Alphard, ヤリス/Yaris）。※確信がなければ E を優先しラテン表記のまま。
-G) 中国語の固有シリーズ名で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**へ自然置換した漢字表記にする（例: "轩逸"→"軒逸", "星愿"→"星願", "海狮"→"海獅"）。
-H) グレード/派生（"Pro", "MAX", "Plus", "DM-i", "EV", "PHEV" 等）は入力のまま維持。
-I) 先頭に中国語ブランド片が付いている場合（例: "本田CR-V"）はブランド片を除去し、モデル名のみを残す（"CR-V"）。
+【モデルの優先順序（必ず上から順に判定）】
+I) **先頭のブランド片を必ず削除**（最優先）:
+   - 「小米SU7」→「SU7」
+   - 「本田CR-V」→「CR-V」
+   - 「长安Lumin」→「Lumin」
+   - 「长安CS75 PLUS」→「CS75 PLUS」
+   - 「零跑C10」→「C10」
+   - 「小鹏MONA M03」→「MONA M03」
+   - 「哈弗大狗」→「大狗」
+   - 「五菱缤果」→「缤果」
+
+E) ブランド片削除後、**グローバルで通用するラテン表記のモデル名**がある場合は、そのまま採用（例: "Model 3", "Han", "Seal", "SU7", "Song PLUS", "CR-V"）。
+
+F) **日本市場で長年通用する定番モデル名**はカタカナ表記を優先（例: アコード, カムリ, カローラ, RAV4, パサート）。※確信がなければ E を優先。
+
+G) 中国語の固有シリーズ名で**国際的ラテン表記が不明**な場合は、**簡体字→日本語の字形（新字体）**へ置換。
+
+H) グレード/派生（"Pro", "MAX", "Plus", "DM-i", "新能源" 等）は維持。
 
 理解したら、与えられた `items` についてJSONのみを返す。
 """
 
 def is_latin(x: str) -> bool:
     return isinstance(x, str) and LATIN_RE.match((x or "").strip()) is not None
+
+def strip_brand_prefix(model: str, brand: str) -> str:
+    """モデル名からブランド片を削除"""
+    model = str(model).strip()
+    brand = str(brand).strip()
+    
+    # ブランド名で始まる場合は削除
+    if model.startswith(brand):
+        cleaned = model[len(brand):].strip()
+        return cleaned if cleaned else model
+    
+    return model
 
 def load_cache(path: str) -> Dict[str, Dict[str, str]]:
     if not path or not os.path.isfile(path):
@@ -157,8 +190,13 @@ def main():
         brand_map = requery_nonlatin(brand_map, PROMPT_BRAND, args.model)
         cache["brand"] = brand_map; save_cache(args.cache, cache)
 
-    # ----- model -----
-    models = sorted(set(str(x) for x in df[args.model_col].dropna()))
+    # ----- model (前処理でブランド片を削除) -----
+    df['model_cleaned'] = df.apply(
+        lambda row: strip_brand_prefix(row[args.model_col], row[args.brand_col]), 
+        axis=1
+    )
+    
+    models = sorted(set(str(x) for x in df['model_cleaned'].dropna()))
     need = [m for m in models if m not in cache["model"]]
     model_map = dict(cache["model"])
     for batch in chunked(need, BATCH):
@@ -169,7 +207,10 @@ def main():
 
     # ----- apply -----
     df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
-    df[args.model_ja_col] = df[args.model_col].map(lambda x: model_map.get(str(x), str(x)))
+    df[args.model_ja_col] = df['model_cleaned'].map(lambda x: model_map.get(str(x), str(x)))
+
+    # model_cleaned列は出力に含めない
+    df = df.drop(columns=['model_cleaned'])
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
