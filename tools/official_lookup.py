@@ -22,7 +22,6 @@ from bs4 import BeautifulSoup
 
 # ------------------------------------------------------------
 # 公式ドメイン（CSE側でもホワイトリスト化している前提。ここでも軽く確認）
-# 必要に応じて増やせますが、最小限に留めています
 # ------------------------------------------------------------
 OFFICIAL_DOMAINS = {
     # BYD
@@ -131,7 +130,6 @@ def _best_name_from_html(html: str) -> dict:
         def _collect(d):
             if not isinstance(d, dict):
                 return
-            # name / headline
             nm = d.get("name") or d.get("headline")
             if nm:
                 cname = _cleanup_name(nm)
@@ -205,7 +203,7 @@ def _extract_model_like(name: str, model_zh: str) -> str | None:
             return None
         return cand
 
-    # 直訳“Star〜”が混入していれば捨てる（英字にできない＝フォールバックへ）
+    # 直訳“Star〜”混入は捨てる（Xingyuan/Xingyueへ誘導）
     if re.search(r"\bStar\b", s, flags=re.I):
         return None
 
@@ -264,7 +262,7 @@ def _score_candidate(url: str, data: dict, brand_zh: str, model_zh: str, picked:
 
 def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
     """ブランド別・最小の表記ゆれ補正（辞書化はしない方針で軽く）。"""
-    s = model_en.strip()
+    s = (model_en or "").strip()
 
     # Tesla: "Model y" -> "Model Y"
     if brand_zh in {"特斯拉", "Tesla", "テスラ"}:
@@ -297,8 +295,9 @@ def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
     # Wuling Binguo 表記揺れ
     s = re.sub(r"\bbingo\b", "Binguo", s, flags=re.I)
 
-    # 末尾の "New Energy" を落とす（残っていれば）
-    s = re.sub(r"\s+(New\s+Energy)$", "", s, flags=re.I).strip()
+    # "New Energy" を削除（末尾/文中どちらも）
+    s = re.sub(r"\bNew\s+Energy\b", "", s, flags=re.I).strip()
+    s = re.sub(r"\s{2,}", " ", s).strip()
 
     # 単独の誤トークンは最終ガード
     if s.lower() in BAD_MODEL_TOKENS:
@@ -316,6 +315,7 @@ def _build_query(brand_zh: str, model_zh: str) -> str:
     if model_zh:
         terms.append(f"\"{model_zh}\"")
     hint_map = {
+        # BYD 海洋/VW/Toyota/Chery/Changan などのヒント
         "海狮": "Sealion",
         "海豹": "Seal",
         "海豚": "Dolphin",
@@ -334,6 +334,9 @@ def _build_query(brand_zh: str, model_zh: str) -> str:
         "星越": "Xingyue",
         "博越": "Boyue",
         "元PLUS": "Yuan PLUS",
+        # ★ 追加（直訳を避けるピンイン誘導）
+        "星愿": "Xingyuan",
+        "缤果": "Binguo",
     }
     for zh, en in hint_map.items():
         if zh in str(model_zh):
