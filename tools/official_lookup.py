@@ -294,6 +294,13 @@ def _normalize_known_patterns(brand_zh: str, model_en: str) -> str:
 
     # Wuling Binguo 表記揺れ
     s = re.sub(r"\bbingo\b", "Binguo", s, flags=re.I)
+    s = re.sub(r"\bBin\s*Yue\b", "Binyue", s, flags=re.I)  # 分かち書き補正
+
+    # 直訳誤爆の補正
+    s = re.sub(r"\bStar\s*Wish\b", "Xingyuan", s, flags=re.I)    # 星愿
+    s = re.sub(r"Star越\s*L", "Xingyue L", s, flags=re.I)        # 星越L
+    s = re.sub(r"\bHiace\s*0*6\b", "Sealion 06", s, flags=re.I)  # 海狮06
+    s = re.sub(r"\bAito\s*M8\b", "Wenjie M8", s, flags=re.I)     # 问界M8
 
     # "New Energy" を削除（末尾/文中どちらも）
     s = re.sub(r"\bNew\s+Energy\b", "", s, flags=re.I).strip()
@@ -334,7 +341,7 @@ def _build_query(brand_zh: str, model_zh: str) -> str:
         "星越": "Xingyue",
         "博越": "Boyue",
         "元PLUS": "Yuan PLUS",
-        # ★ 追加（直訳を避けるピンイン誘導）
+        # 直訳回避のピンイン誘導
         "星愿": "Xingyuan",
         "缤果": "Binguo",
     }
