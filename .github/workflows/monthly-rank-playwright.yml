@@ -1,176 +1,89 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-translate_brand_model_llm.py
-- 中国語のブランド/モデル名を Wikipedia -> (任意で)Wikidata -> (任意で)公式サイトCSE の順で解決
-- 既存CSVに brand_ja / model_ja を付与して出力
-"""
+name: Monthly append series_url & enrich brand/series (rank/1 + LLM global translation)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 1 2 * *"  # 毎月2日 10:15 JST
 
-import os
-import json
-import time
-import argparse
-import pandas as pd
-from tqdm import tqdm
+permissions:
+  contents: write
 
-# ========================= Wikipedia / Wikidata ==============================
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-def lookup_wikipedia(term: str):
-    """zh Wikipediaから言語間リンク（ja優先、なければen）を取得"""
-    import wikipediaapi
-    # User-Agent を明示（WikimediaのUAポリシー対応）
-    wiki = wikipediaapi.Wikipedia(
-        language='zh',
-        user_agent='china-auto-dashboard/1.0 (https://github.com/dodondona/china-auto-dashboard; contact: github-actions)'
-    )
-    p = wiki.page(term)
-    if not p.exists():
-        return None
-    links = p.langlinks
-    if 'ja' in links:
-        return links['ja'].title
-    if 'en' in links:
-        return links['en'].title
-    return None
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-def lookup_wikidata(term: str):
-    """Wikidataで zh 検索→ja/enラベルを取得（ja優先）"""
-    import requests
-    try:
-        s = requests.get(
-            "https://www.wikidata.org/w/api.php",
-            params={
-                "action": "wbsearchentities",
-                "language": "zh",
-                "format": "json",
-                "search": term,
-                "type": "item",
-                "limit": 5,
-            },
-            timeout=10,
-        ).json()
-        if not s.get("search"):
-            return None
-        qid = s["search"][0]["id"]
-        ent = requests.get(
-            "https://www.wikidata.org/wiki/Special:EntityData/{}.json".format(qid),
-            timeout=10,
-        ).json()["entities"][qid]
-        labels = ent.get("labels", {})
-        return labels.get("ja", labels.get("en", {})).get("value")
-    except Exception:
-        return None
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt || true
+          python -m pip install pandas openai playwright beautifulsoup4 requests lxml regex wikipedia-api
+          python -m playwright install chromium
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
 
-def resolve_with_optional_wikidata(term: str, use_wd=True, sleep_sec=0.1):
-    """Wikipedia→Wikidataの順に解決（ja>en>元のzh）"""
-    if not term or str(term).strip() == "":
-        return {"ja": term}
-    ja = lookup_wikipedia(term)
-    if not ja and use_wd:
-        ja = lookup_wikidata(term)
-    time.sleep(sleep_sec)
-    return {"ja": ja or term}
+      - name: Append series_url from /rank/1
+        run: |
+          python tools/append_series_url_from_web.playwright_full.py \
+            --input "data/autohome_raw_$(date -u +%Y-%m).csv" || true
+          # ↑ ここはあなたの既存ロジックのままでOK。必要なら固定に戻してください。
 
-# =============================== Main =======================================
+      - name: Enrich brand/model from <title>
+        run: |
+          # あなたの既存入出力に合わせている前段の結果を更新
+          for f in data/autohome_raw_*_with_series.csv; do
+            out="${f%_with_series.csv}_with_brand.csv"
+            python tools/enrich_brand_from_title.py --input "$f" --output "$out"
+          done
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True, help="入力CSV")
-    ap.add_argument("--output", required=True, help="出力CSV")
-    ap.add_argument("--brand-col", default="brand")
-    ap.add_argument("--model-col", default="model")
-    ap.add_argument("--brand-ja-col", default="brand_ja")
-    ap.add_argument("--model-ja-col", default="model_ja")
-    ap.add_argument("--cache", default=".cache/global_map.json")
-    ap.add_argument("--sleep", type=float, default=0.1)
-    ap.add_argument("--use-wikidata", action="store_true", help="Wikidata補完を有効化")
-    ap.add_argument("--use-official", action="store_true",
-                    help="公式サイトCSE補完を有効化（環境変数 GOOGLE_API_KEY / GOOGLE_CSE_ID が必要）")
-    args = ap.parse_args()
+      - name: Translate brand/model to global names (Wikipedia + optional official)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          targets=()
+          for f in data/autohome_raw_*_with_brand.csv; do
+            out="${f%.csv}_ja.csv"
+            if [ ! -f "$out" ] || [ "$f" -nt "$out" ]; then
+              targets+=("$f")
+            fi
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "No files need translation."
+            exit 0
+          fi
+          for inp in "${targets[@]}"; do
+            out="${inp%.csv}_ja.csv"
+            echo "Translating: $inp -> $out"
+            python tools/translate_brand_model_llm.py \
+              --input "$inp" \
+              --output "$out" \
+              --brand-col brand --model-col model \
+              --brand-ja-col brand_ja --model-ja-col model_ja \
+              --cache .cache/global_map.json \
+              --use-wikidata --use-official
+          done
 
-    print(f"Translating: {args.input} -> {args.output}")
+      - name: List outputs before commit
+        run: ls -lh data | tail -n 200 || true
 
-    # 出力/キャッシュディレクトリ
-    if os.path.dirname(args.output):
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    if os.path.dirname(args.cache):
-        os.makedirs(os.path.dirname(args.cache), exist_ok=True)
-
-    # キャッシュ
-    cache = {}
-    if os.path.exists(args.cache):
-        with open(args.cache, "r", encoding="utf-8") as f:
-            try:
-                cache = json.load(f)
-            except Exception:
-                cache = {}
-
-    # 入力
-    df = pd.read_csv(args.input)
-    brands = df[args.brand_col].dropna().unique().tolist()
-    models = df[args.model_col].dropna().unique().tolist()
-
-    brand_map, model_map = {}, {}
-
-    # ----------------------------- Brand -------------------------------------
-    for b in tqdm(brands, desc="brand"):
-        key = f"brand::{b}"
-        if key in cache:
-            brand_map[b] = cache[key]
-            continue
-        res = resolve_with_optional_wikidata(b, use_wd=args.use_wikidata, sleep_sec=args.sleep)
-        brand_map[b] = res["ja"]
-        cache[key] = brand_map[b]
-
-    # ----------------------------- Model -------------------------------------
-    for m in tqdm(models, desc="model"):
-        key = f"model::{m}"
-        if key in cache:
-            model_map[m] = cache[key]
-            continue
-        res = resolve_with_optional_wikidata(m, use_wd=args.use_wikidata, sleep_sec=args.sleep)
-        ja = res["ja"]
-
-        # 公式サイトCSEフォールバック（モデル単体の先行キャッシュ）
-        if args.use_official and (not ja or ja == m):
-            try:
-                from tools.official_lookup import find_official_english
-                guessed = find_official_english("", m)  # ブランド不明の先行推定（後で行単位でも再試行）
-                if guessed:
-                    ja = guessed
-            except Exception:
-                pass
-
-        model_map[m] = ja
-        cache[key] = ja
-        time.sleep(args.sleep)
-
-    # ----------------------------- 書き戻し ----------------------------------
-    # ブランド訳
-    df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
-
-    # モデル訳（行ごとにブランド文脈で追加の公式CSEを試す）
-    def _model_name(row):
-        m = str(row[args.model_col])
-        ja = model_map.get(m, m)
-        if args.use_official and (not ja or ja == m):
-            try:
-                from tools.official_lookup import find_official_english
-                guessed = find_official_english(str(row[args.brand_col]), m)
-                if guessed:
-                    return guessed
-            except Exception:
-                pass
-        return ja
-
-    df[args.model_ja_col] = df.apply(_model_name, axis=1)
-
-    # 出力・キャッシュ保存
-    df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    with open(args.cache, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-
-    print(f"✅ Done. Saved to {args.output}")
-
-if __name__ == "__main__":
-    main()
+      - name: Commit artifacts
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "auto: append + enrich + LLM translate (updated or missing _ja.csv)"
+            git push
+          else
+            echo "No changes to commit."
+          fi
