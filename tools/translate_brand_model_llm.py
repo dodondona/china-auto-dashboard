@@ -15,15 +15,15 @@ Usage:
     --cache .cache/global_map.json
 """
 
-import os, sys, csv, json, time, argparse
+import os, sys, csv, json, time, argparse, re
 from tqdm import tqdm
 from openai import OpenAI
 
 # tools ディレクトリをパスに追加（ModuleNotFoundError対策）
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-# 公式サイト英字取得モジュール
-from tools.official_lookup import find_official_english
+# 公式サイト英字取得 + 正規化
+from tools.official_lookup import find_official_english, _normalize_known_patterns
 
 
 def read_csv(path):
@@ -71,6 +71,16 @@ def translate_with_llm(client, model, text, prompt=""):
         return ""
 
 
+def _shrink_brand(s: str) -> str:
+    """ブランド名がLLMで長文化したときに先頭語で切る（見た目だけ整える）。"""
+    s = (s or "").strip()
+    if not s:
+        return s
+    # 最初の区切り（スペース/括弧/読点）まで
+    s = re.split(r"[、，。,(（]\s*|\s{2,}", s, maxsplit=1)[0]
+    return s
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -82,7 +92,7 @@ def main():
     ap.add_argument("--cache", default=".cache/global_map.json")
     ap.add_argument("--sleep", type=float, default=0.1)
     ap.add_argument("--model", default="gpt-4o")
-    # ▼ 互換性のために追加（挙動は変えずに無視）
+    # ▼ 互換性のため（挙動は変えず無視）
     ap.add_argument("--use-wikidata", action="store_true")
     ap.add_argument("--use-official", action="store_true")
     args = ap.parse_args()
@@ -96,7 +106,7 @@ def main():
 
     print(f"Translating: {args.input} -> {args.output}")
 
-    # ブランド側：既存のLLM翻訳ロジック（そのまま）
+    # ブランド側：既存のLLM翻訳ロジック
     for key in tqdm(all_brands, desc="brand"):
         if key in cache:
             continue
@@ -108,7 +118,7 @@ def main():
         time.sleep(args.sleep)
         save_cache(args.cache, cache)
 
-    # モデル側：まず公式サイトで英字名を試し、ダメならLLMへ（既存方針どおり）
+    # モデル側：まず公式サイトで英字名を試し、ダメならLLMへ
     for key in tqdm(all_models, desc="model"):
         if key in cache:
             continue
@@ -135,8 +145,20 @@ def main():
     for r in rows:
         brand = r.get(args.brand_col, "")
         model = r.get(args.model_col, "")
-        r[args.brand_ja_col] = cache.get(brand, "")
-        r[args.model_ja_col] = cache.get(model, "")
+
+        bj = cache.get(brand, "")
+        mj = cache.get(model, "")
+
+        # ★ LLM/公式のどちらでも同じ最終正規化を適用
+        if mj:
+            mj = _normalize_known_patterns(brand, mj)
+
+        # 見た目だけ（ブランド名が長文になったとき先頭トークンで切る）
+        if bj:
+            bj = _shrink_brand(bj)
+
+        r[args.brand_ja_col] = bj
+        r[args.model_ja_col] = mj
         out.append(r)
 
     write_csv(args.output, out, fieldnames=list(out[0].keys()))
