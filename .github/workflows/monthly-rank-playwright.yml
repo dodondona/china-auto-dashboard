@@ -2,18 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 translate_brand_model_llm.py
-ブランド・車種の中国語表記をWikipedia/Wikidata/公式サイトCSEから自動翻訳して日本語・英字名に変換。
+- 中国語のブランド/モデル名を Wikipedia -> (任意で)Wikidata -> (任意で)公式サイトCSE の順で解決
+- 既存CSVに brand_ja / model_ja を付与して出力
 """
 
-import os, re, csv, json, time, argparse
+import os
+import json
+import time
+import argparse
 import pandas as pd
 from tqdm import tqdm
 
-# === Wikipedia / Wikidata utilities =========================================
+# ========================= Wikipedia / Wikidata ==============================
 
 def lookup_wikipedia(term: str):
+    """zh Wikipediaから言語間リンク（ja優先、なければen）を取得"""
     import wikipediaapi
-    # Wikipedia API の User-Agent ポリシー対応
+    # User-Agent を明示（WikimediaのUAポリシー対応）
     wiki = wikipediaapi.Wikipedia(
         language='zh',
         user_agent='china-auto-dashboard/1.0 (https://github.com/dodondona/china-auto-dashboard; contact: github-actions)'
@@ -24,33 +29,41 @@ def lookup_wikipedia(term: str):
     links = p.langlinks
     if 'ja' in links:
         return links['ja'].title
-    elif 'en' in links:
+    if 'en' in links:
         return links['en'].title
     return None
 
 def lookup_wikidata(term: str):
+    """Wikidataで zh 検索→ja/enラベルを取得（ja優先）"""
     import requests
     try:
-        url = (
-            "https://www.wikidata.org/w/api.php"
-            "?action=wbsearchentities&language=zh&format=json&search=" + term
-        )
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        if not data.get('search'):
+        s = requests.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbsearchentities",
+                "language": "zh",
+                "format": "json",
+                "search": term,
+                "type": "item",
+                "limit": 5,
+            },
+            timeout=10,
+        ).json()
+        if not s.get("search"):
             return None
-        qid = data['search'][0]['id']
-        url2 = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
-        res2 = requests.get(url2, timeout=10)
-        ent = res2.json()['entities'][qid]
-        labels = ent.get('labels', {})
-        return labels.get('ja', labels.get('en', {})).get('value')
+        qid = s["search"][0]["id"]
+        ent = requests.get(
+            "https://www.wikidata.org/wiki/Special:EntityData/{}.json".format(qid),
+            timeout=10,
+        ).json()["entities"][qid]
+        labels = ent.get("labels", {})
+        return labels.get("ja", labels.get("en", {})).get("value")
     except Exception:
         return None
 
 def resolve_with_optional_wikidata(term: str, use_wd=True, sleep_sec=0.1):
-    """Wikipedia→Wikidataの順に解決。"""
-    if not term or term.strip() == "":
+    """Wikipedia→Wikidataの順に解決（ja>en>元のzh）"""
+    if not term or str(term).strip() == "":
         return {"ja": term}
     ja = lookup_wikipedia(term)
     if not ja and use_wd:
@@ -58,41 +71,48 @@ def resolve_with_optional_wikidata(term: str, use_wd=True, sleep_sec=0.1):
     time.sleep(sleep_sec)
     return {"ja": ja or term}
 
-# === CSV translation main ====================================================
+# =============================== Main =======================================
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=True)
+    ap.add_argument("--input", required=True, help="入力CSV")
+    ap.add_argument("--output", required=True, help="出力CSV")
     ap.add_argument("--brand-col", default="brand")
     ap.add_argument("--model-col", default="model")
     ap.add_argument("--brand-ja-col", default="brand_ja")
     ap.add_argument("--model-ja-col", default="model_ja")
     ap.add_argument("--cache", default=".cache/global_map.json")
     ap.add_argument("--sleep", type=float, default=0.1)
-    ap.add_argument("--use-wikidata", action="store_true")
+    ap.add_argument("--use-wikidata", action="store_true", help="Wikidata補完を有効化")
     ap.add_argument("--use-official", action="store_true",
-                    help="Use official-site CSE fallback (GOOGLE_API_KEY/GOOGLE_CSE_ID required)")
+                    help="公式サイトCSE補完を有効化（環境変数 GOOGLE_API_KEY / GOOGLE_CSE_ID が必要）")
     args = ap.parse_args()
 
     print(f"Translating: {args.input} -> {args.output}")
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    os.makedirs(os.path.dirname(args.cache), exist_ok=True)
+    # 出力/キャッシュディレクトリ
+    if os.path.dirname(args.output):
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    if os.path.dirname(args.cache):
+        os.makedirs(os.path.dirname(args.cache), exist_ok=True)
 
+    # キャッシュ
+    cache = {}
     if os.path.exists(args.cache):
         with open(args.cache, "r", encoding="utf-8") as f:
-            cache = json.load(f)
-    else:
-        cache = {}
+            try:
+                cache = json.load(f)
+            except Exception:
+                cache = {}
 
+    # 入力
     df = pd.read_csv(args.input)
     brands = df[args.brand_col].dropna().unique().tolist()
     models = df[args.model_col].dropna().unique().tolist()
 
     brand_map, model_map = {}, {}
 
-    # --- brand ---------------------------------------------------------------
+    # ----------------------------- Brand -------------------------------------
     for b in tqdm(brands, desc="brand"):
         key = f"brand::{b}"
         if key in cache:
@@ -102,7 +122,7 @@ def main():
         brand_map[b] = res["ja"]
         cache[key] = brand_map[b]
 
-    # --- model ---------------------------------------------------------------
+    # ----------------------------- Model -------------------------------------
     for m in tqdm(models, desc="model"):
         key = f"model::{m}"
         if key in cache:
@@ -110,20 +130,26 @@ def main():
             continue
         res = resolve_with_optional_wikidata(m, use_wd=args.use_wikidata, sleep_sec=args.sleep)
         ja = res["ja"]
-        # --- 公式CSEフォールバック ----------------------------------------
+
+        # 公式サイトCSEフォールバック（モデル単体の先行キャッシュ）
         if args.use_official and (not ja or ja == m):
             try:
                 from tools.official_lookup import find_official_english
-                guessed = find_official_english("", m)
+                guessed = find_official_english("", m)  # ブランド不明の先行推定（後で行単位でも再試行）
                 if guessed:
                     ja = guessed
             except Exception:
                 pass
+
         model_map[m] = ja
         cache[key] = ja
         time.sleep(args.sleep)
 
-    # --- 書き戻し -----------------------------------------------------------
+    # ----------------------------- 書き戻し ----------------------------------
+    # ブランド訳
+    df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
+
+    # モデル訳（行ごとにブランド文脈で追加の公式CSEを試す）
     def _model_name(row):
         m = str(row[args.model_col])
         ja = model_map.get(m, m)
@@ -137,9 +163,9 @@ def main():
                 pass
         return ja
 
-    df[args.brand_ja_col] = df[args.brand_col].map(lambda x: brand_map.get(str(x), str(x)))
     df[args.model_ja_col] = df.apply(_model_name, axis=1)
 
+    # 出力・キャッシュ保存
     df.to_csv(args.output, index=False, encoding="utf-8-sig")
     with open(args.cache, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
