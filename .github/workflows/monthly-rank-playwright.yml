@@ -68,7 +68,7 @@ jobs:
               --output "$out" \
               --brand-col brand --model-col model \
               --brand-ja-col brand_ja --model-ja-col model_ja \
-              --model gpt-4o-mini \
+              --model gpt-4o \
               --cache .cache/global_map.json
           done
 
