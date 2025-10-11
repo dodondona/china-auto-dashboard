@@ -2,126 +2,113 @@
 # -*- coding: utf-8 -*-
 
 """
-Autohomeの series_url と title を付与するだけの最小スクリプト
-- 入力: CSV (rank_seq, rank, brand, model, ... など。列名の厳密さは要求しない)
-- 出力: _with_series.csv (series_url, title_raw を追加/更新)
-- キャッシュ一切なし
-- Autohome内で series_url が空の行だけ検索して補完（既に埋まっている行は尊重）
+Autohomeの /rank/ ページを Playwright で開き、車種ページ(series_url)を抽出して
+入力CSVに left-join し、series_url カラムを付与する。
 
-検索方針:
-  1) すでに series_url がある → そのURLに直接アクセスして <title> を採取
-  2) series_url が無い → Autohomeの検索で brand+model を叩いて、最有力の車系ページを1件拾う
-     - 具体: https://sou.autohome.com.cn/zonghe?type=1&q=<brand+model>
-     - 検索結果内の「/xxxx/」の車系トップ(数字IDで終わる)リンクを優先
+前提:
+- 入力CSVには少なくとも rank(整数) があること
+- 出力CSVに series_url を追記
+- キャッシュは使わない(毎回取得)
+
+使い方:
+python tools/append_series_url_from_web.playwright_full.py \
+  --rank-url https://www.autohome.com.cn/rank/1-3-1071-x/ \
+  --input data/autohome_raw_2025-08.csv \
+  --output data/autohome_raw_2025-08_with_series.csv \
+  --name-col model --max-rounds 1 --idle-ms 200 --min-delta 0
 """
 
 import argparse
 import asyncio
 import csv
 import re
-from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pandas as pd
 from playwright.async_api import async_playwright
 
-SEARCH_URL_TMPL = "https://sou.autohome.com.cn/zonghe?type=1&q={q}"
-AUTONAME_RE = re.compile(r"https?://www\.autohome\.com\.cn/(\d{3,6})/?")
+RANK_ROW_RE = re.compile(r'/(\d+)/')  # e.g. href="https://www.autohome.com.cn/7806/"
 
-def guess_best_series_link(html: str) -> str | None:
-    # 車系トップへのリンク（例: https://www.autohome.com.cn/7806/）
-    # 似たリンクが複数あるので、最初のものを返す
-    cands = re.findall(r'href="(https?://www\.autohome\.com\.cn/\d{3,6}/)"', html)
-    return cands[0] if cands else None
+def _parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--rank-url", required=True)
+    p.add_argument("--input", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--name-col", default="model")  # CSV側のモデル名列(照合の参考に使うだけ)
+    p.add_argument("--max-rounds", type=int, default=1)
+    p.add_argument("--idle-ms", type=int, default=200)
+    p.add_argument("--min-delta", type=int, default=0)
+    return p.parse_args()
 
-def extract_title_from_html(html: str) -> str | None:
-    # <title> ... </title>
-    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1)).strip()
-    return None
-
-async def fetch_page_html(page, url: str) -> str:
-    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    return await page.content()
-
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--output", required=False, help="省略時は *_with_series.csv に自動変換")
-    ap.add_argument("--brand-col", default="brand")
-    ap.add_argument("--model-col", default="model")
-    ap.add_argument("--series-url-col", default="series_url")
-    ap.add_argument("--title-col", default="title_raw")
-    return ap.parse_args()
-
-async def main_async(args):
-    src = Path(args.input)
-    if not src.exists():
-        raise SystemExit(f"Input not found: {src}")
-
-    df = pd.read_csv(src)
-    if args.output:
-        out_path = Path(args.output)
-    else:
-        out_path = src.with_name(src.stem + "_with_series.csv")
-
-    # 列が無ければ作る
-    for col in (args.series_url_col, args.title_col):
-        if col not in df.columns:
-            df[col] = ""
-
+async def fetch_rank_table(rank_url: str) -> List[Tuple[int, str]]:
+    """
+    /rank/ページを開いて (rank, series_url) のリストを返す
+    rank は 1 始まり。series_url は https://www.autohome.com.cn/<id>/ の完全URLに揃える
+    """
+    results: List[Tuple[int, str]] = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--disable-gpu","--no-sandbox"])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (compatible; AutohomeScraper/1.0; +https://example.com/bot-ua)",
-            locale="zh-CN"
-        )
-        page = await context.new_page()
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(rank_url, wait_until="networkidle", timeout=60000)
 
-        for idx, row in df.iterrows():
-            brand = str(row.get(args.brand_col, "")).strip()
-            model = str(row.get(args.model_col, "")).strip()
-            series_url = str(row.get(args.series_url_col, "")).strip()
-            title = str(row.get(args.title_col, "")).strip()
-
-            # 1) series_url 既存 → title だけ拾い直す
-            if series_url:
-                try:
-                    html = await fetch_page_html(page, series_url)
-                    title_found = extract_title_from_html(html) or title
-                    df.at[idx, args.title_col] = title_found
-                    continue
-                except Exception:
-                    # 失敗したら検索にフォールバック
-                    pass
-
-            # 2) 検索
-            if not (brand or model):
+        # Autohomeのランキング表行を全部拾う。行ごとに rank と a[href] を取得
+        rows = await page.query_selector_all("table, .rank-list, .rank-list table, .rank-table tr, tr")
+        # 上記は保険。実体は…リンクが /<series_id>/ を含む a を列挙し、順番=rank とみなす
+        anchors = await page.query_selector_all("a[href*='autohome.com.cn/']")
+        hrefs = []
+        for a in anchors:
+            href = await a.get_attribute("href")
+            if not href:
                 continue
-            q = (brand + " " + model).strip().replace(" ", "+")
-            search_url = SEARCH_URL_TMPL.format(q=q)
+            m = RANK_ROW_RE.search(href)
+            if m:
+                # 正規化(プロトコル/末尾スラ付与)
+                sid = m.group(1)
+                hrefs.append(f"https://www.autohome.com.cn/{sid}/")
 
-            try:
-                html = await fetch_page_html(page, search_url)
-                best = guess_best_series_link(html)
-                if best:
-                    # 取得できたら、titleも取りに行く
-                    html2 = await fetch_page_html(page, best)
-                    title_found = extract_title_from_html(html2) or ""
-                    df.at[idx, args.series_url_col] = best
-                    df.at[idx, args.title_col] = title_found
-            except Exception:
-                # どうしてもダメなら空のまま進む
-                pass
+        # 出現順のユニーク化（同じseriesへの複数リンクがあるため）
+        seen = set()
+        uniq = []
+        for h in hrefs:
+            if h not in seen:
+                uniq.append(h)
+                seen.add(h)
+
+        for idx, h in enumerate(uniq, start=1):
+            results.append((idx, h))
 
         await browser.close()
+    return results
 
-    df.to_csv(out_path, index=False, quoting=csv.QUOTE_MINIMAL)
-    print(f"Wrote: {out_path}")
+def left_join_series_url(df: pd.DataFrame, rank_map: Dict[int, str]) -> pd.DataFrame:
+    df2 = df.copy()
+    if "rank" not in df2.columns:
+        # rank_seq しか無い場合の保険
+        if "rank_seq" in df2.columns:
+            df2["rank"] = df2["rank_seq"]
+        else:
+            raise KeyError("input CSV must have 'rank' or 'rank_seq' column.")
+
+    df2["rank"] = pd.to_numeric(df2["rank"], errors="coerce").astype("Int64")
+    df2["series_url"] = df2["rank"].map(rank_map)
+    return df2
 
 def main():
-    args = parse_args()
-    asyncio.run(main_async(args))
+    args = _parse_args()
+    print(f"🧾 input: {args.input}")
+    print(f"🌐 scraping: {args.rank_url}")
+
+    rank_pairs = asyncio.run(fetch_rank_table(args.rank_url))
+    rank_map = {r: u for r, u in rank_pairs}
+    if not rank_map:
+        print("▲ No series urls found in HTML")
+    else:
+        print(f"✓ scraped {len(rank_map)} series urls")
+
+    df = pd.read_csv(args.input)
+    out = left_join_series_url(df, rank_map)
+    out.to_csv(args.output, index=False, quoting=csv.QUOTE_MINIMAL)
+    print(f"► {args.input} -> {args.output}")
 
 if __name__ == "__main__":
     main()
