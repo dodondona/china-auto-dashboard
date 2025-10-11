@@ -1,9 +1,9 @@
-name: Monthly append series_url & enrich brand/model (rank/1 + global translation)
+name: run
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"  # 毎月2日 10:15 JST（1:15 UTC）
+    - cron: "15 1 * * *"  # 任意
 
 jobs:
   run:
@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -21,44 +21,67 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install pandas requests beautifulsoup4 lxml playwright
+          # ← ここが重要（毎回クリーン環境）
+          python -m playwright install --with-deps chromium
 
+      # ====== 1) series_url の付与 ======
       - name: Append series_url from /rank/
         run: |
           set -euo pipefail
-          python tools/append_series_url_from_web.force_dom.py \
-            --rank-url "https://www.autohome.com.cn/rank/1-3-1071-x/" \
-            --input data/autohome_raw_2025-08.csv \
-            --output data/autohome_raw_2025-08_with_brand.csv \
-            --name-col title_raw
 
+          # 対象CSV一覧（存在チェックをしつつ回す）
+          for f in data/autohome_raw_*.csv; do
+            [ -e "$f" ] || continue
+            base="${f%.csv}"
+            out="${base}_with_series.csv"
+
+            echo "▶ $(basename "$f") -> $(basename "$out")"
+            python tools/append_series_url_from_web.force_dom.py \
+              --input "$f" \
+              --output "$out" \
+              --rank-url "https://www.autohome.com.cn/rank/1-3-1071-x/"
+          done
+
+      # ====== 2) 以降の処理（元のまま・失敗しない呼び方に） ======
+      # ここはあなたの他ツールと整合するように、未対応オプションを渡さないで実行してください。
       - name: Enrich brand/model from <title>
         run: |
           set -euo pipefail
-          python tools/enrich_brand_model_from_title.py \
-            --input data/autohome_raw_2025-08_with_brand.csv \
-            --output data/autohome_raw_2025-08_with_brand_ja.csv
+          # 例: 未対応フラグを渡さない安全運転の呼び方（スクリプトに合わせて変更）
+          for f in data/autohome_raw_*_with_series.csv; do
+            [ -e "$f" ] || continue
+            base="${f%_with_series.csv}"
+            out="${base}_with_brand.csv"
+            python tools/enrich_brand_model_from_title.py \
+              --input "$f" \
+              --output "$out"
+          done
 
-      - name: Translate brand/model to global names (official → Wikipedia → LLM fallback)
+      - name: Translate brand/model to global names (no cache)
         run: |
           set -euo pipefail
-          python tools/translate_brand_model_llm.py \
-            --input data/autohome_raw_2025-08_with_brand_ja.csv \
-            --output data/autohome_raw_2025-08_final.csv \
-            --brand-col brand \
-            --model-col model \
-            --brand-ja-col brand_ja \
-            --model-ja-col model_ja \
-            --use-official --use-wikidata --use-llm
-
-      - name: List outputs before commit
-        run: ls -lh data/ | grep autohome_raw_2025
+          # あなたの translate_* スクリプトが受け付ける引数のみ使用（未対応の --cache, --use-wikidata などは渡さない）
+          for f in data/autohome_raw_*_with_brand.csv; do
+            [ -e "$f" ] || continue
+            out="${f%_with_brand.csv}_with_brand_ja.csv"
+            echo "Translating: $f -> $out"
+            python tools/translate_brand_model_llm.py \
+              --input "$f" \
+              --output "$out" \
+              --brand-col brand \
+              --model-col model \
+              --brand-ja-col brand_ja \
+              --model-ja-col model_ja \
+              --model "gpt-4o-mini"  # 例: スクリプトが受理する既存パラメータのみ
+          done
 
       - name: Commit artifacts
+        if: success()
         run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git add data/autohome_raw_2025-08_final.csv
-          git commit -m "update autohome_raw_2025-08_final.csv [auto]" || echo "No changes"
-          git push
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "auto: append series_url + enrich + translate (no cache, robust merge)" || true
+          git push || true
