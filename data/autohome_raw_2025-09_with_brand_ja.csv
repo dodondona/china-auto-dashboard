@@ -1,51 +1,51 @@
-rank_seq,rank,brand,model,count,series_url,brand_conf,series_conf,title_raw,brand_ja,model_ja,model_official_en,source_model
-1,1,吉利银河,星愿,46057,https://www.autohome.com.cn/7806/,1.0,1.0,【星愿】吉利银河_星愿报价_星愿图片_汽车之家,Geely Galaxy,EM,EM,cache
-2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/5769/,1.0,1.0,【Model Y】特斯拉_Model Y报价_Model Y图片_汽车之家,Tesla,Tesla Model,Tesla Model,cache
-3,3,五菱汽车,宏光MINIEV,37828,https://www.autohome.com.cn/5714/,1.0,1.0,【宏光MINIEV】五菱汽车_宏光MINIEV报价_宏光MINIEV图片_汽车之家,Wuling,Hongguang MINIEV,Hongguang MINIEV,cache
-4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/5964/,1.0,1.0,【秦PLUS】比亚迪_秦PLUS报价_秦PLUS图片_汽车之家,BYD,DM,DM,cache
-5,5,日产,轩逸,27695,https://www.autohome.com.cn/448/,1.0,1.0,【轩逸】日产_轩逸报价_轩逸图片_汽车之家,Nissan,轩逸,,current
-6,6,比亚迪,海狮06新能源,25453,https://www.autohome.com.cn/8087/,1.0,1.0,【海狮06新能源】比亚迪_海狮06新能源报价_海狮06新能源图片_汽车之家,BYD,Electric Cars,Electric Cars,cache
-7,7,比亚迪,秦L,25380,https://www.autohome.com.cn/7578/,1.0,1.0,【秦L】比亚迪_秦L报价_秦L图片_汽车之家,BYD,DM,DM,cache
-8,8,比亚迪,海豹06新能源,24353,https://www.autohome.com.cn/7588/,1.0,1.0,【海豹06新能源】比亚迪_海豹06新能源报价_海豹06新能源图片_汽车之家,BYD,Electric Cars,Electric Cars,cache
-9,9,大众,朗逸,24320,https://www.autohome.com.cn/614/,1.0,1.0,【朗逸】大众_朗逸报价_朗逸图片_汽车之家,Volkswagen,Lavida,Lavida,cache
-10,10,吉利汽车,博越L,24160,https://www.autohome.com.cn/6814/,1.0,1.0,【博越L】吉利汽车_博越L报价_博越L图片_汽车之家,Geely,Boyue L,Boyue L,cache
-11,11,比亚迪,海鸥,23031,https://www.autohome.com.cn/6762/,1.0,1.0,【海鸥】比亚迪_海鸥报价_海鸥图片_汽车之家,BYD,Untitled,Untitled,cache
-12,12,AITO,问界M8,21537,https://www.autohome.com.cn/8003/,1.0,1.0,【问界M8】AITO 问界_问界M8报价_问界M8图片_汽车之家,AITO,AITO,AITO,cache
-13,13,小米汽车,小米SU7,19848,https://www.autohome.com.cn/6962/,1.0,1.0,【小米SU7】小米汽车_小米SU7报价_小米SU7图片_汽车之家,Xiaomi Auto,SU7,SU7,cache
-14,14,比亚迪,元UP,19647,https://www.autohome.com.cn/7538/,1.0,1.0,【元UP】比亚迪_元UP报价_元UP图片_汽车之家,BYD,YUAN UP,YUAN UP,cache
-15,15,大众,速腾,19074,https://www.autohome.com.cn/442/,1.0,1.0,【速腾】大众_速腾报价_速腾图片_汽车之家,Volkswagen,Sagitar,Sagitar,cache
-16,16,大众,帕萨特,18695,https://www.autohome.com.cn/528/,1.0,1.0,【帕萨特】大众_帕萨特报价_帕萨特图片_汽车之家,Volkswagen,帕萨特,,current
-17,17,大众,途观L,18466,https://www.autohome.com.cn/4274/,1.0,1.0,【途观L】大众_途观L报价_途观L图片_汽车之家,Volkswagen,File,File,cache
-18,18,丰田,RAV4荣放,18312,https://www.autohome.com.cn/770/,1.0,1.0,【RAV4荣放】丰田_RAV4荣放报价_RAV4荣放图片_汽车之家,Toyota,RAV4荣放,,current
-19,19,吉利汽车,星越L,17758,https://www.autohome.com.cn/6004/,1.0,1.0,【星越L】吉利汽车_星越L报价_星越L图片_汽车之家,Geely,Xingyue,Xingyue,cache
-20,20,特斯拉,Model 3,17739,https://www.autohome.com.cn/5346/,1.0,1.0,【Model 3】特斯拉_Model 3报价_Model 3图片_汽车之家,Tesla,Tesla Model,Tesla Model,cache
-21,21,丰田,卡罗拉锐放,17644,https://www.autohome.com.cn/6428/,1.0,1.0,【卡罗拉锐放】丰田_卡罗拉锐放报价_卡罗拉锐放图片_汽车之家,Toyota,COROLLA,COROLLA,cache
-22,22,大众,迈腾,16969,https://www.autohome.com.cn/496/,1.0,1.0,【迈腾】大众_迈腾报价_迈腾图片_汽车之家,Volkswagen,Magotan,Magotan,cache
-23,23,小米汽车,小米YU7,16548,https://www.autohome.com.cn/7793/,1.0,1.0,【小米YU7】小米汽车_小米YU7报价_小米YU7图片_汽车之家,Xiaomi Auto,YU7,YU7,cache
-24,24,奇瑞,瑞虎8,15695,https://www.autohome.com.cn/4693/,1.0,1.0,【瑞虎8】奇瑞_瑞虎8报价_瑞虎8图片_汽车之家,Chery,PRO,PRO,cache
-25,25,丰田,凯美瑞,15526,https://www.autohome.com.cn/110/,1.0,1.0,【凯美瑞】丰田_凯美瑞报价_凯美瑞图片_汽车之家,Toyota,CAMRY,CAMRY,cache
-26,26,小鹏,小鹏MONA M03,15333,https://www.autohome.com.cn/6998/,1.0,1.0,【小鹏MONA M03】小鹏_小鹏MONA M03报价_小鹏MONA M03图片_汽车之家,XPeng,XPENG,XPENG,cache
-27,27,大众,探岳,15189,https://www.autohome.com.cn/4744/,1.0,1.0,【探岳】大众_探岳报价_探岳图片_汽车之家,Volkswagen,Tayron,Tayron,cache
-28,28,丰田,锋兰达,14920,https://www.autohome.com.cn/6414/,1.0,1.0,【锋兰达】丰田_锋兰达报价_锋兰达图片_汽车之家,Toyota,WILDLANDER,WILDLANDER,cache
-29,29,长安启源,长安Lumin,14570,https://www.autohome.com.cn/6674/,1.0,1.0,【长安Lumin】长安启源_长安Lumin报价_长安Lumin图片_汽车之家,Changan Qiyuan,长安Lumin,,current
-30,30,哈弗,哈弗大狗,14457,https://www.autohome.com.cn/5770/,1.0,1.0,【哈弗大狗】哈弗_哈弗大狗报价_哈弗大狗图片_汽车之家,Haval,Untitled,Untitled,cache
-31,31,比亚迪,海豚,13968,https://www.autohome.com.cn/6139/,1.0,1.0,【海豚】比亚迪_海豚报价_海豚图片_汽车之家,BYD,海豚,,current
-32,32,大众,途岳,13693,https://www.autohome.com.cn/4745/,1.0,1.0,【途岳】大众_途岳报价_途岳图片_汽车之家,Volkswagen,Tharu,Tharu,cache
-33,33,长安,逸动,13637,https://www.autohome.com.cn/2429/,1.0,1.0,【逸动】长安_逸动报价_逸动图片_汽车之家,Changan,Eado,Eado,cache
-34,34,比亚迪,海豹05 DM-i,13495,https://www.autohome.com.cn/7981/,1.0,1.0,【海豹05 DM-i】比亚迪_海豹05 DM-i报价_海豹05 DM-i图片_汽车之家,BYD,Seal 05 DM-i,Seal 05 DM-i,cache
-35,35,零跑汽车,零跑C10,13384,https://www.autohome.com.cn/7382/,1.0,1.0,【零跑C10】零跑汽车_零跑C10报价_零跑C10图片_汽车之家,Leapmotor,SUVs,SUVs,cache
-36,36,本田,本田CR-V,13277,https://www.autohome.com.cn/314/,1.0,1.0,【本田CR-V】本田_本田CR-V报价_本田CR-V图片_汽车之家,Honda,CR,CR,cache
-37,37,比亚迪,宋PLUS新能源,13098,https://www.autohome.com.cn/5761/,1.0,1.0,【宋PLUS新能源】比亚迪_宋PLUS新能源报价_宋PLUS新能源图片_汽车之家,BYD,DM,DM,cache
-38,38,奥迪,奥迪A6L,12941,https://www.autohome.com.cn/18/,1.0,1.0,【奥迪A6L】奥迪_奥迪A6L报价_奥迪A6L图片_汽车之家,Audi,A6,A6,cache
-39,39,比亚迪,宋Pro新能源,12681,https://www.autohome.com.cn/5279/,1.0,1.0,【宋Pro新能源】比亚迪_宋Pro新能源报价_宋Pro新能源图片_汽车之家,BYD,DM,DM,cache
-40,40,奇瑞,艾瑞泽8,12577,https://www.autohome.com.cn/6664/,1.0,1.0,【艾瑞泽8】奇瑞_艾瑞泽8报价_艾瑞泽8图片_汽车之家,Chery,PRO,PRO,cache
-41,41,长安,长安CS75 PLUS,12179,https://www.autohome.com.cn/5179/,1.0,1.0,【长安CS75 PLUS】长安_长安CS75 PLUS报价_长安CS75 PLUS图片_汽车之家,Changan,长安CS75 PLUS,,current
-42,42,宝马,宝马3系,12157,https://www.autohome.com.cn/66/,1.0,1.0,【宝马3系】宝马_宝马3系报价_宝马3系图片_汽车之家,BMW,BMW,BMW,cache
-43,43,五菱汽车,五菱缤果,12078,https://www.autohome.com.cn/7045/,1.0,1.0,【五菱缤果】五菱汽车_五菱缤果报价_五菱缤果图片_汽车之家,Wuling,五菱缤果,,current
-44,44,吉利银河,银河A7,12078,https://www.autohome.com.cn/8158/,1.0,1.0,【银河A7】吉利银河_银河A7报价_银河A7图片_汽车之家,Geely Galaxy,EM,EM,cache
-45,45,比亚迪,元PLUS,11984,https://www.autohome.com.cn/6298/,1.0,1.0,【元PLUS】比亚迪_元PLUS报价_元PLUS图片_汽车之家,BYD,Order Yuan Plus,Order Yuan Plus,cache
-46,46,奔驰,奔驰C级,11951,https://www.autohome.com.cn/588/,1.0,1.0,【奔驰C级】奔驰_奔驰C级报价_奔驰C级图片_汽车之家,Mercedes-Benz,Category,Category,cache
-47,47,别克,昂科威Plus,11929,https://www.autohome.com.cn/3554/,1.0,1.0,【昂科威Plus】别克_昂科威Plus报价_昂科威Plus图片_汽车之家,Buick,File,File,cache
-48,48,本田,雅阁,11929,https://www.autohome.com.cn/78/,1.0,1.0,【雅阁】本田_雅阁报价_雅阁图片_汽车之家,Honda,Category,Category,cache
-49,49,红旗,红旗H5,11882,https://www.autohome.com.cn/4410/,1.0,1.0,【红旗H5】红旗_红旗H5报价_红旗H5图片_汽车之家,Hongqi,H5,H5,cache
-50,50,吉利汽车,缤越,11761,https://www.autohome.com.cn/4701/,1.0,1.0,【缤越】吉利汽车_缤越报价_缤越图片_汽车之家,Geely,Binyue,Binyue,cache
+﻿rank_seq,rank,brand,model,count,series_url,brand_conf,series_conf,title_raw,brand_ja,model_ja,source_model
+1,1,吉利银河,星愿,46057,https://www.autohome.com.cn/7806/,1.0,1.0,【星愿】吉利银河_星愿报价_星愿图片_汽车之家,Geely Galaxy,Xingyuan,llm
+2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/5769/,1.0,1.0,【Model Y】特斯拉_Model Y报价_Model Y图片_汽车之家,Tesla,Tesla Model Y,llm
+3,3,五菱汽车,宏光MINIEV,37828,https://www.autohome.com.cn/5714/,1.0,1.0,【宏光MINIEV】五菱汽车_宏光MINIEV报价_宏光MINIEV图片_汽车之家,Wuling Motors,Wuling Hongguang MINI EV,llm
+4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/5964/,1.0,1.0,【秦PLUS】比亚迪_秦PLUS报价_秦PLUS图片_汽车之家,BYD,Qin PLUS,llm
+5,5,日产,轩逸,27695,https://www.autohome.com.cn/448/,1.0,1.0,【轩逸】日产_轩逸报价_轩逸图片_汽车之家,Nissan,Sylphy,llm
+6,6,比亚迪,海狮06新能源,25453,https://www.autohome.com.cn/8087/,1.0,1.0,【海狮06新能源】比亚迪_海狮06新能源报价_海狮06新能源图片_汽车之家,BYD,Haishi 06 New Energy,llm
+7,7,比亚迪,秦L,25380,https://www.autohome.com.cn/7578/,1.0,1.0,【秦L】比亚迪_秦L报价_秦L图片_汽车之家,BYD,Qin L,llm
+8,8,比亚迪,海豹06新能源,24353,https://www.autohome.com.cn/7588/,1.0,1.0,【海豹06新能源】比亚迪_海豹06新能源报价_海豹06新能源图片_汽车之家,BYD,Seals 06 NEV,llm
+9,9,大众,朗逸,24320,https://www.autohome.com.cn/614/,1.0,1.0,【朗逸】大众_朗逸报价_朗逸图片_汽车之家,Volkswagen,Lavida,llm
+10,10,吉利汽车,博越L,24160,https://www.autohome.com.cn/6814/,1.0,1.0,【博越L】吉利汽车_博越L报价_博越L图片_汽车之家,Geely,Boyue L,llm
+11,11,比亚迪,海鸥,23031,https://www.autohome.com.cn/6762/,1.0,1.0,【海鸥】比亚迪_海鸥报价_海鸥图片_汽车之家,BYD,Seagull,llm
+12,12,AITO,问界M8,21537,https://www.autohome.com.cn/8003/,1.0,1.0,【问界M8】AITO 问界_问界M8报价_问界M8图片_汽车之家,AITO,AITO M8,llm
+13,13,小米汽车,小米SU7,19848,https://www.autohome.com.cn/6962/,1.0,1.0,【小米SU7】小米汽车_小米SU7报价_小米SU7图片_汽车之家,Xiaomi Auto,Xiaomi SU7,llm
+14,14,比亚迪,元UP,19647,https://www.autohome.com.cn/7538/,1.0,1.0,【元UP】比亚迪_元UP报价_元UP图片_汽车之家,BYD,元UP: Moto UP,llm
+15,15,大众,速腾,19074,https://www.autohome.com.cn/442/,1.0,1.0,【速腾】大众_速腾报价_速腾图片_汽车之家,Volkswagen,Sagitar,llm
+16,16,大众,帕萨特,18695,https://www.autohome.com.cn/528/,1.0,1.0,【帕萨特】大众_帕萨特报价_帕萨特图片_汽车之家,Volkswagen,Passat,llm
+17,17,大众,途观L,18466,https://www.autohome.com.cn/4274/,1.0,1.0,【途观L】大众_途观L报价_途观L图片_汽车之家,Volkswagen,Tiguan L,llm
+18,18,丰田,RAV4荣放,18312,https://www.autohome.com.cn/770/,1.0,1.0,【RAV4荣放】丰田_RAV4荣放报价_RAV4荣放图片_汽车之家,Toyota,RAV4,llm
+19,19,吉利汽车,星越L,17758,https://www.autohome.com.cn/6004/,1.0,1.0,【星越L】吉利汽车_星越L报价_星越L图片_汽车之家,Geely,Xingyue L,llm
+20,20,特斯拉,Model 3,17739,https://www.autohome.com.cn/5346/,1.0,1.0,【Model 3】特斯拉_Model 3报价_Model 3图片_汽车之家,Tesla,Tesla Model 3,llm
+21,21,丰田,卡罗拉锐放,17644,https://www.autohome.com.cn/6428/,1.0,1.0,【卡罗拉锐放】丰田_卡罗拉锐放报价_卡罗拉锐放图片_汽车之家,Toyota,Corolla Cross,llm
+22,22,大众,迈腾,16969,https://www.autohome.com.cn/496/,1.0,1.0,【迈腾】大众_迈腾报价_迈腾图片_汽车之家,Volkswagen,Magotan,llm
+23,23,小米汽车,小米YU7,16548,https://www.autohome.com.cn/7793/,1.0,1.0,【小米YU7】小米汽车_小米YU7报价_小米YU7图片_汽车之家,Xiaomi Auto,Xiaomi YU7,llm
+24,24,奇瑞,瑞虎8,15695,https://www.autohome.com.cn/4693/,1.0,1.0,【瑞虎8】奇瑞_瑞虎8报价_瑞虎8图片_汽车之家,Chery,Tiggo 8,llm
+25,25,丰田,凯美瑞,15526,https://www.autohome.com.cn/110/,1.0,1.0,【凯美瑞】丰田_凯美瑞报价_凯美瑞图片_汽车之家,Toyota,Camry,llm
+26,26,小鹏,小鹏MONA M03,15333,https://www.autohome.com.cn/6998/,1.0,1.0,【小鹏MONA M03】小鹏_小鹏MONA M03报价_小鹏MONA M03图片_汽车之家,XPeng,Xpeng MONA M03,llm
+27,27,大众,探岳,15189,https://www.autohome.com.cn/4744/,1.0,1.0,【探岳】大众_探岳报价_探岳图片_汽车之家,Volkswagen,Tiguan,llm
+28,28,丰田,锋兰达,14920,https://www.autohome.com.cn/6414/,1.0,1.0,【锋兰达】丰田_锋兰达报价_锋兰达图片_汽车之家,Toyota,Frontlander,llm
+29,29,长安启源,长安Lumin,14570,https://www.autohome.com.cn/6674/,1.0,1.0,【长安Lumin】长安启源_长安Lumin报价_长安Lumin图片_汽车之家,Changan Qiyuan,Changan Lumin,llm
+30,30,哈弗,哈弗大狗,14457,https://www.autohome.com.cn/5770/,1.0,1.0,【哈弗大狗】哈弗_哈弗大狗报价_哈弗大狗图片_汽车之家,Haval,Haval Big Dog,llm
+31,31,比亚迪,海豚,13968,https://www.autohome.com.cn/6139/,1.0,1.0,【海豚】比亚迪_海豚报价_海豚图片_汽车之家,BYD,Dolphin,llm
+32,32,大众,途岳,13693,https://www.autohome.com.cn/4745/,1.0,1.0,【途岳】大众_途岳报价_途岳图片_汽车之家,Volkswagen,Tharu,llm
+33,33,长安,逸动,13637,https://www.autohome.com.cn/2429/,1.0,1.0,【逸动】长安_逸动报价_逸动图片_汽车之家,Changan,Eado,llm
+34,34,比亚迪,海豹05 DM-i,13495,https://www.autohome.com.cn/7981/,1.0,1.0,【海豹05 DM-i】比亚迪_海豹05 DM-i报价_海豹05 DM-i图片_汽车之家,BYD,SEAL 05 DM-i,llm
+35,35,零跑汽车,零跑C10,13384,https://www.autohome.com.cn/7382/,1.0,1.0,【零跑C10】零跑汽车_零跑C10报价_零跑C10图片_汽车之家,Leapmotor,Leapmotor C10,llm
+36,36,本田,本田CR-V,13277,https://www.autohome.com.cn/314/,1.0,1.0,【本田CR-V】本田_本田CR-V报价_本田CR-V图片_汽车之家,Honda,Honda CR-V,llm
+37,37,比亚迪,宋PLUS新能源,13098,https://www.autohome.com.cn/5761/,1.0,1.0,【宋PLUS新能源】比亚迪_宋PLUS新能源报价_宋PLUS新能源图片_汽车之家,BYD,Song PLUS New Energy,llm
+38,38,奥迪,奥迪A6L,12941,https://www.autohome.com.cn/18/,1.0,1.0,【奥迪A6L】奥迪_奥迪A6L报价_奥迪A6L图片_汽车之家,Audi,Audi A6L,llm
+39,39,比亚迪,宋Pro新能源,12681,https://www.autohome.com.cn/5279/,1.0,1.0,【宋Pro新能源】比亚迪_宋Pro新能源报价_宋Pro新能源图片_汽车之家,BYD,Song Pro New Energy,llm
+40,40,奇瑞,艾瑞泽8,12577,https://www.autohome.com.cn/6664/,1.0,1.0,【艾瑞泽8】奇瑞_艾瑞泽8报价_艾瑞泽8图片_汽车之家,Chery,Arrizo 8,llm
+41,41,长安,长安CS75 PLUS,12179,https://www.autohome.com.cn/5179/,1.0,1.0,【长安CS75 PLUS】长安_长安CS75 PLUS报价_长安CS75 PLUS图片_汽车之家,Changan,Changan CS75 PLUS,llm
+42,42,宝马,宝马3系,12157,https://www.autohome.com.cn/66/,1.0,1.0,【宝马3系】宝马_宝马3系报价_宝马3系图片_汽车之家,BMW,BMW 3 Series,llm
+43,43,五菱汽车,五菱缤果,12078,https://www.autohome.com.cn/7045/,1.0,1.0,【五菱缤果】五菱汽车_五菱缤果报价_五菱缤果图片_汽车之家,Wuling Motors,Wuling Bingo,llm
+44,44,吉利银河,银河A7,12078,https://www.autohome.com.cn/8158/,1.0,1.0,【银河A7】吉利银河_银河A7报价_银河A7图片_汽车之家,Geely Galaxy,Galaxy A7,llm
+45,45,比亚迪,元PLUS,11984,https://www.autohome.com.cn/6298/,1.0,1.0,【元PLUS】比亚迪_元PLUS报价_元PLUS图片_汽车之家,BYD,元PLUSの公式英語表記は「MOTO PLUS」です。,llm
+46,46,奔驰,奔驰C级,11951,https://www.autohome.com.cn/588/,1.0,1.0,【奔驰C级】奔驰_奔驰C级报价_奔驰C级图片_汽车之家,Mercedes-Benz,Mercedes-Benz C-Class,llm
+47,47,别克,昂科威Plus,11929,https://www.autohome.com.cn/3554/,1.0,1.0,【昂科威Plus】别克_昂科威Plus报价_昂科威Plus图片_汽车之家,Buick,Envision Plus,llm
+48,48,本田,雅阁,11929,https://www.autohome.com.cn/78/,1.0,1.0,【雅阁】本田_雅阁报价_雅阁图片_汽车之家,Honda,Accord,llm
+49,49,红旗,红旗H5,11882,https://www.autohome.com.cn/4410/,1.0,1.0,【红旗H5】红旗_红旗H5报价_红旗H5图片_汽车之家,Hongqi,Hongqi H5,llm
+50,50,吉利汽车,缤越,11761,https://www.autohome.com.cn/4701/,1.0,1.0,【缤越】吉利汽车_缤越报价_缤越图片_汽车之家,Geely,Bin Yue,llm
