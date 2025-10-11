@@ -1,391 +1,401 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Translate brand/model to global names with priority:
+  1) Official sites via Google Custom Search (if GOOGLE_API_KEY & GOOGLE_CSE_ID are set)
+  2) Wikipedia zh -> en interlanguage link
+  3) LLM (OpenAI) fallback
+
+No persistent cache is used.
+
+CLI:
+  python tools/translate_brand_model_llm.py \
+    --input data/autohome_raw_2025-08_with_brand.csv \
+    --output data/autohome_raw_2025-08_with_brand_ja.csv \
+    --brand-col brand --model-col model \
+    --brand-ja-col brand_ja --model-ja-col model_ja \
+    --model gpt-4o
+
+Required columns in input: brand, model (or names you pass by args)
+Outputs (adds/overwrites):
+  - brand_ja           : グローバル/日本語側のブランド表記（英字優先・JP既知はカタカナのまま）
+  - model_ja           : グローバルなモデル英名（輸出名）。なければ妥当な英語表記
+  - model_official_en  : Official ステップで得た英名（あれば）
+  - source_model       : "official" / "wikipedia" / "llm" / "none"
+"""
+
+import argparse
 import os
 import re
-import json
 import time
-import argparse
-from typing import Dict, List, Optional, Tuple
-import requests
+from typing import Dict, Optional, Tuple, List
+
 import pandas as pd
-from urllib.parse import urlparse
+import requests
 from bs4 import BeautifulSoup
+from tqdm import tqdm
 
-# -------------------------
-# CLI
-# -------------------------
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--input", required=True, help="input CSV")
-    p.add_argument("--output", required=True, help="output CSV")
-    p.add_argument("--brand-col", default="brand")
-    p.add_argument("--model-col", default="model")
-    p.add_argument("--brand-ja-col", default="brand_ja")
-    p.add_argument("--model-ja-col", default="model_ja")
-    p.add_argument("--cache", default=".cache/global_map.json")
-    p.add_argument("--sleep", type=float, default=0.8)
-    p.add_argument("--model", dest="llm_model", default="gpt-4o")
-    return p.parse_args()
+# ===== Utilities =========================================================
 
-# -------------------------
-# Env & constants
-# -------------------------
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # 任意（ja翻訳用）
-UA = "Mozilla/5.0 (compatible; ModelNameResolver/1.0; +https://example.org/bot) "
-TIMEOUT = 15
+def norm_space(s: str) -> str:
+    return re.sub(r'\s+', ' ', s).strip()
 
-STOPWORDS = {
-    "category","file","news","blogs","suvs","electric cars","image bank","models",
-    "purchase","configuration","dealer","thank you","about","technology","byd","toyota",
-    "volkswagen","audi","honda","bmw","mercedes-benz","nissan","geely","wuling","xpeng",
-    "leapmotor","haval","buick","hongqi","chery"
-}
-
-# ブランド -> 公式ドメイン（辞書は"モデル名"ではなく"公式サイトの入口"だけ）
-OFFICIAL_SITES: Dict[str, List[str]] = {
-    "比亚迪": ["byd.com","byd.com.cn"],
-    "比亞迪": ["byd.com","byd.com.cn"],
-    "BYD": ["byd.com","byd.com.cn"],
-    "丰田": ["toyota.com.cn","gac-toyota.com.cn","ftms.com.cn"],
-    "トヨタ": ["toyota.com.cn","gac-toyota.com.cn","ftms.com.cn"],
-    "大众": ["vw.com.cn","faw-vw.com","svw-volkswagen.com"],
-    "フォルクスワーゲン": ["vw.com.cn","faw-vw.com","svw-volkswagen.com"],
-    "日产": ["nissan.com.cn","dongfeng-nissan.com.cn","dfmc.com.cn"],
-    "日産": ["nissan.com.cn","dongfeng-nissan.com.cn","dfmc.com.cn"],
-    "特斯拉": ["tesla.com","tesla.cn"],
-    "吉利汽车": ["geely.com","geely.com.cn","xy.geely.com","galaxy.geely.com","global.geely.com"],
-    "吉利银河": ["xy.geely.com","galaxy.geely.com","geely.com"],
-    "吉利": ["geely.com","geely.com.cn","global.geely.com"],
-    "奇瑞": ["chery.cn","chery.com","cheryinternational.com"],
-    "哈弗": ["haval.com.cn","haval-global.com"],
-    "红旗": ["hongqi-auto.com"],
-    "红旗汽车": ["hongqi-auto.com"],
-    "长安": ["changan.com.cn","changan.com"],
-    "长安启源": ["changan.com.cn","changan.com"],
-    "小鹏": ["xpeng.com"],
-    "小米汽车": ["auto.mi.com","xiaomi.com","mi.com"],
-    "AITO": ["aitoauto.com","huawei.com"],  # 実態上 AITO/Wenjie はここに出る
-    "奥迪": ["audi.cn","faweaudi.com","saic-audi.cn"],
-    "本田": ["honda.com.cn","gac-honda.com.cn","dongfeng-honda.com"],
-    "宝马": ["bmw.com.cn","bmw.com"],
-    "别克": ["buick.com.cn","saic-gm.com"],
-    "五菱汽车": ["sgmw.com.cn","wuling-global.com"],
-    "零跑汽车": ["leapmotor.com"],
-    "奔驰": ["mercedes-benz.com.cn","mb.zungfu.com.cn","mercedes-benz.com"],
-    # ほか足りない場合はCSE側のドメインホワイトリストでカバー
-}
-
-# -------------------------
-# Utilities
-# -------------------------
-def http_get(url: str) -> Optional[str]:
-    try:
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=TIMEOUT)
-        if r.ok and "text/html" in r.headers.get("content-type",""):
-            r.encoding = r.apparent_encoding or r.encoding
-            return r.text
-    except Exception:
+def pick_english_like_token(txt: str) -> Optional[str]:
+    """
+    タイトルやスニペットから「モデル名っぽい英字」候補を抽出。
+    例: "BYD Seal 06 – New Energy" -> "Seal 06"
+    """
+    if not txt:
         return None
+    # 英字で始まり英字/数字/空白/ハイフンが続くフレーズを広めに拾う
+    # ただし一般語の "Category", "File", "Order" 等は後で除外
+    tokens = re.findall(r'[A-Z][A-Za-z0-9\- ]{1,40}', txt)
+    if not tokens:
+        return None
+    # ノイズ除去
+    bad = {'Category', 'File', 'Order', 'Electric Cars', 'SUVs', 'Cars', 'COROLLA', 'CAMRY', 'A6', 'CR', 'BMW'}
+    cleaned = []
+    for t in tokens:
+        t = t.strip(' -')
+        if len(t) < 2:
+            continue
+        if t in bad:
+            continue
+        cleaned.append(t)
+    return cleaned[0] if cleaned else None
+
+def katakana_brand_friendly(brand_en: str) -> str:
+    """
+    ブランドの日本語既定表記（最低限）。“辞書”を避けるため、ごく一部だけ。
+    最終的には英字ブランドをそのまま返すことを基本とし、JPで一般的な訳が明確なもののみ置換。
+    """
+    if not brand_en:
+        return brand_en
+    mapping = {
+        'Toyota': 'トヨタ',
+        'Nissan': '日産',
+        'Honda': 'ホンダ',
+        'BMW': 'BMW',
+        'Mercedes-Benz': 'メルセデス・ベンツ',
+        'Volkswagen': 'フォルクスワーゲン',
+        'Audi': 'アウディ',
+        'Buick': 'ビュイック',
+        'Geely': 'Geely',
+        'Geely Galaxy': 'Geely Galaxy',
+        'BYD': 'BYD',
+        'Wuling': 'Wuling',
+        'Hongqi': '紅旗',
+        'XPeng': 'XPeng',
+        'Chery': 'Chery',
+        'Changan': 'Changan',
+        'Haval': 'Haval',
+        'Tesla': 'テスラ',
+        'AITO': 'AITO',
+        'Leapmotor': 'Leapmotor',
+        'Xiaomi Auto': 'Xiaomi Auto',
+    }
+    return mapping.get(brand_en, brand_en)
+
+# ===== Brand official domains (entry points) ============================
+# ここは辞書ではなく「クローリング開始URLのリスト」という位置付け
+BRAND_OFFICIAL_SITES: Dict[str, List[str]] = {
+    # 欧米・日系
+    'Toyota': ['https://www.toyota-global.com', 'https://www.toyota.com.cn', 'https://www.toyota.com'],
+    'Nissan': ['https://www.nissan-global.com', 'https://www.nissan.com.cn', 'https://www.nissanusa.com'],
+    'Honda': ['https://global.honda', 'https://www.honda.com.cn', 'https://automobiles.honda.com'],
+    'Volkswagen': ['https://www.vw.com', 'https://www.vw.com.cn', 'https://www.volkswagen-newsroom.com'],
+    'BMW': ['https://www.bmw.com', 'https://www.bmw.com.cn'],
+    'Mercedes-Benz': ['https://www.mercedes-benz.com', 'https://www.mercedes-benz.com.cn'],
+    'Audi': ['https://www.audi.com', 'https://www.audi.cn'],
+    'Buick': ['https://www.buick.com.cn', 'https://www.buick.com'],
+    'Tesla': ['https://www.tesla.com'],
+
+    # 中国系
+    'BYD': ['https://www.byd.com', 'https://www.byd.com/en', 'https://www.byd.com/jp', 'https://www.bydauto.com.cn'],
+    'Geely': ['https://global.geely.com', 'https://www.geely.com'],
+    'Geely Galaxy': ['https://galaxy.geely.com'],
+    'Wuling': ['https://www.sgmw.com.cn', 'https://wuling.id'],
+    'Hongqi': ['https://www.hongqi-auto.com', 'https://www.faw-hongqi.com.cn'],
+    'XPeng': ['https://heyxpeng.com', 'https://en.xiaopeng.com', 'https://www.xiaopeng.com'],
+    'Chery': ['https://www.cheryinternational.com', 'https://www.chery.cn'],
+    'Changan': ['https://www.changan.com.cn', 'https://global.changan.com.cn'],
+    'Haval': ['https://www.haval-global.com', 'https://www.haval.com.cn'],
+    'Leapmotor': ['https://www.leapmotor.com'],
+    'AITO': ['https://www.aitoauto.com'],
+    'Xiaomi Auto': ['https://www.mi.com', 'https://www.mi.com/auto'],
+}
+
+# ===== Google CSE (Official) ===========================================
+
+def cse_search_official(brand_en: str, model_zh: str) -> Optional[str]:
+    """
+    Google CSEでブランド公式サイトを site: で絞り、中国語モデル名で検索。
+    戻り値: モデル英名候補（公式の英語表記をできるだけ抽出）
+    """
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    cse_id = os.environ.get("GOOGLE_CSE_ID")
+    if not api_key or not cse_id:
+        return None
+
+    sites = BRAND_OFFICIAL_SITES.get(brand_en, [])
+    search_bases = []
+    if sites:
+        for s in sites:
+            domain = re.sub(r'^https?://', '', s).strip('/')
+            search_bases.append(f'site:{domain}')
+    # 公式サイトが未登録なら全Webで検索（ただしノイズが増える）
+    if not search_bases:
+        search_bases = ['']
+
+    q_variants = []
+    # 中国語モデル名 + 公式サイト
+    for base in search_bases:
+        base_sp = (base + ' ') if base else ''
+        q_variants.append(f'{base_sp}"{model_zh}"')
+        q_variants.append(f'{base_sp}{model_zh} {brand_en}')
+    # ブランド英名 + 中国語モデル名
+    q_variants.append(f'{brand_en} {model_zh}')
+
+    for q in q_variants[:4]:  # 無駄打ちしすぎない
+        try:
+            url = "https://www.googleapis.com/customsearch/v1"
+            resp = requests.get(url, params={"key": api_key, "cx": cse_id, "q": q, "num": 3}, timeout=15)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            items = data.get("items") or []
+            for it in items:
+                title = norm_space(it.get("title", ""))
+                snippet = norm_space(it.get("snippet", ""))
+                link = it.get("link", "")
+                # URLスラッグから候補
+                slug = None
+                try:
+                    path = re.sub(r'^https?://[^/]+', '', link)
+                    segs = [s for s in path.split('/') if s]
+                    for s in segs[::-1]:
+                        if re.search(r'[a-zA-Z]', s) and not re.match(r'^\d+$', s):
+                            slug = re.sub(r'[-_]', ' ', s)
+                            break
+                except Exception:
+                    pass
+                # タイトル/スニペットから英名候補
+                cand = pick_english_like_token(title) or pick_english_like_token(snippet) or (slug.title() if slug else None)
+                if cand:
+                    return cand
+        except Exception:
+            continue
     return None
 
-def is_model_like_url(url: str, model_cn: str) -> bool:
-    u = url.lower()
-    score = 0
-    # URL ルール
-    for key in ("/model", "/models", "/product", "/products", "/vehicle", "车型", "車型"):
-        if key in u:
-            score += 1
-    # モデル名（漢字）を含むか
-    if model_cn and model_cn in url:
-        score += 1
-    return score >= 1
+# ===== Wikipedia ========================================================
 
-def extract_text_candidates(html: str) -> List[str]:
-    soup = BeautifulSoup(html, "lxml")
-    texts = []
-    # JSON-LD
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(tag.get_text(strip=True))
-            if isinstance(data, dict):
-                for k in ("name","alternateName"):
-                    v = data.get(k)
-                    if isinstance(v, str):
-                        texts.append(v)
-            elif isinstance(data, list):
-                for obj in data:
-                    if isinstance(obj, dict):
-                        for k in ("name","alternateName"):
-                            v = obj.get(k)
-                            if isinstance(v, str):
-                                texts.append(v)
-        except Exception:
-            pass
-    # og:title / title / h1
-    m = soup.find("meta", attrs={"property":"og:title"})
-    if m and m.get("content"):
-        texts.append(m["content"])
-    if soup.title and soup.title.string:
-        texts.append(soup.title.string)
-    for h in soup.find_all(["h1","h2"]):
-        t = h.get_text(" ", strip=True)
-        if t:
-            texts.append(t)
-    # 周辺に英名を置きがちな UI 要素
-    for sel in ["[class*='model']","[class*='title']","[class*='name']","[class*='hero']"]:
-        for el in soup.select(sel):
-            t = el.get_text(" ", strip=True)
-            if t:
-                texts.append(t)
-    # 余計な空白を整理
-    texts = [re.sub(r"\s+", " ", t).strip() for t in texts if t.strip()]
-    return list(dict.fromkeys(texts))  # uniq
+WIKI_AGENT = "china-auto-dashboard-bot/1.0 (contact: your-email@example.com)"
+WIKI_API = "https://zh.wikipedia.org/w/api.php"
 
-def is_bad_en_token(tok: str) -> bool:
-    t = tok.lower().strip(" -")
-    if not t:
-        return True
-    if t in STOPWORDS:
-        return True
-    # 単なるブランド名だけ
-    if t in {"byd","toyota","volkswagen","audi","honda","bmw","mercedes-benz","nissan","geely","wuling","xpeng","leapmotor","haval","buick","hongqi","chery","geely galaxy"}:
-        return True
-    # 汎用語の連結形
-    if len(t) <= 2:
-        return True
-    return False
-
-EN_TOKEN_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9\- ]+[A-Za-z0-9])\b")
-
-def pick_english_model(texts: List[str], model_cn: str) -> Optional[str]:
+def wikipedia_zh_to_en_title(query_zh: str) -> Optional[str]:
     """
-    texts から「英語として妥当な車名」を抽出。
-    - ラテン文字列を拾い、Stopwords を除外
-    - 2〜3語までを優先（例：COROLLA CROSS, TIGGO 8, A6L, CS75 PLUS, YUAN PLUS）
-    - モデル漢字の近傍に括弧で英名がある形も拾う
+    zh で検索 → 最上位ページ → 言語リンクから en タイトル取得。
     """
-    # 括弧併記: 〇〇（COROLLA CROSS）
-    for t in texts:
-        if model_cn and (model_cn in t):
-            m = re.search(r"[（(]([A-Za-z0-9][A-Za-z0-9 \-]+)[)）]", t)
-            if m:
-                cand = m.group(1).strip()
-                if not is_bad_en_token(cand):
-                    return cand
-
-    # ラテン候補を収集
-    cands: List[str] = []
-    for t in texts:
-        for m in EN_TOKEN_RE.finditer(t):
-            tok = m.group(1).strip()
-            if is_bad_en_token(tok):
-                continue
-            # 語数を抑制（例: 長い説明文を避ける）
-            if len(tok.split()) <= 4:
-                cands.append(tok)
-    # 頻度・短さ優先 + 車名らしさ
-    freq: Dict[str,int] = {}
-    for c in cands:
-        freq[c] = freq.get(c, 0) + 1
-    ranked = sorted(freq.items(), key=lambda kv: (-kv[1], len(kv[0])))
-    return ranked[0][0] if ranked else None
-
-def domain_in_whitelist(url: str, brand: str) -> bool:
-    if not brand:
-        return True
-    host = urlparse(url).netloc.lower()
-    allow = OFFICIAL_SITES.get(brand, [])
-    # ブランド名のバリエーションも見る
-    if not allow:
-        # 大まかなホワイトリスト（CSE 側に登録済みであれば自然とここに落ちない）
-        allow = []
-    return any(h in host for h in allow)
-
-def cse_search(q: str, site_domains: List[str], num=5) -> List[Dict]:
-    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
-        return []
-    base = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx": GOOGLE_CSE_ID,
-        "q": q,
-        "num": num,
-        "lr": "lang_zh-CN"
-    }
-    r = requests.get(base, params=params, headers={"User-Agent": UA}, timeout=TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    return data.get("items", [])
-
-def choose_best_cse_item(items: List[Dict], model_cn: str, brand: str) -> Optional[str]:
-    best = None
-    best_score = -1
-    for it in items:
-        url = it.get("link","")
-        title = it.get("title","")
-        snippet = it.get("snippet","")
-        if not url:
-            continue
-        if not domain_in_whitelist(url, brand):
-            continue
-        score = 0
-        U = url.lower()
-        T = (title or "").lower()
-        S = (snippet or "").lower()
-        # モデル名一致
-        if model_cn and model_cn in title:
-            score += 4
-        if model_cn and model_cn in snippet:
-            score += 2
-        if is_model_like_url(U, model_cn):
-            score += 2
-        # 英字車名の典型パターンっぽい語
-        if re.search(r"\b(corolla cross|frontlander|lavida|sagitar|magotan|tayron|tharu|camry|rav4|arrizo|tiggo|binyue|boyue|xingyue|yuan|qin|song|seal|sealion|seagull|dolphin|accor|a6l|cs75|sylphy|monjaro)\b", T+S):
-            score += 1
-        if score > best_score:
-            best, best_score = url, score
-    return best
-
-def resolve_official_en(brand: str, model_cn: str) -> Tuple[Optional[str], Optional[str], float]:
-    """
-    公式サイトから英語モデル名を推定。
-    戻り: (model_official_en, source_url, confidence)
-    """
-    brand_key = brand.strip() if brand else ""
-    site_domains = OFFICIAL_SITES.get(brand_key, [])
-    q = f"{brand} {model_cn}"
-    items = cse_search(q, site_domains, num=6)
-    # 1st try: そのままのクエリ
-    url = choose_best_cse_item(items, model_cn, brand_key)
-    # 2nd: “site:” を含めた明示（CSE は内部でホワイトリストを持つが、保険）
-    if not url and site_domains:
-        q2 = f"{brand} {model_cn} site:{site_domains[0]}"
-        items2 = cse_search(q2, site_domains, num=6)
-        url = choose_best_cse_item(items2, model_cn, brand_key)
-
-    if not url:
-        return None, None, 0.0
-
-    html = http_get(url)
-    if not html:
-        return None, url, 0.3
-
-    texts = extract_text_candidates(html)
-    en = pick_english_model(texts, model_cn)
-
-    # 言語切替リンクを自動探索（/en or ?lang=en）
-    if not en:
-        alt_links = re.findall(r'href=["\']([^"\']+(?:/en|\?lang=en)[^"\']*)["\']', html, flags=re.I)
-        alt_links = [l for l in alt_links if urlparse(l).netloc or l.startswith("/")]
-        if alt_links:
-            alt = alt_links[0]
-            if not urlparse(alt).netloc:
-                # 相対 → 絶対
-                base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
-                alt = base + alt
-            html2 = http_get(alt)
-            if html2:
-                texts2 = extract_text_candidates(html2)
-                en = pick_english_model(texts2, model_cn)
-
-    # フォールバック: JSON-LD alternateName のみでもOK
-    if not en:
-        # 最弱のフォールバック：ピンイン化は避けたいが、全く無いよりはまし
-        # ここでは“L/PLUS/PRO/EV/DM-i/数字”はそのまま残す簡易ローマナイズ
-        # （辞書ではなく、記号維持＋漢字部分は無視 or 既出のラテンを採用）
-        if re.search(r"[A-Za-z0-9]", model_cn):
-            en = model_cn  # 既にラテン含み（例：A6L, DM-i など）
-        else:
-            en = None  # 「辞書化を避けたい」方針に合わせ、最終手段も抑制
-
-    conf = 0.9 if en else 0.3
-    return en, url, conf
-
-# -------------------------
-# LLM（ja翻訳）：最小限
-# -------------------------
-def translate_to_ja(text: str) -> str:
-    # OPENAI_API_KEY が無ければ原文返し（ワークフローは通る）
-    if not OPENAI_API_KEY or not text:
-        return text
     try:
-        import openai  # 公式SDK v1系でも互換的に使える簡易呼び出し
-        client = openai.OpenAI(api_key=OPENAI_API_KEY)
-        prompt = f"自動車ブランド/車名の自然な日本語訳だけを返してください。余計な説明は不要。: {text}"
-        rsp = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "gpt-4o"),
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.2,
-        )
-        out = rsp.choices[0].message.content.strip()
-        return out or text
+        # 1) search
+        r = requests.get(WIKI_API, params={
+            "action": "query",
+            "list": "search",
+            "srsearch": query_zh,
+            "srlimit": 1,
+            "format": "json"
+        }, headers={"User-Agent": WIKI_AGENT}, timeout=15)
+        if r.status_code != 200:
+            return None
+        js = r.json()
+        hits = js.get("query", {}).get("search", [])
+        if not hits:
+            return None
+        page_title_zh = hits[0]["title"]
+
+        # 2) langlinks to en
+        r2 = requests.get(WIKI_API, params={
+            "action": "query",
+            "prop": "langlinks",
+            "titles": page_title_zh,
+            "lllanguages": "en",
+            "lllimit": 50,
+            "format": "json"
+        }, headers={"User-Agent": WIKI_AGENT}, timeout=15)
+        if r2.status_code != 200:
+            return None
+        js2 = r2.json()
+        pages = js2.get("query", {}).get("pages", {})
+        for _, p in pages.items():
+            lls = p.get("langlinks", []) or []
+            for ll in lls:
+                if ll.get("lang") == "en":
+                    return ll.get("*")  # English page title
+        # enが無い場合は zh タイトルをローマ字化せず、そのまま（最後のLLMに回す）
+        return None
     except Exception:
-        return text
+        return None
 
-# -------------------------
-# Cache
-# -------------------------
-def load_cache(path: str) -> Dict:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+# ===== LLM (OpenAI) =====================================================
 
-def save_cache(path: str, data: Dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def llm_translate_brand_model(brand_zh: str, model_zh: str, model_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    LLMでブランド英名とモデル英名（輸出名・グローバル名）を推定。
+    """
+    import json
+    import openai  # openai>=1.0 style
+    openai.api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai.api_key:
+        return None, None
 
-# -------------------------
-# Main
-# -------------------------
-def main():
-    args = parse_args()
-    df = pd.read_csv(args.input)
-    cache = load_cache(args.cache)
+    system = (
+        "You are an automotive product nomenclature expert. "
+        "Given a car brand (in Chinese) and model (in Chinese), output the global English brand name "
+        "and the official/export English model name used outside China. If the model has no English export name, "
+        "return a faithful English rendering that matches how the brand markets it domestically (e.g., Qin PLUS -> Qin PLUS). "
+        "Return JSON with keys: brand_en, model_en."
+    )
+    user = f"brand_zh: {brand_zh}\nmodel_zh: {model_zh}"
 
-    # 出力列を準備（既に存在していれば上書きしない）
-    for col in (args.brand_ja_col, args.model_ja_col, "model_official_en", "model_official_en_source", "model_official_en_conf"):
-        if col not in df.columns:
-            df[col] = ""
+    try:
+        resp = openai.ChatCompletion.create(  # for compat with older SDKs used on Actions
+            model=model_name,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            temperature=0.0,
+            timeout=30
+        )
+        content = resp["choices"][0]["message"]["content"]
+        m = re.search(r'\{.*\}', content, flags=re.S)
+        if not m:
+            return None, None
+        data = json.loads(m.group(0))
+        be = data.get("brand_en")
+        me = data.get("model_en")
+        return (be.strip() if be else None, me.strip() if me else None)
+    except Exception:
+        return None, None
 
-    # ユニーク化して無駄なCSE呼び出しを減らす
-    pairs = df[[args.brand_col, args.model_col]].drop_duplicates().values.tolist()
+# ===== Resolution pipeline ==============================================
 
-    # 公式英名の解決
-    for brand, model in pairs:
-        key = f"{brand}|||{model}"
-        if key in cache and all(k in cache[key] for k in ("en","src","conf")):
-            en, src, conf = cache[key]["en"], cache[key]["src"], cache[key]["conf"]
-        else:
-            en, src, conf = resolve_official_en(brand, model)
-            cache[key] = {"en": en, "src": src, "conf": conf}
-            time.sleep(args.sleep)
+def resolve_brand_en(brand_zh: str, llm_model: str) -> str:
+    """
+    ブランド英名の標準化：Official→Wiki→LLM の順で。
+    ただしブランドはモデルより揺れが少ないため、最終的に英字ブランドを返し、JP有名どころはカタカナに置換。
+    """
+    # 1) LLM 少量（ブランドは短いので負荷小）
+    brand_en = None
+    be1, _ = llm_translate_brand_model(brand_zh, "", llm_model)
+    if be1:
+        brand_en = be1
 
-        mask = (df[args.brand_col] == brand) & (df[args.model_col] == model)
+    # 2) Wikipedia: brand 単体検索 → en title
+    if not brand_en:
+        en = wikipedia_zh_to_en_title(brand_zh)
         if en:
-            df.loc[mask, "model_official_en"] = en
-        if src:
-            df.loc[mask, "model_official_en_source"] = src
-        if conf:
-            df.loc[mask, "model_official_en_conf"] = conf
+            brand_en = en
 
-    # ja翻訳（従来互換）
-    if args.brand_ja_col in df.columns:
-        df[args.brand_ja_col] = df[args.brand_ja_col].where(df[args.brand_ja_col].astype(str).str.len()>0,
-                                                            df[args.brand_col].astype(str).map(translate_to_ja))
-    if args.model_ja_col in df.columns:
-        df[args.model_ja_col] = df[args.model_ja_col].where(df[args.model_ja_col].astype(str).str.len()>0,
-                                                            df[args.model_col].astype(str).map(translate_to_ja))
+    # 3) 最後のフォールバック：そのまま
+    if not brand_en:
+        brand_en = brand_zh
 
-    df.to_csv(args.output, index=False, encoding="utf-8")
-    save_cache(args.cache, cache)
+    # 表示はできるだけ既知の日本語表記へ
+    return katakana_brand_friendly(brand_en)
+
+def resolve_model_en(brand_en: str, model_zh: str, llm_model: str) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    モデル英名の決定: Official(CSE) -> Wikipedia -> LLM
+    戻り値: (model_ja/global_en, model_official_en, source)
+    """
+    # 1) Official（CSE）
+    off = cse_search_official(brand_en, model_zh)
+    if off:
+        return off, off, "official"
+
+    # 2) Wikipedia
+    wiki_en = wikipedia_zh_to_en_title(model_zh)
+    if wiki_en:
+        return wiki_en, None, "wikipedia"
+
+    # 3) LLM
+    be, me = llm_translate_brand_model(brand_en, model_zh, llm_model)
+    if me:
+        return me, None, "llm"
+
+    # 4) どうしても出ない場合は中国語のまま
+    return model_zh, None, "none"
+
+# ===== Main =============================================================
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--output", required=True)
+    ap.add_argument("--brand-col", dest="brand_col", default="brand")
+    ap.add_argument("--model-col", dest="model_col", default="model")
+    ap.add_argument("--brand-ja-col", dest="brand_ja_col", default="brand_ja")
+    ap.add_argument("--model-ja-col", dest="model_ja_col", default="model_ja")
+    ap.add_argument("--model", dest="llm_model", default="gpt-4o-mini")
+    ap.add_argument("--sleep", type=float, default=0.1)
+    args = ap.parse_args()
+
+    df = pd.read_csv(args.input)
+    for col in [args.brand_col, args.model_col]:
+        if col not in df.columns:
+            raise RuntimeError(f"Input must contain '{col}'. columns={list(df.columns)}")
+
+    # 出力列を用意
+    if args.brand_ja_col not in df.columns:
+        df[args.brand_ja_col] = ""
+    if args.model_ja_col not in df.columns:
+        df[args.model_ja_col] = ""
+    if "model_official_en" not in df.columns:
+        df["model_official_en"] = ""
+    if "source_model" not in df.columns:
+        df["source_model"] = ""
+
+    brands = df[args.brand_col].fillna("").astype(str).unique().tolist()
+    # ブランド英名の解決（重複最適化）
+    resolved_brand_en: Dict[str, str] = {}
+    for b in tqdm(brands, desc="brand"):
+        if not b:
+            continue
+        try:
+            # まず LLM/Wiki で英名（=brand_ja）へ（既知はカタカナ化）
+            be_display = resolve_brand_en(b, args.llm_model)
+            resolved_brand_en[b] = be_display if be_display else b
+            time.sleep(args.sleep)
+        except Exception:
+            resolved_brand_en[b] = b
+
+    # 行ごとにモデル解決
+    model_cache: Dict[Tuple[str, str], Tuple[str, Optional[str], str]] = {}
+    rows = []
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="model"):
+        brand_zh = str(row[args.brand_col]) if pd.notna(row[args.brand_col]) else ""
+        model_zh = str(row[args.model_col]) if pd.notna(row[args.model_col]) else ""
+        brand_disp = resolved_brand_en.get(brand_zh, brand_zh)
+
+        key = (brand_disp, model_zh)
+        if key not in model_cache:
+            try:
+                m_ja, m_off, src = resolve_model_en(brand_disp if brand_disp else brand_zh, model_zh, args.llm_model)
+                model_cache[key] = (m_ja, m_off, src)
+                time.sleep(args.sleep)
+            except Exception:
+                model_cache[key] = (model_zh, None, "none")
+        m_ja, m_off, src = model_cache[key]
+
+        row_out = row.copy()
+        row_out[args.brand_ja_col] = brand_disp
+        row_out[args.model_ja_col] = m_ja or ""
+        row_out["model_official_en"] = m_off or ""
+        row_out["source_model"] = src
+        rows.append(row_out)
+
+    out_df = pd.DataFrame(rows, columns=df.columns.tolist() + [args.brand_ja_col, args.model_ja_col, "model_official_en", "source_model"])
+    out_df.to_csv(args.output, index=False)
     print(f"Wrote: {args.output}")
 
 if __name__ == "__main__":
