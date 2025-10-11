@@ -8,14 +8,14 @@ on:
         required: true
         default: "https://www.autohome.com.cn/rank/1"
   schedule:
-    # 毎月11日 09:10 (UTC) に実行（中国サイトの集計更新に合わせて少し遅らせる）
+    # 毎月11日 09:10 (UTC)
     - cron: "10 9 11 * *"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # ← push する場合に必要（Settings > Actions > Workflow permissions も「Read and write」に）
+      contents: write
     env:
       PYTHONUTF8: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -45,11 +45,10 @@ jobs:
           python -m pip install -U pip
           pip install playwright
           python -m playwright install chromium
-          # Ubuntu ランタイムに必要な依存を入れる
           python -m playwright install-deps
 
-      # -------- Stage 1: ランキング → ベースCSV（リンク等を確実に取得） --------
-      - name: Run Stage1 (rank list → base CSV)
+      # ---------- Stage 1: ランキング → 一時CSV ----------
+      - name: Run Stage1 (rank list → tmp CSV)
         run: |
           mkdir -p data
           python tools/rank1_stage1_ranklist.py \
@@ -58,41 +57,35 @@ jobs:
             --wait-ms 220 \
             --max-scrolls 220
 
-      # 中間物を保存（デバッグやダウンロード用）
-      - name: Upload base CSV (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: rank1_base
-          path: data/rank1_base.csv
-          if-no-files-found: error
-
-      # -------- Stage 2: 各シリーズページ巡回 → title / 種別 追記 --------
-      - name: Run Stage2 (enrich CSV)
+      # ---------- Stage 2: 各シリーズページ巡回 → brand.csv ----------
+      - name: Run Stage2 (enrich → brand.csv)
         run: |
           python tools/rank1_stage2_enrich.py \
             --inp "data/rank1_base.csv" \
-            --out "data/rank1_enriched.csv"
+            --out "data/brand.csv"
+          # デバッグ不要なら一時ファイルを消す
+          rm -f data/rank1_base.csv
 
-      - name: Upload enriched CSV (artifact)
+      # 生成物をダウンロードできるように（任意）
+      - name: Upload brand.csv (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: rank1_enriched
-          path: data/rank1_enriched.csv
+          name: brand_csv
+          path: data/brand.csv
           if-no-files-found: error
 
-      # -------- 変更がある場合のみコミット＆プッシュ --------
+      # ---------- 変更がある場合のみコミット＆プッシュ ----------
       - name: Commit & push results
-        if: ${{ github.ref == 'refs/heads/main' }}  # main ブランチでのみ
+        if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # 変更があるか確認
-          if git diff --quiet -- data/rank1_base.csv data/rank1_enriched.csv; then
+          if git diff --quiet -- data/brand.csv; then
             echo "No changes to commit."
             exit 0
           fi
-          git add data/rank1_base.csv data/rank1_enriched.csv
-          msg="data: rank/1 scraped & enriched ($(date -u +'%Y-%m-%dT%H:%MZ'))"
+          git add data/brand.csv
+          msg="data: brand.csv updated ($(date -u +'%Y-%m-%dT%H:%MZ'))"
           git commit -m "${msg}"
           git push
