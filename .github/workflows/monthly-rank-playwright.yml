@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: '0 2 * * *'  # 毎日 11:00JST に相当(必要に応じて)
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
