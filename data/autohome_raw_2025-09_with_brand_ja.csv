@@ -1,51 +1,51 @@
-rank_seq,rank,brand,model,count,series_url,brand_ja,model_ja,model_official_en,source_model
-1,1,未知,星愿,46057,https://www.autohome.com.cn/7806/,未知,Form,Form,official
-2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/5769/,テスラ,Technological Innovations,Technological Innovations,official
-3,3,五菱,宏光MINIEV,37828,https://www.autohome.com.cn/5714/,五菱,E10,E10,official
-4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/5964/,BYD,Other,Other,official
-5,5,日产,轩逸,27695,https://www.autohome.com.cn/448/,日产,Nov,Nov,official
-6,6,金杯,海狮06新能源,25453,https://www.autohome.com.cn/8087/,金杯,Years,Years,official
-7,7,比亚迪,秦L,25380,https://www.autohome.com.cn/7578/,BYD,Form,Form,official
-8,8,比亚迪,海豹,24353,https://www.autohome.com.cn/7588/,BYD,Earless seal,Earless seal,wikipedia
-9,9,大众,朗逸,24320,https://www.autohome.com.cn/614/,フォルクスワーゲン,Cookie,Cookie,official
-10,10,吉利,博越L,24160,https://www.autohome.com.cn/6814/,吉利,E15,E15,official
-11,11,比亚迪,海鸥,23031,https://www.autohome.com.cn/6762/,BYD,Image Alt,Image Alt,official
-12,12,赛力斯,问界M8,21537,https://www.autohome.com.cn/8003/,赛力斯,M8,M8,llm
-13,13,未知,小米SU7,19848,https://www.autohome.com.cn/6962/,未知,Apr,Apr,official
-14,14,比亚迪,元UP,19647,https://www.autohome.com.cn/7538/,BYD,Pro,Pro,official
-15,15,大众,速腾,19074,https://www.autohome.com.cn/442/,フォルクスワーゲン,Robo,Robo,official
-16,16,大众,帕萨特,18695,https://www.autohome.com.cn/528/,フォルクスワーゲン,Cookie,Cookie,official
-17,17,大众,途观L,18466,https://www.autohome.com.cn/4274/,フォルクスワーゲン,Tiguan,Tiguan,official
-18,18,丰田,RAV4荣放,18312,https://www.autohome.com.cn/770/,トヨタ,V4,V4,official
-19,19,吉利,星越L,17758,https://www.autohome.com.cn/6004/,吉利,H3,H3,official
-20,20,特斯拉,Model 3,17739,https://www.autohome.com.cn/5346/,テスラ,Years,Years,official
-21,21,丰田,卡罗拉锐放,17644,https://www.autohome.com.cn/6428/,トヨタ,V4,V4,official
-22,22,大众,迈腾,16969,https://www.autohome.com.cn/496/,フォルクスワーゲン,Magotan,Magotan,official
-23,23,未知,小米YU7,16548,https://www.autohome.com.cn/7793/,未知,Years,Years,official
-24,24,奇瑞,瑞虎8,15695,https://www.autohome.com.cn/4693/,Chery,Annual Report,Annual Report,official
-25,25,丰田,凯美瑞,15526,https://www.autohome.com.cn/110/,トヨタ,Sport,Sport,official
-26,26,未知,小鹏MONA M03,15333,https://www.autohome.com.cn/6998/,未知,Sep,Sep,official
-27,27,大众,探岳,15189,https://www.autohome.com.cn/4744/,フォルクスワーゲン,Cookie,Cookie,official
-28,28,丰田,锋兰达,14920,https://www.autohome.com.cn/6414/,トヨタ,V4,V4,official
-29,29,长安汽车,长安Lumin,14570,https://www.autohome.com.cn/6674/,长安汽车,Lumin,Lumin,official
-30,30,哈弗,哈弗大狗,14457,https://www.autohome.com.cn/5770/,ハバル,Feb,Feb,official
-31,31,比亚迪,海豚,13968,https://www.autohome.com.cn/6139/,BYD,Other,Other,official
-32,32,大众,途岳,13693,https://www.autohome.com.cn/4745/,フォルクスワーゲン,Tavendor,Tavendor,official
-33,33,长安汽车,逸动,13637,https://www.autohome.com.cn/2429/,长安汽车,A06,A06,official
-34,34,比亚迪,海豹05 DM-i,13495,https://www.autohome.com.cn/7981/,BYD,F3,F3,official
-35,35,未知,零跑C10,13384,https://www.autohome.com.cn/7382/,未知,Aug,Aug,official
-36,36,本田,CR-V,13277,https://www.autohome.com.cn/314/,ホンダ,V4,V4,official
-37,37,比亚迪,宋PLUS新能源,13098,https://www.autohome.com.cn/5761/,BYD,Woven City,Woven City,official
-38,38,奥迪,奥迪A6L,12941,https://www.autohome.com.cn/18/,アウディ,Audi A6,Audi A6,wikipedia
-39,39,比亚迪,宋Pro新能源,12681,https://www.autohome.com.cn/5279/,BYD,Song Pro EV,Song Pro EV,llm
-40,40,奇瑞,艾瑞泽8,12577,https://www.autohome.com.cn/6664/,Chery,Form,Form,official
-41,41,长安,长安CS75 PLUS,12179,https://www.autohome.com.cn/5179/,長安自動車,Mar,Mar,official
-42,42,宝马,3系,12157,https://www.autohome.com.cn/66/,BMW,3 Series,3 Series,llm
-43,43,五菱,缤果,12078,https://www.autohome.com.cn/7045/,五菱,Mar,Mar,official
-44,44,吉利,银河A7,12078,https://www.autohome.com.cn/8158/,吉利,M9,M9,official
-45,45,比亚迪,元PLUS,11984,https://www.autohome.com.cn/6298/,BYD,Mar,Mar,official
-46,46,奔驰,C级,11951,https://www.autohome.com.cn/588/,メルセデス・ベンツ,Apr,Apr,official
-47,47,别克,昂科威Plus,11929,https://www.autohome.com.cn/3554/,ビュイック,Aug,Aug,official
-48,48,本田,雅阁,11929,https://www.autohome.com.cn/78/,ホンダ,Honda Accord,Honda Accord,wikipedia
-49,49,红旗,红旗H5,11882,https://www.autohome.com.cn/4410/,紅旗,Corolla Axio,Corolla Axio,official
-50,50,吉利,缤越,11761,https://www.autohome.com.cn/4701/,吉利,E15,E15,official
+rank_seq,rank,brand,model,count,series_url,title_raw,brand_ja,model_ja,model_official_en,source_model
+1,1,未知,星愿,46057,https://www.autohome.com.cn/110000/,"汽车之家_看车 买车 用车 换车,省时省心省钱!",未知,吉利星愿,吉利星愿,official
+2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/230531409/,"汽车之家_看车 买车 用车 换车,省时省心省钱!",特斯拉,"Tesla, Inc. Wikipedia","Tesla, Inc. Wikipedia",official
+3,3,五菱,宏光MINIEV,37828,https://www.autohome.com.cn/268471935/,"汽车之家_看车 买车 用车 换车,省时省心省钱!",五菱,上汽通用五菱SGMW官网- 人民需要什么，五菱就造什么！,上汽通用五菱SGMW官网- 人民需要什么，五菱就造什么！,official
+4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/268471927/,"汽车之家_看车 买车 用车 换车,省时省心省钱!",比亚迪,比亚迪汽车官方网站首页- 新能源汽车世界冠军,比亚迪汽车官方网站首页- 新能源汽车世界冠军,official
+5,5,日产,轩逸,27695,https://www.autohome.com.cn/268471923/,"汽车之家_看车 买车 用车 换车,省时省心省钱!",日产,Category:Nissan Sylphy Wikimedia Commons,Category:Nissan Sylphy Wikimedia Commons,official
+6,6,金杯,海狮06新能源,25453,,,金杯,Jinbei Haise X30L Wikipedia,Jinbei Haise X30L Wikipedia,official
+7,7,比亚迪,秦L,25380,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+8,8,比亚迪,海豹,24353,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+9,9,大众,朗逸,24320,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+10,10,吉利,博越L,24160,,,吉利,星越L,星越L,official
+11,11,比亚迪,海鸥,23031,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+12,12,赛力斯,问界M8,21537,,,赛力斯,AITO 汽车- 赛力斯华为联合设计,AITO 汽车- 赛力斯华为联合设计,official
+13,13,未知,小米SU7,19848,,,未知,小米澎湃OS 維基百科，自由的百科全書,小米澎湃OS 維基百科，自由的百科全書,official
+14,14,比亚迪,元UP,19647,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+15,15,大众,速腾,19074,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+16,16,大众,帕萨特,18695,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+17,17,大众,途观L,18466,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+18,18,丰田,RAV4荣放,18312,,,丰田,RAV4 荣放智能电混双擎 丰田中国官方网站- 全线车系,RAV4 荣放智能电混双擎 丰田中国官方网站- 全线车系,official
+19,19,吉利,星越L,17758,,,吉利,星越L,星越L,official
+20,20,特斯拉,Model 3,17739,,,特斯拉,"Tesla, Inc. Wikipedia","Tesla, Inc. Wikipedia",official
+21,21,丰田,卡罗拉锐放,17644,,,丰田,RAV4 荣放智能电混双擎 丰田中国官方网站- 全线车系,RAV4 荣放智能电混双擎 丰田中国官方网站- 全线车系,official
+22,22,大众,迈腾,16969,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+23,23,未知,小米YU7,16548,,,未知,Fang Cheng Bao Wikipedia,Fang Cheng Bao Wikipedia,official
+24,24,奇瑞,瑞虎8,15695,,,奇瑞,奇瑞汽车官方网站,奇瑞汽车官方网站,official
+25,25,丰田,凯美瑞,15526,,,丰田,丰田中国官方网站- 首页,丰田中国官方网站- 首页,official
+26,26,未知,小鹏MONA M03,15333,,,未知,未知 小鹏MONA M03,未知 小鹏MONA M03,llm
+27,27,大众,探岳,15189,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+28,28,丰田,锋兰达,14920,,,丰田,Toyota Corolla Cross Wikipedia,Toyota Corolla Cross Wikipedia,official
+29,29,长安汽车,长安Lumin,14570,,,长安汽车,长安汽车官方网站,长安汽车官方网站,official
+30,30,哈弗,哈弗大狗,14457,,,哈弗,Haval Big Dog Wikipedia,Haval Big Dog Wikipedia,official
+31,31,比亚迪,海豚,13968,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+32,32,大众,途岳,13693,,,大众,大众汽车中国官方网站,大众汽车中国官方网站,official
+33,33,长安汽车,逸动,13637,,,长安汽车,长安汽车官方网站,长安汽车官方网站,official
+34,34,比亚迪,海豹05 DM-i,13495,,,比亚迪,比亚迪汽车官方网站首页- 新能源汽车世界冠军,比亚迪汽车官方网站首页- 新能源汽车世界冠军,official
+35,35,未知,零跑C10,13384,,,未知,馬克昂巴勒爾- 維基百科，自由的百科全書,馬克昂巴勒爾- 維基百科，自由的百科全書,official
+36,36,本田,CR-V,13277,,,本田,Honda ZR-V Wikipedia,Honda ZR-V Wikipedia,official
+37,37,比亚迪,宋PLUS新能源,13098,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+38,38,奥迪,奥迪A6L,12941,,,奥迪,Audi A6 Wikipedia,Audi A6 Wikipedia,official
+39,39,比亚迪,宋Pro新能源,12681,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+40,40,奇瑞,艾瑞泽8,12577,,,奇瑞,2025款艾瑞泽8,2025款艾瑞泽8,official
+41,41,长安,长安CS75 PLUS,12179,,,长安,长安汽车官方网站,长安汽车官方网站,official
+42,42,宝马,3系,12157,,,宝马,BMW Series Wikipedia,BMW Series Wikipedia,official
+43,43,五菱,缤果,12078,,,五菱,上汽通用五菱SGMW官网- 人民需要什么，五菱就造什么！,上汽通用五菱SGMW官网- 人民需要什么，五菱就造什么！,official
+44,44,吉利,银河A7,12078,,,吉利,Geely Global,Geely Global,official
+45,45,比亚迪,元PLUS,11984,,,比亚迪,"Electric Cars, Sedans and","Electric Cars, Sedans and",official
+46,46,奔驰,C级,11951,,,奔驰,Mercedes-Benz E-Class (W213) Wikipedia,Mercedes-Benz E-Class (W213) Wikipedia,official
+47,47,别克,昂科威Plus,11929,,,别克,Buick Envision Wikipedia,Buick Envision Wikipedia,official
+48,48,本田,雅阁,11929,,,本田,Honda Accord Wikipedia,Honda Accord Wikipedia,official
+49,49,红旗,红旗H5,11882,,,红旗,HONGQI AUTO OFFICIAL WEBSITE,HONGQI AUTO OFFICIAL WEBSITE,official
+50,50,吉利,缤越,11761,,,吉利,新缤越,新缤越,official

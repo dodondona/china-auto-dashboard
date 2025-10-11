@@ -1,51 +1,51 @@
-﻿rank_seq,rank,brand,model,count,series_url
-1,1,未知,星愿,46057,https://www.autohome.com.cn/7806/
-2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/5769/
-3,3,五菱,宏光MINIEV,37828,https://www.autohome.com.cn/5714/
-4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/5964/
-5,5,日产,轩逸,27695,https://www.autohome.com.cn/448/
-6,6,金杯,海狮06新能源,25453,https://www.autohome.com.cn/8087/
-7,7,比亚迪,秦L,25380,https://www.autohome.com.cn/7578/
-8,8,比亚迪,海豹,24353,https://www.autohome.com.cn/7588/
-9,9,大众,朗逸,24320,https://www.autohome.com.cn/614/
-10,10,吉利,博越L,24160,https://www.autohome.com.cn/6814/
-11,11,比亚迪,海鸥,23031,https://www.autohome.com.cn/6762/
-12,12,赛力斯,问界M8,21537,https://www.autohome.com.cn/8003/
-13,13,未知,小米SU7,19848,https://www.autohome.com.cn/6962/
-14,14,比亚迪,元UP,19647,https://www.autohome.com.cn/7538/
-15,15,大众,速腾,19074,https://www.autohome.com.cn/442/
-16,16,大众,帕萨特,18695,https://www.autohome.com.cn/528/
-17,17,大众,途观L,18466,https://www.autohome.com.cn/4274/
-18,18,丰田,RAV4荣放,18312,https://www.autohome.com.cn/770/
-19,19,吉利,星越L,17758,https://www.autohome.com.cn/6004/
-20,20,特斯拉,Model 3,17739,https://www.autohome.com.cn/5346/
-21,21,丰田,卡罗拉锐放,17644,https://www.autohome.com.cn/6428/
-22,22,大众,迈腾,16969,https://www.autohome.com.cn/496/
-23,23,未知,小米YU7,16548,https://www.autohome.com.cn/7793/
-24,24,奇瑞,瑞虎8,15695,https://www.autohome.com.cn/4693/
-25,25,丰田,凯美瑞,15526,https://www.autohome.com.cn/110/
-26,26,未知,小鹏MONA M03,15333,https://www.autohome.com.cn/6998/
-27,27,大众,探岳,15189,https://www.autohome.com.cn/4744/
-28,28,丰田,锋兰达,14920,https://www.autohome.com.cn/6414/
-29,29,长安汽车,长安Lumin,14570,https://www.autohome.com.cn/6674/
-30,30,哈弗,哈弗大狗,14457,https://www.autohome.com.cn/5770/
-31,31,比亚迪,海豚,13968,https://www.autohome.com.cn/6139/
-32,32,大众,途岳,13693,https://www.autohome.com.cn/4745/
-33,33,长安汽车,逸动,13637,https://www.autohome.com.cn/2429/
-34,34,比亚迪,海豹05 DM-i,13495,https://www.autohome.com.cn/7981/
-35,35,未知,零跑C10,13384,https://www.autohome.com.cn/7382/
-36,36,本田,CR-V,13277,https://www.autohome.com.cn/314/
-37,37,比亚迪,宋PLUS新能源,13098,https://www.autohome.com.cn/5761/
-38,38,奥迪,奥迪A6L,12941,https://www.autohome.com.cn/18/
-39,39,比亚迪,宋Pro新能源,12681,https://www.autohome.com.cn/5279/
-40,40,奇瑞,艾瑞泽8,12577,https://www.autohome.com.cn/6664/
-41,41,长安,长安CS75 PLUS,12179,https://www.autohome.com.cn/5179/
-42,42,宝马,3系,12157,https://www.autohome.com.cn/66/
-43,43,五菱,缤果,12078,https://www.autohome.com.cn/7045/
-44,44,吉利,银河A7,12078,https://www.autohome.com.cn/8158/
-45,45,比亚迪,元PLUS,11984,https://www.autohome.com.cn/6298/
-46,46,奔驰,C级,11951,https://www.autohome.com.cn/588/
-47,47,别克,昂科威Plus,11929,https://www.autohome.com.cn/3554/
-48,48,本田,雅阁,11929,https://www.autohome.com.cn/78/
-49,49,红旗,红旗H5,11882,https://www.autohome.com.cn/4410/
-50,50,吉利,缤越,11761,https://www.autohome.com.cn/4701/
+rank_seq,rank,brand,model,count,series_url
+1,1,未知,星愿,46057,https://www.autohome.com.cn/110000/
+2,2,特斯拉,Model Y,39413,https://www.autohome.com.cn/230531409/
+3,3,五菱,宏光MINIEV,37828,https://www.autohome.com.cn/268471935/
+4,4,比亚迪,秦PLUS,35800,https://www.autohome.com.cn/268471927/
+5,5,日产,轩逸,27695,https://www.autohome.com.cn/268471923/
+6,6,金杯,海狮06新能源,25453,
+7,7,比亚迪,秦L,25380,
+8,8,比亚迪,海豹,24353,
+9,9,大众,朗逸,24320,
+10,10,吉利,博越L,24160,
+11,11,比亚迪,海鸥,23031,
+12,12,赛力斯,问界M8,21537,
+13,13,未知,小米SU7,19848,
+14,14,比亚迪,元UP,19647,
+15,15,大众,速腾,19074,
+16,16,大众,帕萨特,18695,
+17,17,大众,途观L,18466,
+18,18,丰田,RAV4荣放,18312,
+19,19,吉利,星越L,17758,
+20,20,特斯拉,Model 3,17739,
+21,21,丰田,卡罗拉锐放,17644,
+22,22,大众,迈腾,16969,
+23,23,未知,小米YU7,16548,
+24,24,奇瑞,瑞虎8,15695,
+25,25,丰田,凯美瑞,15526,
+26,26,未知,小鹏MONA M03,15333,
+27,27,大众,探岳,15189,
+28,28,丰田,锋兰达,14920,
+29,29,长安汽车,长安Lumin,14570,
+30,30,哈弗,哈弗大狗,14457,
+31,31,比亚迪,海豚,13968,
+32,32,大众,途岳,13693,
+33,33,长安汽车,逸动,13637,
+34,34,比亚迪,海豹05 DM-i,13495,
+35,35,未知,零跑C10,13384,
+36,36,本田,CR-V,13277,
+37,37,比亚迪,宋PLUS新能源,13098,
+38,38,奥迪,奥迪A6L,12941,
+39,39,比亚迪,宋Pro新能源,12681,
+40,40,奇瑞,艾瑞泽8,12577,
+41,41,长安,长安CS75 PLUS,12179,
+42,42,宝马,3系,12157,
+43,43,五菱,缤果,12078,
+44,44,吉利,银河A7,12078,
+45,45,比亚迪,元PLUS,11984,
+46,46,奔驰,C级,11951,
+47,47,别克,昂科威Plus,11929,
+48,48,本田,雅阁,11929,
+49,49,红旗,红旗H5,11882,
+50,50,吉利,缤越,11761,
