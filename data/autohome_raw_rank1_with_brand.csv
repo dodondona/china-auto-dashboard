@@ -1,51 +1,51 @@
-﻿rank_seq,rank,seriesname,series_url,brand,model,brand_conf,series_conf,title_raw,count
-1,1,星愿,https://www.autohome.com.cn/7806,,,0.0,0.0,【星愿】吉利银河_星愿报价_星愿图片_汽车之家,46057
-2,2,Model Y,https://www.autohome.com.cn/5769,,,0.0,0.0,【Model Y】特斯拉_Model Y报价_Model Y图片_汽车之家,39413
-3,3,宏光MINIEV,https://www.autohome.com.cn/5714,,,0.0,0.0,【宏光MINIEV】五菱汽车_宏光MINIEV报价_宏光MINIEV图片_汽车之家,37828
-4,4,秦PLUS,https://www.autohome.com.cn/5964,,,0.0,0.0,【秦PLUS】比亚迪_秦PLUS报价_秦PLUS图片_汽车之家,35800
-5,5,轩逸,https://www.autohome.com.cn/448,,,0.0,0.0,【轩逸】日产_轩逸报价_轩逸图片_汽车之家,27695
-6,6,海狮06新能源,https://www.autohome.com.cn/8087,,,0.0,0.0,【海狮06新能源】比亚迪_海狮06新能源报价_海狮06新能源图片_汽车之家,25453
-7,7,秦L,https://www.autohome.com.cn/7578,,,0.0,0.0,【秦L】比亚迪_秦L报价_秦L图片_汽车之家,25380
-8,8,海豹06新能源,https://www.autohome.com.cn/7588,,,0.0,0.0,【海豹06新能源】比亚迪_海豹06新能源报价_海豹06新能源图片_汽车之家,24353
-9,9,朗逸,https://www.autohome.com.cn/614,,,0.0,0.0,【朗逸】大众_朗逸报价_朗逸图片_汽车之家,24320
-10,10,博越L,https://www.autohome.com.cn/6814,,,0.0,0.0,【博越L】吉利汽车_博越L报价_博越L图片_汽车之家,24169
-11,11,海鸥,https://www.autohome.com.cn/6762,,,0.0,0.0,【海鸥】比亚迪_海鸥报价_海鸥图片_汽车之家,23031
-12,12,问界M8,https://www.autohome.com.cn/8003,,,0.0,0.0,【问界M8】AITO 问界_问界M8报价_问界M8图片_汽车之家,21537
-13,13,小米SU7,https://www.autohome.com.cn/6962,,,0.0,0.0,【小米SU7】小米汽车_小米SU7报价_小米SU7图片_汽车之家,19848
-14,14,元UP,https://www.autohome.com.cn/7538,,,0.0,0.0,【元UP】比亚迪_元UP报价_元UP图片_汽车之家,19647
-15,15,速腾,https://www.autohome.com.cn/442,,,0.0,0.0,【速腾】大众_速腾报价_速腾图片_汽车之家,19074
-16,16,帕萨特,https://www.autohome.com.cn/528,,,0.0,0.0,【帕萨特】大众_帕萨特报价_帕萨特图片_汽车之家,18695
-17,17,途观L,https://www.autohome.com.cn/4274,,,0.0,0.0,【途观L】大众_途观L报价_途观L图片_汽车之家,18466
-18,18,RAV4荣放,https://www.autohome.com.cn/770,,,0.0,0.0,【RAV4荣放】丰田_RAV4荣放报价_RAV4荣放图片_汽车之家,18312
-19,19,星越L,https://www.autohome.com.cn/6004,,,0.0,0.0,【星越L】吉利汽车_星越L报价_星越L图片_汽车之家,17758
-20,20,Model 3,https://www.autohome.com.cn/5346,,,0.0,0.0,【Model 3】特斯拉_Model 3报价_Model 3图片_汽车之家,17739
-21,21,卡罗拉锐放,https://www.autohome.com.cn/6428,,,0.0,0.0,【卡罗拉锐放】丰田_卡罗拉锐放报价_卡罗拉锐放图片_汽车之家,17644
-22,22,迈腾,https://www.autohome.com.cn/496,,,0.0,0.0,【迈腾】大众_迈腾报价_迈腾图片_汽车之家,16969
-23,23,小米YU7,https://www.autohome.com.cn/7793,,,0.0,0.0,【小米YU7】小米汽车_小米YU7报价_小米YU7图片_汽车之家,16548
-24,24,瑞虎8,https://www.autohome.com.cn/4693,,,0.0,0.0,【瑞虎8】奇瑞_瑞虎8报价_瑞虎8图片_汽车之家,15695
-25,25,凯美瑞,https://www.autohome.com.cn/110,,,0.0,0.0,【凯美瑞】丰田_凯美瑞报价_凯美瑞图片_汽车之家,15526
-26,26,小鹏MONA M03,https://www.autohome.com.cn/6998,,,0.0,0.0,【小鹏MONA M03】小鹏_小鹏MONA M03报价_小鹏MONA M03图片_汽车之家,15333
-27,27,探岳,https://www.autohome.com.cn/4744,,,0.0,0.0,【探岳】大众_探岳报价_探岳图片_汽车之家,15189
-28,28,锋兰达,https://www.autohome.com.cn/6414,,,0.0,0.0,【锋兰达】丰田_锋兰达报价_锋兰达图片_汽车之家,14920
-29,29,长安Lumin,https://www.autohome.com.cn/6674,,,0.0,0.0,【长安Lumin】长安启源_长安Lumin报价_长安Lumin图片_汽车之家,14570
-30,30,哈弗大狗,https://www.autohome.com.cn/5770,,,0.0,0.0,【哈弗大狗】哈弗_哈弗大狗报价_哈弗大狗图片_汽车之家,14457
-31,31,海豚,https://www.autohome.com.cn/6139,,,0.0,0.0,【海豚】比亚迪_海豚报价_海豚图片_汽车之家,13968
-32,32,途岳,https://www.autohome.com.cn/4745,,,0.0,0.0,【途岳】大众_途岳报价_途岳图片_汽车之家,13693
-33,33,逸动,https://www.autohome.com.cn/2429,,,0.0,0.0,【逸动】长安_逸动报价_逸动图片_汽车之家,13637
-34,34,海豹05 DM-i,https://www.autohome.com.cn/7981,,,0.0,0.0,【海豹05 DM-i】比亚迪_海豹05 DM-i报价_海豹05 DM-i图片_汽车之家,13495
-35,35,零跑C10,https://www.autohome.com.cn/7382,,,0.0,0.0,【零跑C10】零跑汽车_零跑C10报价_零跑C10图片_汽车之家,13384
-36,36,本田CR-V,https://www.autohome.com.cn/314,,,0.0,0.0,【本田CR-V】本田_本田CR-V报价_本田CR-V图片_汽车之家,13277
-37,37,宋PLUS新能源,https://www.autohome.com.cn/5761,,,0.0,0.0,【宋PLUS新能源】比亚迪_宋PLUS新能源报价_宋PLUS新能源图片_汽车之家,13098
-38,38,奥迪A6L,https://www.autohome.com.cn/18,,,0.0,0.0,【奥迪A6L】奥迪_奥迪A6L报价_奥迪A6L图片_汽车之家,12941
-39,39,宋Pro新能源,https://www.autohome.com.cn/5279,,,0.0,0.0,【宋Pro新能源】比亚迪_宋Pro新能源报价_宋Pro新能源图片_汽车之家,12681
-40,40,艾瑞泽8,https://www.autohome.com.cn/6664,,,0.0,0.0,【艾瑞泽8】奇瑞_艾瑞泽8报价_艾瑞泽8图片_汽车之家,12577
-41,41,长安CS75 PLUS,https://www.autohome.com.cn/5179,,,0.0,0.0,【长安CS75 PLUS】长安_长安CS75 PLUS报价_长安CS75 PLUS图片_汽车之家,12179
-42,42,宝马3系,https://www.autohome.com.cn/66,,,0.0,0.0,【宝马3系】宝马_宝马3系报价_宝马3系图片_汽车之家,12157
-43,43,五菱缤果,https://www.autohome.com.cn/7045,,,0.0,0.0,【五菱缤果】五菱汽车_五菱缤果报价_五菱缤果图片_汽车之家,12078
-44,44,银河A7,https://www.autohome.com.cn/8158,,,0.0,0.0,【银河A7】吉利银河_银河A7报价_银河A7图片_汽车之家,12078
-45,45,元PLUS,https://www.autohome.com.cn/6298,,,0.0,0.0,【元PLUS】比亚迪_元PLUS报价_元PLUS图片_汽车之家,11984
-46,46,奔驰C级,https://www.autohome.com.cn/588,,,0.0,0.0,【奔驰C级】奔驰_奔驰C级报价_奔驰C级图片_汽车之家,11951
-47,47,昂科威Plus,https://www.autohome.com.cn/3554,,,0.0,0.0,【昂科威Plus】别克_昂科威Plus报价_昂科威Plus图片_汽车之家,11929
-48,48,雅阁,https://www.autohome.com.cn/78,,,0.0,0.0,【雅阁】本田_雅阁报价_雅阁图片_汽车之家,11929
-49,49,红旗H5,https://www.autohome.com.cn/4410,,,0.0,0.0,【红旗H5】红旗_红旗H5报价_红旗H5图片_汽车之家,11882
-50,50,缤越,https://www.autohome.com.cn/4701,,,0.0,0.0,【缤越】吉利汽车_缤越报价_缤越图片_汽车之家,11761
+﻿rank_seq,rank,seriesname,series_url,brand,model,brand_conf,series_conf,title_raw,count,ev_count,phev_count,type_hint,price,rank_change
+1,1,星愿,https://www.autohome.com.cn/7806,,,0.0,0.0,,46057,,,Unknown,,0
+2,2,Model Y,https://www.autohome.com.cn/5769,,,0.0,0.0,,39413,,,Unknown,,0
+3,3,宏光MINIEV,https://www.autohome.com.cn/5714,,,0.0,0.0,,37828,,,Unknown,,0
+4,4,秦PLUS,https://www.autohome.com.cn/5964,,,0.0,0.0,,35800,9360,26440,EV+PHEV,,0
+5,5,轩逸,https://www.autohome.com.cn/448,,,0.0,0.0,,27695,,,Unknown,,0
+6,6,海狮06新能源,https://www.autohome.com.cn/8087,,,0.0,0.0,,25453,16897,8556,EV+PHEV,,0
+7,7,秦L,https://www.autohome.com.cn/7578,,,0.0,0.0,,25380,8590,16790,EV+PHEV,,0
+8,8,海豹06新能源,https://www.autohome.com.cn/7588,,,0.0,0.0,,24353,9733,14620,EV+PHEV,,0
+9,9,朗逸,https://www.autohome.com.cn/614,,,0.0,0.0,,24320,,,Unknown,,0
+10,10,博越L,https://www.autohome.com.cn/6814,,,0.0,0.0,,24169,,,Unknown,,0
+11,11,海鸥,https://www.autohome.com.cn/6762,,,0.0,0.0,,23031,,,Unknown,,0
+12,12,问界M8,https://www.autohome.com.cn/8003,,,0.0,0.0,,21537,,,Unknown,,0
+13,13,小米SU7,https://www.autohome.com.cn/6962,,,0.0,0.0,,19848,,,Unknown,,0
+14,14,元UP,https://www.autohome.com.cn/7538,,,0.0,0.0,,19647,,,Unknown,,0
+15,15,速腾,https://www.autohome.com.cn/442,,,0.0,0.0,,19074,,,Unknown,,0
+16,16,帕萨特,https://www.autohome.com.cn/528,,,0.0,0.0,,18695,,,Unknown,,0
+17,17,途观L,https://www.autohome.com.cn/4274,,,0.0,0.0,,18466,,,Unknown,,0
+18,18,RAV4荣放,https://www.autohome.com.cn/770,,,0.0,0.0,,18312,,,Unknown,,0
+19,19,星越L,https://www.autohome.com.cn/6004,,,0.0,0.0,,17758,,,Unknown,,0
+20,20,Model 3,https://www.autohome.com.cn/5346,,,0.0,0.0,,17739,,,Unknown,,0
+21,21,卡罗拉锐放,https://www.autohome.com.cn/6428,,,0.0,0.0,,17644,,,Unknown,,0
+22,22,迈腾,https://www.autohome.com.cn/496,,,0.0,0.0,,16969,,,Unknown,,0
+23,23,小米YU7,https://www.autohome.com.cn/7793,,,0.0,0.0,,16548,,,Unknown,,0
+24,24,瑞虎8,https://www.autohome.com.cn/4693,,,0.0,0.0,,15695,,,Unknown,,0
+25,25,凯美瑞,https://www.autohome.com.cn/110,,,0.0,0.0,,15526,,,Unknown,,0
+26,26,小鹏MONA M03,https://www.autohome.com.cn/6998,,,0.0,0.0,,15333,,,Unknown,,0
+27,27,探岳,https://www.autohome.com.cn/4744,,,0.0,0.0,,15189,,,Unknown,,0
+28,28,锋兰达,https://www.autohome.com.cn/6414,,,0.0,0.0,,14920,,,Unknown,,0
+29,29,长安Lumin,https://www.autohome.com.cn/6674,,,0.0,0.0,,14570,,,Unknown,,0
+30,30,哈弗大狗,https://www.autohome.com.cn/5770,,,0.0,0.0,,14457,,,Unknown,,0
+31,31,海豚,https://www.autohome.com.cn/6139,,,0.0,0.0,,13968,,,Unknown,,0
+32,32,途岳,https://www.autohome.com.cn/4745,,,0.0,0.0,,13693,,,Unknown,,0
+33,33,逸动,https://www.autohome.com.cn/2429,,,0.0,0.0,,13637,,,Unknown,,0
+34,34,海豹05 DM-i,https://www.autohome.com.cn/7981,,,0.0,0.0,,13495,,,Unknown,,0
+35,35,零跑C10,https://www.autohome.com.cn/7382,,,0.0,0.0,,13384,12146,,EV,,0
+36,36,本田CR-V,https://www.autohome.com.cn/314,,,0.0,0.0,,13277,,,Unknown,,0
+37,37,宋PLUS新能源,https://www.autohome.com.cn/5761,,,0.0,0.0,,13098,5121,7977,EV+PHEV,,0
+38,38,奥迪A6L,https://www.autohome.com.cn/18,,,0.0,0.0,,12941,,,Unknown,,0
+39,39,宋Pro新能源,https://www.autohome.com.cn/5279,,,0.0,0.0,,12681,,,Unknown,,0
+40,40,艾瑞泽8,https://www.autohome.com.cn/6664,,,0.0,0.0,,12577,,,Unknown,,0
+41,41,长安CS75 PLUS,https://www.autohome.com.cn/5179,,,0.0,0.0,,12179,,,Unknown,,0
+42,42,宝马3系,https://www.autohome.com.cn/66,,,0.0,0.0,,12157,,,Unknown,,0
+43,43,五菱缤果,https://www.autohome.com.cn/7045,,,0.0,0.0,,12078,,,Unknown,,0
+44,44,银河A7,https://www.autohome.com.cn/8158,,,0.0,0.0,,12078,,,Unknown,,0
+45,45,元PLUS,https://www.autohome.com.cn/6298,,,0.0,0.0,,11984,,,Unknown,,0
+46,46,奔驰C级,https://www.autohome.com.cn/588,,,0.0,0.0,,11951,,,Unknown,,0
+47,47,昂科威Plus,https://www.autohome.com.cn/3554,,,0.0,0.0,,11929,,,Unknown,,0
+48,48,雅阁,https://www.autohome.com.cn/78,,,0.0,0.0,,11929,,,Unknown,,0
+49,49,红旗H5,https://www.autohome.com.cn/4410,,,0.0,0.0,,11882,,,Unknown,,0
+50,50,缤越,https://www.autohome.com.cn/4701,,,0.0,0.0,,11761,,,Unknown,,0
