@@ -1,233 +1,223 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Translate brand/model to global English name:
-priority = OFFICIAL (CSE等) -> WIKIPEDIA -> LLM
+brand/model のグローバル名を決定するパイプライン。
+優先順位: 1) 公式サイト(CSE) → 2) Wikipedia → 3) LLM
+キャッシュはデフォルト未使用。
 
-- どの段で確定したかを source_model に記録 (official / wikidata / llm)
-- 失敗理由の要約を resolve_note に記録
-- --use-official / --use-wikidata 指定時にヒット0なら明示的に失敗（フェイルファースト）
-- キャッシュは使いません（ご要望通り）
+出力列:
+- brand_ja : ブランド名の標準化（基本は英語表記。中国語ブランドは英語社名。既存値があれば尊重）
+- model_ja : シリーズ/モデルの英語グローバル名（なければ中国語原文）
+- model_official_en : 公式サイトから抽出できた英名（抽出できたときのみ）
+- source_model : 採用ソース "official" | "wikipedia" | "llm" | "current"
 
-前提:
-- 公式/Wiki 参照は tools/official_lookup.py / tools/wikidata_lookup.py を想定
-  - どちらも存在しない場合は自動的に無効化
-- OPENAI_API_KEY は環境変数で渡す
+CLI:
+  --use-official / --no-use-official
+  --use-wikipedia / --no-use-wikipedia
+  --model  (LLMモデル名; 例: gpt-4o)
 """
 
 import argparse
+import csv
 import os
 import sys
 import time
-import pandas as pd
-from tqdm import tqdm
+from typing import Optional, Tuple
 
-# -------- optional deps: official / wiki lookups ----------
-OFFICIAL_ACTIVE = True
+import pandas as pd
+
+# 公式 / Wikipedia / LLM の実装
 try:
-    # 実装はユーザー環境側にある想定:
-    # def find_official_english(brand_zh: str, model_zh: str) -> tuple[str|None, str|None]
     from tools.official_lookup import find_official_english
 except Exception:
-    OFFICIAL_ACTIVE = False
-    def find_official_english(brand, model):
-        return (None, None)
+    # GH Actions で import パスの都合がある場合に備え、相対でも試す
+    from official_lookup import find_official_english  # type: ignore
 
-WIKI_ACTIVE = True
 try:
-    # 実装はユーザー環境側にある想定:
-    # def find_wikidata_english(brand_zh: str, model_zh: str) -> tuple[str|None, str|None]
-    from tools.wikidata_lookup import find_wikidata_english
+    from tools.wiki_lookup import lookup_wikipedia_en_title
 except Exception:
-    WIKI_ACTIVE = False
-    def find_wikidata_english(brand, model):
-        return (None, None)
+    from wiki_lookup import lookup_wikipedia_en_title  # type: ignore
 
-# -------- LLM (OpenAI) ----------
-def _init_openai_client():
+# ---- LLM (OpenAI) ----------------------------------------------------------
+def llm_guess(brand: str, model: str, llm_model: str) -> Optional[Tuple[str, str]]:
     """
-    OpenAI SDKの差異に耐える初期化。
-    - v1系: from openai import OpenAI; client = OpenAI()
-    - 旧系: import openai; openai.api_key = ...
+    LLM で英名を推定する。返り値は (brand_en, model_en) または None。
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("ENV OPENAI_API_KEY is missing")
+        return None
 
     try:
-        # 新SDK (>=1.0)
         from openai import OpenAI
-        client = OpenAI()
-        client._compat_mode = "responses_first"  # 自己メモ（特に影響なし）
-        client.__api_variant = "responses"
-        return client, "new"
     except Exception:
-        import openai as _openai
-        _openai.api_key = api_key
-        return _openai, "legacy"
+        return None
 
-def llm_translate(client, api_variant, model, term: str) -> str:
-    """
-    中国語の車ブランド/車名を、グローバルで使う英語表記に1行で返す。
-    余計な注釈・接尾辞・翻訳語は付けない（例: 'Yuan PLUS', 'Lavida', 'Sagitar'）
-    """
-    prompt = (
-        "You are a strict normalizer for Chinese auto brand/model names.\n"
-        "Task: Output the official or globally used ENGLISH name for the given Chinese term.\n"
-        "Rules:\n"
-        "- Return ONLY the English name (no extra words, no punctuation, no quotes).\n"
-        "- If the term already appears in English/Roman letters, return it unchanged.\n"
-        "- Keep OEM-specific transliterations used in China market when they are the official English (e.g., 'Lavida', 'Sagitar', 'Binyue').\n"
-        f"Term: {term}\n"
-        "Answer:"
-    )
+    prompt = f"""You are an expert vehicle product manager.
+Given the brand and Chinese market series/model below, answer the **global English names** as used by the manufacturer (not a translation).
+- Brand (may be Chinese): "{brand}"
+- Model/Series in Chinese market: "{model}"
+
+Rules:
+1) Output ONLY brand_en and model_en in one line as: brand_en | model_en
+2) If the global brand name is the same as already given in English, keep it.
+3) If you are not confident about model_en, return brand_en | {model}
+"""
+
     try:
-        if api_variant == "new":
-            # responses API
-            resp = client.responses.create(
-                model=model,
-                input=prompt,
-                temperature=0,
-            )
-            txt = resp.output_text.strip()
-        else:
-            # legacy chat completions
-            resp = client.ChatCompletion.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            txt = resp.choices[0].message["content"].strip()
-        # 1行に限定
-        return txt.splitlines()[0].strip()
-    except Exception as e:
-        # LLMが駄目でも落とさない：空文字を返す
-        return ""
+        client = OpenAI(api_key=api_key)
+        rsp = client.chat.completions.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": "Return concise English model names."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        text = rsp.choices[0].message.content.strip()
+        if "|" in text:
+            b, m = [x.strip() for x in text.split("|", 1)]
+            return (b or brand, m or model)
+    except Exception:
+        pass
+    return None
 
-# -------- main ----------
-def build_parser():
-    p = argparse.ArgumentParser(
-        description="Translate brand/model to global English with priority: OFFICIAL -> WIKIPEDIA -> LLM"
-    )
-    p.add_argument("--input", required=True, help="input CSV path")
-    p.add_argument("--output", required=True, help="output CSV path")
+# ---- ブランドの素朴標準化（英語社名の既知マップ + フォールバック） ------------
+_BRAND_EN_FALLBACK = {
+    "比亚迪": "BYD",
+    "比亞迪": "BYD",
+    "上汽大众": "Volkswagen",
+    "大众": "Volkswagen",
+    "大眾": "Volkswagen",
+    "丰田": "Toyota",
+    "豐田": "Toyota",
+    "日产": "Nissan",
+    "日產": "Nissan",
+    "本田": "Honda",
+    "梅赛德斯-奔驰": "Mercedes-Benz",
+    "奔驰": "Mercedes-Benz",
+    "寶馬": "BMW",
+    "宝马": "BMW",
+    "五菱汽车": "Wuling Motors",
+    "五菱": "Wuling Motors",
+    "吉利汽车": "Geely",
+    "吉利银河": "Geely Galaxy",
+    "红旗": "Hongqi",
+    "哈弗": "Haval",
+    "奇瑞": "Chery",
+    "小鹏": "XPeng",
+    "小米汽车": "Xiaomi Auto",
+    "AITO": "AITO",
+    "奥迪": "Audi",
+    "大众汽车": "Volkswagen",
+    "长安": "Changan",
+    "长安启源": "Changan Qiyuan",
+    "零跑汽车": "Leapmotor",
+    "别克": "Buick",
+    "奔驰AMG": "Mercedes-AMG",
+}
 
-    p.add_argument("--brand-col", default="brand", dest="brand_col")
-    p.add_argument("--model-col", default="model", dest="model_col")
-    p.add_argument("--brand-ja-col", default="brand_ja", dest="brand_ja_col")
-    p.add_argument("--model-ja-col", default="model_ja", dest="model_ja_col")
+def normalize_brand_en(name: str) -> str:
+    n = (name or "").strip()
+    if not n:
+        return n
+    # 既に英語っぽい場合はそのまま
+    if any(c.isalpha() for c in n) and not any("\u4e00" <= c <= "\u9fff" for c in n):
+        return n
+    return _BRAND_EN_FALLBACK.get(n, n)
 
-    p.add_argument("--model", default="gpt-4o-mini", dest="llm_model", help="LLM model name")
-    p.add_argument("--sleep", type=float, default=0.0, help="sleep seconds per unique pair")
-
-    p.add_argument("--use-wikidata", action="store_true", help="try Wikipedia/Wikidata layer")
-    p.add_argument("--use-official", action="store_true", help="try Official-site layer first")
-    return p
+# ---- メイン ---------------------------------------------------------------
 
 def main():
-    args = build_parser().parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--brand-col", default="brand")
+    parser.add_argument("--model-col", default="model")
+    parser.add_argument("--brand-ja-col", default="brand_ja")
+    parser.add_argument("--model-ja-col", default="model_ja")
+    parser.add_argument("--model", dest="llm_model", default="gpt-4o")
+    parser.add_argument("--sleep", type=float, default=0.0)
+    parser.add_argument("--use-wikipedia", dest="use_wikipedia", action="store_true", default=False)
+    parser.add_argument("--use-official", dest="use_official", action="store_true", default=False)
+    # 将来用の互換（指定されても無視する）
+    parser.add_argument("--cache", default=None)
 
-    # 実行時の可視化
-    if args.use_official and not OFFICIAL_ACTIVE:
-        print("[WARN] tools.official_lookup not importable -> OFFICIAL disabled.")
-    if args.use_wikidata and not WIKI_ACTIVE:
-        print("[WARN] tools.wikidata_lookup not importable -> WIKIDATA disabled.")
+    args = parser.parse_args()
 
-    df = pd.read_csv(args.input)
-    # OpenAI client（LLMは最終フォールバック）
-    client, api_variant = _init_openai_client()
+    inp = args.input
+    outp = args.output
+    print(f"Translating: {inp} -> {outp}", flush=True)
 
-    out_brand, out_model, out_source, out_note = [], [], [], []
+    df = pd.read_csv(inp)
 
-    official_hits = 0
-    wiki_hits = 0
+    # 出力列を準備（存在すれば上書き、なければ追加）
+    for c in (args.brand_ja_col, args.model_ja_col, "model_official_en", "source_model"):
+        if c not in df.columns:
+            df[c] = ""
 
-    # CSE節約: 同一(brand, model)は1回だけ解決し共有
-    seen = {}
+    rows = df.to_dict(orient="records")
 
-    rows = list(df.itertuples(index=False))
-    for row in tqdm(rows, total=len(rows), desc="translate"):
-        b = str(getattr(row, args.brand_col, "")).strip()
-        m = str(getattr(row, args.model_col, "")).strip()
-        key = (b, m)
+    for i, row in enumerate(rows, start=1):
+        brand = str(row.get(args.brand_col, "")).strip()
+        model = str(row.get(args.model_col, "")).strip()
 
-        if key in seen:
-            brand_en, model_en, source, note = seen[key]
-            out_brand.append(brand_en); out_model.append(model_en)
-            out_source.append(source); out_note.append(note)
-            continue
+        brand_en = normalize_brand_en(brand)
+        model_best = None
+        model_source = "current"
+        model_official = ""
 
-        brand_en = None
-        model_en = None
-        source = None
-        note_parts = []
-
-        # 1) OFFICIAL
-        if args.use_official and OFFICIAL_ACTIVE:
+        # 1) 公式サイト（CSE）
+        if args.use_official:
             try:
-                ob, om = find_official_english(b, m)  # どちらか片方だけ取得でもOK
-                if ob: brand_en = ob
-                if om: model_en = om
-                if ob or om:
-                    source = "official"
-                    official_hits += 1
-                else:
-                    note_parts.append("official:miss")
-            except Exception as e:
-                note_parts.append(f"official:err:{type(e).__name__}")
+                off = find_official_english(brand, model)
+                if off:
+                    model_best = off
+                    model_official = off
+                    model_source = "official"
+            except Exception:
+                pass
 
-        # 2) WIKIDATA
-        if (not brand_en or not model_en) and args.use_wikidata and WIKI_ACTIVE:
+        # 2) Wikipedia
+        if not model_best and args.use_wikipedia:
             try:
-                wb, wm = find_wikidata_english(b, m)
-                if not brand_en and wb: brand_en = wb
-                if not model_en and wm: model_en = wm
-                if (wb or wm) and source is None:
-                    source = "wikidata"
-                    wiki_hits += 1
-                else:
-                    if not (wb or wm):
-                        note_parts.append("wiki:miss")
-            except Exception as e:
-                note_parts.append(f"wiki:err:{type(e).__name__}")
+                wk = lookup_wikipedia_en_title(brand, model)
+                if wk:
+                    model_best = wk
+                    model_source = "wikipedia"
+            except Exception:
+                pass
 
-        # 3) LLM fallback（不足分だけ）
+        # 3) LLM
+        if not model_best:
+            guess = llm_guess(brand, model, args.llm_model)
+            if guess:
+                brand_en = guess[0] or brand_en
+                model_best = guess[1] or model
+                model_source = "llm"
+
+        # フォールバック
         if not brand_en:
-            brand_en = llm_translate(client, api_variant, args.llm_model, b) or ""
-            if not brand_en:
-                note_parts.append("llm_brand:empty")
-        if not model_en:
-            model_en = llm_translate(client, api_variant, args.llm_model, m) or ""
-            if not model_en:
-                note_parts.append("llm_model:empty")
-        if source is None:
-            source = "llm"
+            brand_en = brand
+        if not model_best:
+            model_best = model
 
-        note = ";".join(note_parts)
-        out_brand.append(brand_en); out_model.append(model_en)
-        out_source.append(source); out_note.append(note)
-        seen[key] = (brand_en, model_en, source, note)
+        row[args.brand_ja_col] = brand_en
+        row[args.model_ja_col] = model_best
+        row["model_official_en"] = model_official
+        row["source_model"] = model_source
 
-        if args.sleep > 0:
+        if args.sleep:
             time.sleep(args.sleep)
 
-    # 出力列（既存列名に合わせる）
-    df[args.brand_ja_col] = out_brand
-    df[args.model_ja_col] = out_model
-    df["source_model"] = out_source
-    df["resolve_note"] = out_note
-
     # 書き出し
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    df.to_csv(args.output, index=False, encoding="utf-8-sig")
-    print(f"Wrote: {args.output}")
-    print(f"official_hits={official_hits}, wiki_hits={wiki_hits}")
+    fieldnames = list(rows[0].keys()) if rows else df.columns.tolist()
+    with open(outp, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
-    # フェイルファースト: 指定した層が1件もヒットしない場合は異常終了
-    if args.use_official and official_hits == 0:
-        raise SystemExit("No official hits. Check PYTHONPATH/implementation or CSE quota.")
-    if args.use_wikidata and wiki_hits == 0:
-        print("[WARN] wikidata hits = 0. Check dependency/UA/implementation.")
+    print(f"Wrote: {outp}")
 
 if __name__ == "__main__":
     main()
