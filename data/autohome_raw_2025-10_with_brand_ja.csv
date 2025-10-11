@@ -1,21 +1,21 @@
-﻿rank,series_url,title,brand,model,count,brand_ja,model_ja
-1,https://www.autohome.com.cn/7806/,【星愿】吉利银河_星愿报价_星愿图片_汽车之家,吉利,银河星愿,,吉利,銀河星願
-2,https://www.autohome.com.cn/5769/,【Model Y】特斯拉_Model Y报价_Model Y图片_汽车之家,特斯拉,Model Y,,Tesla,Model Y
-3,https://www.autohome.com.cn/5714/,【宏光MINIEV】五菱汽车_宏光MINIEV报价_宏光MINIEV图片_汽车之家,五菱汽车,宏光MINIEV,,Wuling,宏光MINIEV
-4,https://www.autohome.com.cn/5964/,【秦PLUS】比亚迪_秦PLUS报价_秦PLUS图片_汽车之家,比亚迪,秦PLUS,,BYD,秦PLUS
-5,https://www.autohome.com.cn/448/,【轩逸】日产_轩逸报价_轩逸图片_汽车之家,日产,轩逸,,Nissan,Sylphy
-6,https://www.autohome.com.cn/8087/,【海狮06新能源】比亚迪_海狮06新能源报价_海狮06新能源图片_汽车之家,比亚迪,海狮06新能源,,BYD,海獅06新能源
-7,https://www.autohome.com.cn/7578/,【秦L】比亚迪_秦L报价_秦L图片_汽车之家,比亚迪,秦L,,BYD,秦L
-8,https://www.autohome.com.cn/7588/,【海豹06新能源】比亚迪_海豹06新能源报价_海豹06新能源图片_汽车之家,比亚迪,海豹06新能源,,BYD,海豹06新能源
-9,https://www.autohome.com.cn/614/,【朗逸】大众_朗逸报价_朗逸图片_汽车之家,大众,朗逸,,Volkswagen,Lavida
-10,https://www.autohome.com.cn/6814/,【博越L】吉利汽车_博越L报价_博越L图片_汽车之家,吉利汽车,博越L,,Geely,博越L
-11,https://www.autohome.com.cn/6762/,【海鸥】比亚迪_海鸥报价_海鸥图片_汽车之家,比亚迪,海鸥,,BYD,海鸥
-12,https://www.autohome.com.cn/8003/,【问界M8】AITO 问界_问界M8报价_问界M8图片_汽车之家,AITO,问界M8,,AITO,問界M8
-13,https://www.autohome.com.cn/6962/,【小米SU7】小米汽车_小米SU7报价_小米SU7图片_汽车之家,小米,SU7,,Xiaomi,SU7
-14,https://www.autohome.com.cn/7538/,【元UP】比亚迪_元UP报价_元UP图片_汽车之家,比亚迪,元UP,,BYD,元UP
-15,https://www.autohome.com.cn/442/,【速腾】大众_速腾报价_速腾图片_汽车之家,大众,速腾,,Volkswagen,Sagitar
-16,https://www.autohome.com.cn/528/,【帕萨特】大众_帕萨特报价_帕萨特图片_汽车之家,大众,帕萨特,,Volkswagen,Passat
-17,https://www.autohome.com.cn/4274/,【途观L】大众_途观L报价_途观L图片_汽车之家,大众,途观L,,Volkswagen,Tiguan L
-18,https://www.autohome.com.cn/770/,【RAV4荣放】丰田_RAV4荣放报价_RAV4荣放图片_汽车之家,丰田,RAV4荣放,,Toyota,RAV4
-19,https://www.autohome.com.cn/6004/,【星越L】吉利汽车_星越L报价_星越L图片_汽车之家,吉利汽车,星越L,,Geely,星越L
-20,https://www.autohome.com.cn/5346/,【Model 3】特斯拉_Model 3报价_Model 3图片_汽车之家,特斯拉,Model 3,,Tesla,Model 3
+rank,series_url,title,brand,model,count,brand_ja,model_ja,model_official_en,source_model
+1,https://www.autohome.com.cn/7806/,【星愿】吉利银河_星愿报价_星愿图片_汽车之家,吉利,银河星愿,nan,吉利,EM-i,EM-i,official
+2,https://www.autohome.com.cn/5769/,【Model Y】特斯拉_Model Y报价_Model Y图片_汽车之家,特斯拉,Model Y,nan,Tesla,Model Y,,llm
+3,https://www.autohome.com.cn/5714/,【宏光MINIEV】五菱汽车_宏光MINIEV报价_宏光MINIEV图片_汽车之家,五菱汽车,宏光MINIEV,nan,Wuling Motors,SUV,SUV,official
+4,https://www.autohome.com.cn/5964/,【秦PLUS】比亚迪_秦PLUS报价_秦PLUS图片_汽车之家,比亚迪,秦PLUS,nan,BYD,DM-i,DM-i,official
+5,https://www.autohome.com.cn/448/,【轩逸】日产_轩逸报价_轩逸图片_汽车之家,日产,轩逸,nan,Nissan,Nov 11,Nov 11,official
+6,https://www.autohome.com.cn/8087/,【海狮06新能源】比亚迪_海狮06新能源报价_海狮06新能源图片_汽车之家,比亚迪,海狮06新能源,nan,BYD,Electric Cars,Electric Cars,official
+7,https://www.autohome.com.cn/7578/,【秦L】比亚迪_秦L报价_秦L图片_汽车之家,比亚迪,秦L,nan,BYD,EV,EV,official
+8,https://www.autohome.com.cn/7588/,【海豹06新能源】比亚迪_海豹06新能源报价_海豹06新能源图片_汽车之家,比亚迪,海豹06新能源,nan,BYD,Electric Cars,Electric Cars,official
+9,https://www.autohome.com.cn/614/,【朗逸】大众_朗逸报价_朗逸图片_汽车之家,大众,朗逸,nan,Volkswagen,ID,ID,official
+10,https://www.autohome.com.cn/6814/,【博越L】吉利汽车_博越L报价_博越L图片_汽车之家,吉利汽车,博越L,nan,Geely,mm,mm,official
+11,https://www.autohome.com.cn/6762/,【海鸥】比亚迪_海鸥报价_海鸥图片_汽车之家,比亚迪,海鸥,nan,BYD,Electric Cars,Electric Cars,official
+12,https://www.autohome.com.cn/8003/,【问界M8】AITO 问界_问界M8报价_问界M8图片_汽车之家,AITO,问界M8,nan,AITO,BYD SINGAPORE,BYD SINGAPORE,official
+13,https://www.autohome.com.cn/6962/,【小米SU7】小米汽车_小米SU7报价_小米SU7图片_汽车之家,小米,SU7,nan,小米,Apr 8,Apr 8,official
+14,https://www.autohome.com.cn/7538/,【元UP】比亚迪_元UP报价_元UP图片_汽车之家,比亚迪,元UP,nan,BYD,BYD YUAN UP I BYD Ethiopia,BYD YUAN UP I BYD Ethiopia,official
+15,https://www.autohome.com.cn/442/,【速腾】大众_速腾报价_速腾图片_汽车之家,大众,速腾,nan,Volkswagen,kv,kv,official
+16,https://www.autohome.com.cn/528/,【帕萨特】大众_帕萨特报价_帕萨特图片_汽车之家,大众,帕萨特,nan,Volkswagen,Passat,,llm
+17,https://www.autohome.com.cn/4274/,【途观L】大众_途观L报价_途观L图片_汽车之家,大众,途观L,nan,Volkswagen,Tiguan,Tiguan,official
+18,https://www.autohome.com.cn/770/,【RAV4荣放】丰田_RAV4荣放报价_RAV4荣放图片_汽车之家,丰田,RAV4荣放,nan,Toyota,Sep 28,Sep 28,official
+19,https://www.autohome.com.cn/6004/,【星越L】吉利汽车_星越L报价_星越L图片_汽车之家,吉利汽车,星越L,nan,Geely,mm,mm,official
+20,https://www.autohome.com.cn/5346/,【Model 3】特斯拉_Model 3报价_Model 3图片_汽车之家,特斯拉,Model 3,nan,特斯拉,Aug 13,Aug 13,official
