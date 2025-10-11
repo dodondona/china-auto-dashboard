@@ -1,16 +1,15 @@
-name: Autohome rank/1 → brand.csv (reverted minimal)
+name: Autohome rank/1 → brand.csv (brand tab only)
 
 on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: "Autohome rank page URL (default: https://www.autohome.com.cn/rank/1)"
+        description: "Autohome rank page URL"
         required: false
         default: "https://www.autohome.com.cn/rank/1"
   schedule:
-    - cron: "15 1 2 * *"  # 毎月2日 10:15(JST)相当。必要に応じて調整
+    - cron: "15 1 2 * *"  # 毎月2日 10:15(JST)
 
-# 403回避のために必要
 permissions:
   contents: write
 
@@ -18,7 +17,6 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,31 +42,26 @@ jobs:
           fi
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "out_brand=data/brand.csv" >> $GITHUB_OUTPUT
-          echo "out_series=data/series.csv" >> $GITHUB_OUTPUT
 
-      - name: Run scraper (brand only expected)
+      - name: Run scraper (brand only)
         run: |
           python tools/rank1_brand_series_scraper.py \
             --url "${{ steps.cfg.outputs.url }}" \
             --out-brand "${{ steps.cfg.outputs.out_brand }}" \
-            --out-series "${{ steps.cfg.outputs.out_series }}" \
-            --wait-ms 2000 --max-scrolls 15
+            --wait-ms 2400 --max-scrolls 18
 
-      # series.csv はこの段階で作られない設計なので、brand.csv のみ commit/push
       - name: Commit & push results
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${{ steps.cfg.outputs.out_brand }}" || true
-          # series は通常この段階では未生成。存在すれば一応一緒に add。
-          if [ -f "${{ steps.cfg.outputs.out_series }}" ]; then
-            git add "${{ steps.cfg.outputs.out_series }}"
+          if [ -f "${{ steps.cfg.outputs.out_brand }}" ]; then
+            git add "${{ steps.cfg.outputs.out_brand }}"
           fi
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "data: rank/1 scraped → brand.csv (series skipped as designed)"
+            git commit -m "data: rank/1 → brand.csv (brand tab only; series skipped)"
             git push
           fi
