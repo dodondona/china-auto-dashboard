@@ -1,17 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-rank1_brand_series_scraper.py (brand-only, rows限定版)
+rank1_brand_series_scraper.py
+────────────────────────────────────────────
+Autohomeの rank/1 ページから:
+ - HTML全体をPlaywrightで取得
+ - JSON内部の "autohome://car/seriesmain?seriesid=…" を抽出して series_url を生成
+ - [data-rank-num] の順番で .tw-text-lg/.tw-font-medium 内テキストから brand/model を推定
+ - 出力は brand + model + series_url まで（series.csvは作らない）
 
-目的:
-- https://www.autohome.com.cn/rank/1 を開く
-- 「品牌月销榜」タブをクリック（存在すれば）
-- ランキング行 [data-rank-num] の中だけを走査し、ブランド名を抽出
-- brand.csv を出力（series.csv はこの段階では作らない＝以前の状態に戻す）
-
-依存:
-  pip install playwright beautifulsoup4 lxml pandas
-  python -m playwright install chromium
+★ これが「brand.csv はできたが series.csv はできてない」状態の完全復元版。
 """
 
 from __future__ import annotations
@@ -23,7 +21,9 @@ def _lazy_sync_playwright():
     from playwright.sync_api import sync_playwright
     return sync_playwright
 
-def fetch_dom_after_click_brand(url: str, wait_ms: int = 2200, max_scrolls: int = 16) -> str:
+
+def fetch_html_with_playwright(url: str, wait_ms: int = 2000, max_scrolls: int = 15) -> str:
+    """rank/1ページ全体をPlaywrightで読み込み"""
     sp = _lazy_sync_playwright()
     with sp() as p:
         browser = p.chromium.launch(headless=True)
@@ -37,7 +37,6 @@ def fetch_dom_after_click_brand(url: str, wait_ms: int = 2200, max_scrolls: int 
         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(wait_ms)
 
-        # ページ末尾までスクロール（遅延ロード対策）
         last_h = 0
         for _ in range(max_scrolls):
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -47,91 +46,104 @@ def fetch_dom_after_click_brand(url: str, wait_ms: int = 2200, max_scrolls: int 
                 break
             last_h = h
 
-        # 「品牌月销榜」をクリック（あれば）
-        try:
-            loc = page.get_by_text("品牌月销榜", exact=True)
-            if loc.count() == 0:
-                loc = page.locator("text=品牌月销榜")
-            if loc and loc.is_visible():
-                loc.first.click()
-                page.wait_for_timeout(wait_ms)
-        except Exception:
-            pass
-
-        # クリック後にも軽くスクロール
-        for _ in range(max_scrolls // 2):
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(wait_ms)
-
         html = page.content()
         context.close()
         browser.close()
         return html
 
-def extract_brand_rows(html: str):
+
+def extract_series_urls_from_html(html: str) -> list[str]:
     """
-    ランキング行 [data-rank-num] の中だけを見る。
-    行内の名称は .tw-text-lg / .tw-font-medium に入っている（添付HTMLの解析結果）｡
+    HTML文字列全体から autohome://car/seriesmain?seriesid=xxxx を抽出し、
+    https://www.autohome.com.cn/<id>/ に変換。
+    """
+    ids = re.findall(r'autohome://car/seriesmain\?seriesid=(\d+)', html)
+    urls = [f"https://www.autohome.com.cn/{sid}/" for sid in ids]
+    # 重複除去（順序保持）
+    seen, uniq = set(), []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    return uniq
+
+
+def extract_rows_from_html(html: str):
+    """
+    [data-rank-num] の順番に .tw-text-lg/.tw-font-medium を抽出し、
+    title_raw から brand/model を分割。series_url は seriesid対応リストから補う。
     """
     soup = BeautifulSoup(html, "lxml")
+    divs = soup.select("[data-rank-num]")
+    urls = extract_series_urls_from_html(html)
 
-    # ランキング行を限定取得
-    rows = soup.select("[data-rank-num]")
-    out = []
-    seen = set()
-
-    for row in rows:
-        # rank
-        rank_attr = row.get("data-rank-num") or ""
-        rank_str = rank_attr.strip() if isinstance(rank_attr, str) else ""
-        # 名称（ブランド名）
-        name_el = row.select_one(".tw-text-lg, .tw-font-medium")
-        brand = (name_el.get_text(strip=True) if name_el else "").strip()
-
-        if not rank_str or not brand:
+    rows = []
+    for idx, div in enumerate(divs, 1):
+        rank = div.get("data-rank-num", "").strip()
+        name_el = div.select_one(".tw-text-lg, .tw-font-medium")
+        title_raw = (name_el.get_text(strip=True) if name_el else "").strip()
+        if not title_raw:
             continue
 
-        # URLはブランド専用のhrefがDOMに無いケースが多いので、当面は空か疑似URL
-        # 以前のフェーズでは brand.csv の主目的は「名前リスト化」だったためURL必須ではない。
-        brand_url = ""
+        brand, model = split_brand_model(title_raw)
 
-        key = (rank_str, brand)
-        if key in seen:
-            continue
-        seen.add(key)
+        # series_urlが足りなければ空文字（HTML上で全件対応しているわけではない）
+        series_url = urls[idx - 1] if idx - 1 < len(urls) else ""
 
-        out.append({
-            "rank_seq": int(rank_str) if rank_str.isdigit() else rank_str,
+        rows.append({
+            "rank_seq": idx,
+            "rank": rank,
             "brand": brand,
-            "brand_url": brand_url,
-            "title_raw": brand,
+            "model": model,
+            "count": "",
+            "series_url": series_url,
+            "brand_conf": "0.70",
+            "series_conf": "0.70",
+            "title_raw": title_raw,
+            "brand_ja": "",
+            "model_ja": "",
         })
+    return rows
 
-    # rank_seqで安定化
-    out.sort(key=lambda r: (r["rank_seq"] if isinstance(r["rank_seq"], int) else 999999, r["brand"]))
-    # rank_seqを1..Nに振り直す（表示順維持）
-    for i, r in enumerate(out, 1):
-        r["rank_seq"] = i
 
-    return out
+def split_brand_model(title: str):
+    """
+    例: 宝马3系 → brand=宝马, model=3系
+        比亚迪 海豹 → brand=比亚迪, model=海豹
+    """
+    s = title.strip()
+    if not s:
+        return "", ""
+
+    # スペース or 英数境界 or 数字境界で分ける
+    # 优先: 半角スペース・全角スペース
+    for sep in [" ", "　"]:
+        if sep in s:
+            parts = s.split(sep, 1)
+            return parts[0], parts[1]
+
+    # 中国語＋数字の混成（例: 宝马3系, 比亚迪e2）
+    m = re.match(r"^([\u4e00-\u9fffA-Za-z]+)(.+)$", s)
+    if m:
+        return m.group(1), m.group(2)
+    return s, ""
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True, help="https://www.autohome.com.cn/rank/1 等")
-    ap.add_argument("--out-brand", default="data/brand.csv")
-    ap.add_argument("--wait-ms", type=int, default=2200)
-    ap.add_argument("--max-scrolls", type=int, default=16)
+    ap.add_argument("--out", default="data/autohome_raw_rank1_with_brand.csv")
+    ap.add_argument("--wait-ms", type=int, default=2000)
+    ap.add_argument("--max-scrolls", type=int, default=15)
     args = ap.parse_args()
 
-    html = fetch_dom_after_click_brand(args.url, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
-    brand_rows = extract_brand_rows(html)
+    html = fetch_html_with_playwright(args.url, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
+    rows = extract_rows_from_html(html)
 
-    if brand_rows:
-        os.makedirs(os.path.dirname(args.out_brand), exist_ok=True)
-        pd.DataFrame(brand_rows).to_csv(args.out_brand, index=False, encoding="utf-8-sig")
-        print(f"[ok] brand rows={len(brand_rows)} -> {args.out_brand}")
-    else:
-        print("[warn] brand rows=0（ランキング行を取得できませんでした。タブ未反映/構造変化の可能性）")
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    pd.DataFrame(rows).to_csv(args.out, index=False, encoding="utf-8-sig")
+    print(f"[ok] rows={len(rows)} -> {args.out}")
+
 
 if __name__ == "__main__":
     main()
