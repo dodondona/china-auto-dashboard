@@ -1,131 +1,107 @@
-name: Monthly append series_url & enrich brand/series (rank/1 + global translation)
+name: run
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "15 1 2 * *"  # 毎月2日 01:15 UTC
-
-permissions:
-  contents: write
+  push:
+    paths:
+      - "data/**.csv"
+      - "tools/**.py"
+      - ".github/workflows/run.yml"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      # どれか未設定でもジョブが落ちないようにする（official はキーがある時だけ実行）
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-4o-mini
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
       - name: Setup Python
         uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install pandas requests lxml beautifulsoup4 wikipedia-api google-api-python-client openai || true
+          # requirements.txt が無くても動くように最低限を直接入れる
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas requests beautifulsoup4 lxml wikipedia-api openai
+          fi
 
-      # 1) Append series_url
+      # 1) /rank/ から series_url を付与（必須引数 --input を渡す）
       - name: Append series_url from /rank/
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          mkdir -p data
-
-          # 入力CSV（素の raw）→ *_with_series.csv を更新対象に
-          raws=(data/autohome_raw_*[0-9].csv)
-          if [ ${#raws[@]} -eq 0 ]; then
-            echo "No raw files found: data/autohome_raw_*.csv"
-            exit 0
-          fi
-
-          for src in "${raws[@]}"; do
-            out="${src%.csv}_with_series.csv"
-            echo "Append series_url: $src -> $out"
-
-            if [ -f tools/append_series_url_from_web.force_dom.py ]; then
-              # このスクリプトは --input/--output 必須
-              python tools/append_series_url_from_web.force_dom.py \
-                --input "$src" \
-                --output "$out" || true
-            elif [ -f tools/append_series_url_from_web.playwright_full.py ]; then
-              # 旧版：入力指定だけで内部で上書き/派生を作るものがあるため try
-              python tools/append_series_url_from_web.playwright_full.py \
-                --input "$src" || true
-              # もし out が未生成なら、既存の *_with_series.csv を尊重
-              [ -f "$out" ] || cp -f "$src" "$out"
-            else
-              echo "No append_series script found. Skip."
-              # 最低限パイプラインを進めるためコピー
-              cp -f "$src" "$out"
-            fi
+          for f in data/autohome_raw_*.csv; do
+            # すでに _with_series.csv があればスキップしてもOK。ここは常に上書きにしています。
+            out="${f%.csv}_with_series.csv"
+            echo ">> append_series_url_from_web.force_dom.py --input ${f} --output ${out}"
+            python tools/append_series_url_from_web.force_dom.py \
+              --input "${f}" \
+              --output "${out}" \
+              --name-col model \
+              --max-rounds 100 \
+              --idle-ms 300
           done
 
-      # 2) Enrich brand/model from <title>
+      # 2) <title> から brand/model を正規化（従来のあなたのスクリプトを呼び出し）
       - name: Enrich brand/model from <title>
-        shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          for f in data/autohome_raw_*_with_series.csv; do
+          for f in data/*_with_series.csv; do
             out="${f%_with_series.csv}_with_brand.csv"
-            echo "Enrich: $f -> $out"
-            if [ -f tools/enrich_brand_from_title.py ]; then
-              python tools/enrich_brand_from_title.py --input "$f" --output "$out"
-            elif [ -f tools/enrich_brand_model_from_title.py ]; then
-              python tools/enrich_brand_model_from_title.py --input "$f" --output "$out"
-            else
-              echo "No enrich script found, copy through."
-              cp -f "$f" "$out"
-            fi
+            echo ">> enrich_brand_model_from_title.py --input ${f} --output ${out}"
+            python tools/enrich_brand_model_from_title.py \
+              --input "${f}" \
+              --output "${out}"
           done
 
-      # 3) Translate (official → Wikipedia → LLM), NO CACHE
-      - name: Translate brand/model to global names
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
-        shell: bash
+      # 3) 公式 → Wikipedia → LLM の順で英名確定（キャッシュなし）
+      - name: Translate brand/model to global names (Official → Wikipedia → LLM; no cache)
         run: |
           set -euo pipefail
           shopt -s nullglob
-
-          # 使えるフラグを事前検出（未対応なら渡さない）
-          extra_args=()
-          if python tools/translate_brand_model_llm.py -h 2>&1 | grep -q -- '--use-official'; then
-            extra_args+=("--use-official")
-          fi
-          if python tools/translate_brand_model_llm.py -h 2>&1 | grep -q -- '--use-wikipedia'; then
-            extra_args+=("--use-wikipedia")
-          fi
-          # 逆に --cache がヘルプにあっても今回は明示的に使わない
-
-          for inp in data/autohome_raw_*_with_brand.csv; do
-            out="${inp%.csv}_ja.csv"
-            echo "Translating: $inp -> $out"
-            python tools/translate_brand_model_llm.py \
-              --input "$inp" \
-              --output "$out" \
-              --brand-col brand --model-col model \
-              --brand-ja-col brand_ja --model-ja-col model_ja \
-              --model gpt-4o \
-              "${extra_args[@]}" || true
+          for f in data/*_with_brand.csv; do
+            out="${f%_with_brand.csv}_with_brand_ja.csv"
+            echo ">> official_wiki_llm_translate.py --input ${f} --output ${out}"
+            python tools/official_wiki_llm_translate.py \
+              --input "${f}" \
+              --output "${out}" \
+              --brand-col brand \
+              --model-col model \
+              --brand-ja-col brand_ja \
+              --model-ja-col model_ja \
+              --use-official \
+              --use-wikipedia \
+              --use-llm \
+              --sleep 0
           done
 
       - name: List outputs before commit
-        run: ls -lh data | tail -n 200 || true
+        run: |
+          set -euo pipefail
+          ls -lh data | tail -n 200 || true
 
       - name: Commit artifacts
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain data | sed -n '1p')" ]; then
-            git add data/*.csv || true
-            git commit -m "auto: append + enrich + translate (official→wiki→LLM, no cache)"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "auto: append + enrich + Official→Wikipedia→LLM translate (no cache)"
             git push
           else
             echo "No changes to commit."
