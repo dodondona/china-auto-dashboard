@@ -1,14 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-rank1_brand_series_scraper.py
+rank1_brand_series_scraper.py  (reverted-minimal, brand only)
 
-Autohome ランキング基礎ページ（https://www.autohome.com.cn/rank/1）を対象に、
-- brand.csv は生成（静的DOMに出るブランド側のアンカーから抽出）
-- series.csv は「タブ切替後にXHRで挿入される動的領域」を必要とするため、
-  この“戻した段階”では未対応（DOMに無ければファイルを作らない）
-
-※ つまり「brand.csvはできた一方、series.csvはできてません」の状態を再現します。
+目的:
+- https://www.autohome.com.cn/rank/1 を対象に
+  ① ページを開く → ② 「品牌月销榜」タブをクリック → ③ 表示されたブランド一覧から brand.csv を作成
+- series.csv はこの段階では作らない（= 以前の「brandはできた / seriesは未作成」を再現）
 
 依存:
   pip install playwright beautifulsoup4 lxml pandas
@@ -16,35 +14,30 @@ Autohome ランキング基礎ページ（https://www.autohome.com.cn/rank/1）�
 """
 
 from __future__ import annotations
-import re, os, sys, argparse
-from typing import List, Dict, Tuple, Optional
+import re, os, sys, argparse, time
+from typing import List, Dict
 import pandas as pd
 from bs4 import BeautifulSoup
 
-def _lazy_import_playwright():
+def _lazy_sync_playwright():
     from playwright.sync_api import sync_playwright
     return sync_playwright
 
-# 車系/ブランド詳細ページの典型的なリンク（末尾が数値ID）
-ANCHOR_PATTERNS = [
-    r"https?://www\.autohome\.com\.cn/\d+/?$",
-    r"//www\.autohome\.com\.cn/\d+/?$",
-    r"^/\d+/?$",
-]
+# 以前の過度に厳しい「末尾が数値ID」制限は撤廃。autohome配下の a[href] を候補にする。
+AUTOMATCH_DOMAIN = re.compile(r"^https?://[^/]*autohome\.com\.cn/|^//[^/]*autohome\.com\.cn/|^/")
 
-INT_RE = re.compile(r"\d+")
-def _normalize_url(u: str) -> str:
-    u = (u or "").strip()
-    if not u:
-        return u
-    if u.startswith("//"):
-        return "https:" + u
-    if u.startswith("/"):
-        return "https://www.autohome.com.cn" + u
-    return u
+def _abs_url(href: str) -> str:
+    href = (href or "").strip()
+    if not href:
+        return href
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return "https://www.autohome.com.cn" + href
+    return href
 
-def fetch_html(url: str, wait_ms: int = 1800, max_scrolls: int = 12) -> str:
-    sync_playwright = _lazy_import_playwright()
+def fetch_dom_after_click_brand(url: str, wait_ms: int = 2200, max_scrolls: int = 16) -> str:
+    sync_playwright = _lazy_sync_playwright()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -57,6 +50,7 @@ def fetch_html(url: str, wait_ms: int = 1800, max_scrolls: int = 12) -> str:
         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(wait_ms)
 
+        # ページ末尾までゆっくりスクロール（遅延ロード対策）
         last_h = 0
         for _ in range(max_scrolls):
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -66,103 +60,117 @@ def fetch_html(url: str, wait_ms: int = 1800, max_scrolls: int = 12) -> str:
                 break
             last_h = h
 
+        # ★ ブランド月次タブをクリック（存在すれば）
+        #    文言: 「品牌月销榜」(Brand Monthly) / 「品牌周销榜」もあるが、月次のみ対象
+        try:
+            # まずは exact で探す
+            loc = page.get_by_text("品牌月销榜", exact=True)
+            if loc.count() == 0:
+                # 緩め探索（余白や別要素の兼ね合いで一致しないケース）
+                loc = page.locator("text=品牌月销榜")
+            if loc and loc.is_visible():
+                loc.first.click()
+                page.wait_for_timeout(wait_ms)
+                # クリック後にもスクロールして遅延部分を露出
+                last_h = 0
+                for _ in range(max_scrolls // 2):
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(wait_ms)
+                    h = page.evaluate("document.body.scrollHeight")
+                    if h == last_h:
+                        break
+                    last_h = h
+        except Exception:
+            # 見つからない場合はそのまま（= 既にブランドタブ表示か、構造が同一DOMに出ている）
+            pass
+
         html = page.content()
+        # デバッグ用に保存（必要ならコメント解除）
+        # with open("data/debug_rank1_after_brand.html", "w", encoding="utf-8") as f:
+        #     f.write(html)
+
         context.close()
         browser.close()
-    return html
+        return html
 
-def parse_brand_from_rank1(html: str) -> List[Dict]:
+def extract_brands_from_html(html: str) -> List[Dict]:
     """
-    rank/1 のページに静的に出ている“ブランド側”のリンク群を拾う素朴抽出。
-    （環境によりDOM構造差があるため、厳密なrank値等は期待しない）
+    ブランドタブ表示後の DOM からブランド名/リンクを抽出する。
+    - a[href] が autohome ドメイン配下で、テキストが「ブランド名らしい」短めの中国語/英語を採用
+    - 重複を除外
     """
     soup = BeautifulSoup(html, "lxml")
     rows, seen = [], set()
 
-    # ざっくり a[href] から、ブランド名っぽい title/text を拾う
-    anchors = []
+    # rank番号と名前がセットで並ぶカードが多いので、該当ブロックを広めに走査
+    # ここでは a[href] を走査して、ブランド名っぽいテキストだけを拾う。
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if any(re.search(p, href) for p in ANCHOR_PATTERNS):
-            anchors.append(a)
+        txt = (a.get("title") or a.get_text(strip=True) or "").strip()
 
-    for idx, a in enumerate(anchors, 1):
-        href = _normalize_url(a["href"])
-        if not href or href in seen:
+        if not href or not txt:
             continue
-        seen.add(href)
-
-        title_attr = (a.get("title") or "").strip()
-        text = (a.get_text(strip=True) or "").strip()
-        title_raw = title_attr or text
-
-        # 「ブランド名 っぽい」ものを brand に入れる（ルール最小限）
-        brand = title_raw
-        if not brand:
+        if not AUTOMATCH_DOMAIN.search(href):
             continue
+
+        # 「品牌」「车系」「销量」「查成交价」など明らかにブランド名でないものは除外
+        bad_kw = ("车系", "销量", "成交价", "排行榜", "首页", "文章", "视频", "直播", "论坛", "口碑",
+                  "经销商", "二手车", "降价", "工具", "反馈", "问题举报", "关于我们", "联系我们", "招贤", "营业执照")
+        if any(k in txt for k in bad_kw):
+            continue
+
+        # ブランド名らしさ: 3～10文字程度 / 先頭英字または中日韓文字を含む
+        if not (2 <= len(txt) <= 12):
+            continue
+        if not re.search(r"[A-Za-z\u4e00-\u9fff]", txt):
+            continue
+
+        absurl = _abs_url(href)
+        key = (txt, absurl)
+        if key in seen:
+            continue
+        seen.add(key)
 
         rows.append({
-            "rank_seq": idx,
-            "brand": brand,
-            "brand_url": href,
-            "title_raw": title_raw,
+            "brand": txt,
+            "brand_url": absurl,
+            "title_raw": txt,
         })
-    return rows
 
-def parse_series_from_rank1(html: str) -> List[Dict]:
-    """
-    rank/1 の“シリーズ（车系）”はタブ切替後にXHRで注入されることが多く、
-    この“戻した段階”では DOM に存在しないため抽出しない。
-    → DOMに系列ブロックが見つからなければ空を返す。
-    """
-    soup = BeautifulSoup(html, "lxml")
+    # ヒットが多すぎる場合は簡易フィルタ（同一 brand の複数URLは最初の一件だけ）
+    uniq, picked = set(), []
+    for r in rows:
+        b = r["brand"]
+        if b in uniq:
+            continue
+        uniq.add(b)
+        picked.append(r)
 
-    # シリーズ領域（例：タブ "车系" 押下後に出るリスト）が無ければ空
-    # ここでは軽くキーワードで探すだけ（存在しない想定）
-    series_container = soup.find(lambda tag: tag.name in ("div", "section")
-                                 and ("车系" in (tag.get_text(strip=True) or "")
-                                      or "系列" in (tag.get_text(strip=True) or "")))
-    if not series_container:
-        return []  # ← ここが今回の「series.csv ができていない」理由
-
-    # （将来的に対応するなら、ここで series_container 内のリンク/タイトルを解析）
-    return []
+    # rank_seq を付与
+    out = []
+    for i, r in enumerate(picked, 1):
+        out.append({"rank_seq": i, **r})
+    return out
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", help="https://www.autohome.com.cn/rank/1 等", required=False)
-    ap.add_argument("--from-html", help="保存済みHTMLを解析（Playwright不要）", required=False)
-    ap.add_argument("--out-brand", default="brand.csv")
-    ap.add_argument("--out-series", default="series.csv")
-    ap.add_argument("--wait-ms", type=int, default=1800)
-    ap.add_argument("--max-scrolls", type=int, default=12)
+    ap.add_argument("--url", required=True, help="https://www.autohome.com.cn/rank/1 等")
+    ap.add_argument("--out-brand", default="data/brand.csv")
+    ap.add_argument("--wait-ms", type=int, default=2200)
+    ap.add_argument("--max-scrolls", type=int, default=16)
     args = ap.parse_args()
 
-    if not args.url and not args.from_html:
-        print("ERROR: --url または --from-html のいずれかを指定してください。", file=sys.stderr)
-        sys.exit(1)
+    html = fetch_dom_after_click_brand(args.url, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
+    brand_rows = extract_brands_from_html(html)
 
-    if args.from_html:
-        with open(args.from_html, "r", encoding="utf-8", errors="ignore") as f:
-            html = f.read()
-    else:
-        html = fetch_html(args.url, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
-
-    # brand 側は出る（＝今回「brand.csv はできた」）
-    brand_rows = parse_brand_from_rank1(html)
     if brand_rows:
+        os.makedirs(os.path.dirname(args.out_brand), exist_ok=True)
         pd.DataFrame(brand_rows).to_csv(args.out_brand, index=False, encoding="utf-8-sig")
         print(f"[ok] brand rows={len(brand_rows)} -> {args.out_brand}")
     else:
-        print("[warn] brand rows=0（ページ構造変化／要素未出現の可能性）")
+        print("[warn] brand rows=0（タブ未反映 or 構造変更の可能性。debug HTML を確認してください）")
 
-    # series 側は、タブ切替＋XHR注入後でないとDOMに無い → 見つからなければファイルを作らない
-    series_rows = parse_series_from_rank1(html)
-    if series_rows:
-        pd.DataFrame(series_rows).to_csv(args.out_series, index=False, encoding="utf-8-sig")
-        print(f"[ok] series rows={len(series_rows)} -> {args.out_series}")
-    else:
-        print("[info] series rows=0 -> series.csv は作成しません（タブ未クリック/XHR未取得のため）")
+    # series.csv はこの段階では作らない = 何もしない
 
 if __name__ == "__main__":
     main()
