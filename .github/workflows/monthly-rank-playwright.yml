@@ -3,7 +3,11 @@ name: Autohome link+title scrape (reverted minimal)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"  # 毎月2日 10:15(JST)相当。必要に応じて調整
+    - cron: "15 1 2 * *"  # 毎月2日 10:15(JST)相当
+
+# ★ これが無いと github-actions[bot] が push できず 403 になります
+permissions:
+  contents: write
 
 jobs:
   scrape:
@@ -29,7 +33,6 @@ jobs:
         id: month
         shell: bash
         run: |
-          # 前月の年月 (例: 2025-09)
           MONTH=$(date -u -d "$(date +%Y-%m-01) -1 day" +%Y-%m)
           echo "month=$MONTH" >> $GITHUB_OUTPUT
 
