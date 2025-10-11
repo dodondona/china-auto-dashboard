@@ -215,7 +215,6 @@ def main():
                         "Chrome/124.0.0.0 Safari/537.36"),
         )
         page = context.new_page()
-        page.set_cache_enabled(False)
 
         page.goto(args.url, wait_until="domcontentloaded")
         scroll_to_load_all(page, need_rows=50, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
