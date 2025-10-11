@@ -3,13 +3,21 @@
 
 """
 Autohome rank/1 上位50件を CSV 出力。
-- ランキング行から: seriesname / series_url / count / price / rank_change / (EV/PHEV 内訳)
-- 各シリーズページから: title_raw を取得
-- type_hint は行テキストからの簡易推定（EV/PHEV/EV+PHEV/Unknown）
+- ランキング行から: seriesname / series_url / count / price / rank_change / (EV/PHEV 台数内訳があれば拾う)
+- 各シリーズ詳細ページへ: 「能源类型」等から種別(EV/PHEV/EREV/HEV/MHEV/ICE)を取得して補完
+- title_raw はシリーズページ <title> をそのまま
 
-出力列:
+出力列（既存互換＋末尾に補完列を追加）:
 rank_seq,rank,seriesname,series_url,brand,model,brand_conf,series_conf,title_raw,
-count,ev_count,phev_count,type_hint,price,rank_change
+count,ev_count,phev_count,type_hint,price,rank_change,
+series_energy_raw,type_from_page,type_final,is_ev_binary
+
+- ev_count/phev_count … ランキング行に明示がある時のみ数値。無ければ空欄
+- type_hint … ランキング行テキストからの推定（従来のまま）
+- series_energy_raw … シリーズページで見つけた原文（例: 纯电动 / 插电混动 / 增程式 / 燃油 等）
+- type_from_page … 上記原文を EV/PHEV/EREV/HEV/MHEV/ICE/Unknown に正規化
+- type_final … page側の情報を優先（Unknown のときだけ type_hint を採用）
+- is_ev_binary … EVなら1、それ以外は0（レポートで使う用、PHEV/EREV/HEV/ICEは0）
 """
 
 import argparse
@@ -44,32 +52,64 @@ def scroll_to_load_all(page: Page, need_rows: int = 50, wait_ms: int = 220, max_
         cnt = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
         if cnt >= need_rows:
             break
-        if cnt == last_cnt:
-            stagnation += 1
-        else:
-            stagnation = 0
+        stagnation = stagnation + 1 if cnt == last_cnt else 0
         last_cnt = cnt
         if stagnation >= 25:
             break
 
-# ---- 抽出ユーティリティ ----
+# ---------- ランキング行抽出 ----------
 
 COUNT_RE_GENERIC = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})")
 PRICE_RE = re.compile(r"(?:指导价|售价|厂商指导价)[:：]?\s*([0-9]+(?:\.[0-9]+)?(?:\s*-\s*[0-9]+(?:\.[0-9]+)?)?)\s*万")
-ARROW_CHANGE_RE = re.compile(r"(↑|↓)\s*(\d+)")
-HOLD_PAT = re.compile(r"(持平|平|—|-)")
 
+# ランク変動: ↑n / ↓n / 持平（=0）を robust に
+def _rank_change_from_row(row_el) -> str:
+    ARROW_CHANGE_RE = re.compile(r"(↑|↓)\s*(\d+)")
+    HOLD_PAT = re.compile(r"(持平|平|—|-)")
+
+    t = (row_el.inner_text() or "").strip()
+    m = ARROW_CHANGE_RE.search(t)
+    if m:
+        return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
+    if HOLD_PAT.search(t):
+        return "0"
+
+    for el in row_el.query_selector_all("*"):
+        for attr in ("title", "aria-label", "data-tip", "data-title"):
+            v = el.get_attribute(attr)
+            if not v: 
+                continue
+            m = ARROW_CHANGE_RE.search(v)
+            if m:
+                return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
+            if HOLD_PAT.search(v):
+                return "0"
+
+    html = (row_el.inner_html() or "")
+    up_m = re.search(r"(?:↑|icon[-_ ]?up|rise)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
+    if up_m:
+        return f"+{up_m.group(1)}"
+    down_m = re.search(r"(?:↓|icon[-_ ]?down|fall|drop)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
+    if down_m:
+        return f"-{down_m.group(1)}"
+    if re.search(r"(持平|平|—|-)", html):
+        return "0"
+
+    return ""
+
+# ランキング行に出る EV/PHEV 内訳（表記ゆらぎ許容）
 EV_PATTERNS = [
-    r"(?:EV|纯电|纯电动)[^\d]{0,8}(\d{1,3}(?:,\d{3})+|\d{4,6})",
-    r"(\d{1,3}(?:,\d{3})+|\d{4,6})[^\d]{0,8}(?:EV|纯电|纯电动)",
+    r"(?:EV|纯电|纯电动)\s*[:：]?\s*(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?",
+    r"(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?\s*(?:EV|纯电|纯电动)",
 ]
 PHEV_PATTERNS = [
-    r"(?:PHEV|插电|插混|DM-?i|DMI)[^\d]{0,8}(\d{1,3}(?:,\d{3})+|\d{4,6})",
-    r"(\d{1,3}(?:,\d{3})+|\d{4,6})[^\d]{0,8}(?:PHEV|插电|插混|DM-?i|DMI)",
+    r"(?:PHEV|插电|插混|DM-?i|DMI|插电混合)\s*[:：]?\s*(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?",
+    r"(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?\s*(?:PHEV|插电|插混|DM-?i|DMI|插电混合)",
 ]
 
 def _max_number(text: str) -> str:
-    if not text: return ""
+    if not text:
+        return ""
     best, best_val = "", -1
     for m in COUNT_RE_GENERIC.findall(text.replace("\u00A0", " ")):
         v = int(m.replace(",", ""))
@@ -78,12 +118,14 @@ def _max_number(text: str) -> str:
     return best
 
 def _pick_price(text: str) -> str:
-    if not text: return ""
+    if not text:
+        return ""
     m = PRICE_RE.search(text.replace("\u00A0", " "))
     return (m.group(1) + "万") if m else ""
 
 def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
-    if not text: return ""
+    if not text:
+        return ""
     t = text.replace("\u00A0", " ")
     for pat in patterns:
         m = re.search(pat, t, flags=re.IGNORECASE)
@@ -98,7 +140,8 @@ def _series_name_from_row(row_el) -> str:
         el = row_el.query_selector(sel)
         if el:
             s = (el.inner_text() or "").strip()
-            if s: return s
+            if s:
+                return s
     a = row_el.query_selector("a")
     if a:
         s = (a.inner_text() or "").strip()
@@ -110,51 +153,21 @@ def _series_id_from_row(row_el) -> str:
     btn = row_el.query_selector("button[data-series-id]")
     if btn:
         sid = (btn.get_attribute("data-series-id") or "").strip()
-        if sid.isdigit(): return sid
+        if sid.isdigit():
+            return sid
     a = row_el.query_selector('a[href^="/series/"][href$=".html"]')
     if a:
         href = a.get_attribute("href") or ""
         m = re.search(r"/series/(\d+)\.html", href)
-        if m: return m.group(1)
+        if m:
+            return m.group(1)
     a2 = row_el.query_selector("a[href]")
     if a2:
         href = a2.get_attribute("href") or ""
         m = re.search(r"/(\d+)/?$", href)
-        if m: return m.group(1)
+        if m:
+            return m.group(1)
     return ""
-
-def _rank_change_from_row(row_el) -> str:
-    """
-    行内の rank 変動は inner_text に出ないことがある。
-    そこで、行配下の要素を走査して text/title/aria-label から抽出。
-    """
-    # 1) まず行テキスト全体
-    t = (row_el.inner_text() or "").strip()
-    m = ARROW_CHANGE_RE.search(t)
-    if m:
-        return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
-    if HOLD_PAT.search(t): return "0"
-
-    # 2) 属性に潜んでいるケース（title / aria-label）
-    for el in row_el.query_selector_all("*"):
-        for attr in ("title", "aria-label", "data-tip", "data-title"):
-            v = el.get_attribute(attr)
-            if not v: continue
-            m = ARROW_CHANGE_RE.search(v)
-            if m:
-                return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
-            if HOLD_PAT.search(v):
-                return "0"
-        # テキストが短い span 等にも一応目を通す
-        s = (el.inner_text() or "").strip()
-        if s:
-            m2 = ARROW_CHANGE_RE.search(s)
-            if m2:
-                return f"{'+' if m2.group(1)=='↑' else '-'}{m2.group(2)}"
-            if HOLD_PAT.search(s):
-                return "0"
-
-    return ""  # 見つからなければ空（0 断定はしない）
 
 def _text_of_row(row_el) -> str:
     return (row_el.inner_text() or "").strip()
@@ -176,7 +189,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
 
         count = _max_number(txt)
         price = _pick_price(txt)
-        change = _rank_change_from_row(el)  # ← 強化版
+        change = _rank_change_from_row(el)
         ev_count   = _pick_first_number_by_patterns(txt, EV_PATTERNS)
         phev_count = _pick_first_number_by_patterns(txt, PHEV_PATTERNS)
 
@@ -204,27 +217,81 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
     out.sort(key=lambda r: r["rank"])
     return out[:topk]
 
-# ---- シリーズページから title_raw を取得 ----
+# ---------- シリーズページから title_raw & エネルギー種別 ----------
 
-def fetch_title_raw(page: Page, url: str, timeout_ms: int = 15000) -> str:
+ENERGY_LABEL_PAT = re.compile(r"(?:能源类型|能源|动力|驱动|动力类型)\s*[:：]?\s*([^\s/|·、，,　]{1,12})")
+NORMALIZE_TABLE = {
+    "纯电": "EV", "纯电动": "EV", "电动": "EV", "EV": "EV",
+    "插电混动": "PHEV", "插混": "PHEV", "PHEV": "PHEV", "插电": "PHEV",
+    "增程": "EREV", "增程式": "EREV", "增程式电动": "EREV", "REEV": "EREV",
+    "混动": "HEV", "油电混合": "HEV", "HEV": "HEV",
+    "轻混": "MHEV", "MHEV": "MHEV",
+    "汽油": "ICE", "燃油": "ICE", "柴油": "ICE",
+}
+HINT_WORDS = ["纯电", "纯电动", "EV", "插电", "插混", "PHEV", "增程", "增程式", "REEV", "混动", "HEV", "MHEV", "轻混", "燃油", "汽油", "柴油"]
+
+def _normalize_energy(word: str) -> str:
+    if not word:
+        return "Unknown"
+    w_cn = word.strip()
+    w_up = w_cn.upper()
+    if w_cn in NORMALIZE_TABLE:
+        return NORMALIZE_TABLE[w_cn]
+    if w_up in NORMALIZE_TABLE:
+        return NORMALIZE_TABLE[w_up]
+    for k, v in NORMALIZE_TABLE.items():
+        if k in w_cn or k in w_up:
+            return v
+    return "Unknown"
+
+def fetch_title_and_energy(page: Page, url: str, timeout_ms: int = 15000) -> Dict[str, str]:
+    out = {"title_raw": "", "series_energy_raw": "", "type_from_page": "Unknown"}
     if not url:
-        return ""
+        return out
     try:
         page.set_default_timeout(timeout_ms)
         page.goto(url, wait_until="domcontentloaded")
-        # document.title をそのまま
-        return page.title() or ""
-    except Exception:
-        return ""
+        out["title_raw"] = page.title() or ""
 
-# ---- main ----
+        # スペック/概要領域を優先
+        block_text = page.evaluate("""
+            () => {
+              const parts = [];
+              const sels = ['.specs','.spec','.para','.information','.configs','.card','.main','.content','body'];
+              for (const s of sels) {
+                const el = document.querySelector(s);
+                if (el) parts.push(el.innerText);
+              }
+              return parts.join('\\n\\n');
+            }
+        """) or ""
+
+        m = ENERGY_LABEL_PAT.search(block_text)
+        if m:
+            raw = m.group(1).strip()
+            out["series_energy_raw"] = raw
+            out["type_from_page"] = _normalize_energy(raw)
+            return out
+
+        # ラベル見つからない場合は、bodyテキストからヒント語
+        full = page.evaluate("() => document.body.innerText") or ""
+        for w in HINT_WORDS:
+            if w.lower() in full.lower():
+                out["series_energy_raw"] = w
+                out["type_from_page"] = _normalize_energy(w)
+                break
+        return out
+    except Exception:
+        return out
+
+# ---------- main ----------
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True, help="例: https://www.autohome.com.cn/rank/1")
-    ap.add_argument("--out", required=True, help="出力CSVパス（例: data/rank1_top50.csv）")
-    ap.add_argument("--wait-ms", type=int, default=220, help="スクロール待機ms")
-    ap.add_argument("--max-scrolls", type=int, default=220, help="最大スクロール回数")
+    ap.add_argument("--out", required=True, help="例: data/rank1_top50.csv")
+    ap.add_argument("--wait-ms", type=int, default=220)
+    ap.add_argument("--max-scrolls", type=int, default=220)
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
@@ -237,22 +304,31 @@ def main():
                         "Chrome/124.0.0.0 Safari/537.36"),
         )
 
-        # ランキングを収集
+        # ランキング
         rank_page = context.new_page()
         rank_page.goto(args.url, wait_until="domcontentloaded")
         scroll_to_load_all(rank_page, need_rows=50, wait_ms=args.wait_ms, max_scrolls=args.max_scrolls)
         rows = collect_rank_rows(rank_page, topk=50)
 
-        # title_raw 取得（直列でOK）
-        series_page = context.new_page()
+        # シリーズページで title_raw & 種別補完
+        detail_page = context.new_page()
         for r in rows:
-            r["title_raw"] = fetch_title_raw(series_page, r.get("series_url", ""))
+            info = fetch_title_and_energy(detail_page, r.get("series_url", ""))
+            # title_raw を上書き（空でなければ）
+            if info.get("title_raw"):
+                r["title_raw"] = info["title_raw"]
+            r["series_energy_raw"] = info.get("series_energy_raw", "")
+            r["type_from_page"] = info.get("type_from_page", "Unknown")
+            # 最終判定: ページ側を優先、Unknownなら従来の推定(type_hint)
+            r["type_final"] = r["type_from_page"] if r["type_from_page"] != "Unknown" else r.get("type_hint", "Unknown")
+            r["is_ev_binary"] = 1 if r["type_final"] == "EV" else 0
 
-        # CSV（従来カラム + 今回の rank_change 強化 & title_raw 復活）
+        # CSV
         fieldnames = [
             "rank_seq", "rank", "seriesname", "series_url",
             "brand", "model", "brand_conf", "series_conf", "title_raw",
             "count", "ev_count", "phev_count", "type_hint", "price", "rank_change",
+            "series_energy_raw", "type_from_page", "type_final", "is_ev_binary",
         ]
         with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -274,11 +350,15 @@ def main():
                     "type_hint": r.get("type_hint", "Unknown"),
                     "price": r.get("price", ""),
                     "rank_change": r.get("rank_change", ""),
+                    "series_energy_raw": r.get("series_energy_raw", ""),
+                    "type_from_page": r.get("type_from_page", "Unknown"),
+                    "type_final": r.get("type_final", "Unknown"),
+                    "is_ev_binary": r.get("is_ev_binary", 0),
                 })
 
         print(f"[ok] rows={len(rows)} -> {args.out}")
 
-        series_page.close()
+        detail_page.close()
         context.close()
         browser.close()
 
