@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Autohome rank/1（車系月销量榜）上位50件をベースCSVに出力。
+Autohome rank/1（车系月销量榜）上位50件をベースCSVに出力。
 この段階では各シリーズURL等のリンクと、行テキストから取れる情報のみを保存する。
 (タイトルやエネルギー種別は第2段階で各シリーズページから取得)
 
@@ -14,12 +14,13 @@ import argparse
 import csv
 import os
 import re
-from typing import List, Dict, Any
+from typing import List, Dict
 from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright, Browser, Page
 
 ABS_BASE = "https://www.autohome.com.cn"
 
+# ====== ユーティリティ ======
 def _abs_url(u: str) -> str:
     if not u: return ""
     u = u.strip()
@@ -29,10 +30,8 @@ def _abs_url(u: str) -> str:
     return urljoin(ABS_BASE + "/", u)
 
 def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
-    # 初期ロードを広めに待つ（GH Actionsの遅延対策）
     page.goto(target_url, wait_until="networkidle")
     page.wait_for_timeout(8000)
-    # 末尾まで2段階スクロールし、JSによる20位以降の挿入を待つ
     last_cnt = -1
     for i in range(max_scrolls):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -42,6 +41,7 @@ def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
         if cnt == last_cnt and i > 10: break
         last_cnt = cnt
 
+# ====== 正規表現 ======
 COUNT_RE_GENERIC = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})")
 PRICE_RE = re.compile(r"(?:指导价|售价|厂商指导价)[:：]?\s*([0-9]+(?:\.[0-9]+)?(?:\s*-\s*[0-9]+(?:\.[0-9]+)?)?)\s*万")
 EV_PATTERNS = [
@@ -55,6 +55,7 @@ PHEV_PATTERNS = [
 ARROW_CHANGE_RE = re.compile(r"(↑|↓)\s*(\d+)")
 HOLD_PAT = re.compile(r"(持平|平|—|-)")
 
+# ====== 抽出関数 ======
 def _max_number(text: str) -> str:
     best, best_val = "", -1
     for m in COUNT_RE_GENERIC.findall(text.replace("\u00A0"," ")):
@@ -74,20 +75,20 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
         if m:
             num = m.group(1) if m.lastindex else None
             if num:
-                return str(int(num.replace(",", "")))
+                return num.replace(",", "")
     return ""
 
 def _series_name_from_row(row_el) -> str:
-    for sel in [".tw-text-lg", ".tw-font-medium", ".rank-name", ".main-title"]:
-        el = row_el.query_selector(sel)
-        if el:
-            s = (el.inner_text() or "").strip()
-            if s: return s
-    a = row_el.query_selector("a")
+    name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold")
+    if name_el:
+        nm = (name_el.inner_text() or "").strip()
+        if nm: return nm
+    a = row_el.query_selector("a[href]")
     if a:
-        s = (a.inner_text() or "").strip()
-        if s and "查成交价" not in s:
-            return s.splitlines()[0].strip()
+        t = (a.get_attribute("title") or "").strip()
+        if t: return t
+        tx = (a.inner_text() or "").strip()
+        if tx: return tx
     return ""
 
 def _series_id_from_row(row_el) -> str:
@@ -120,17 +121,11 @@ def _rank_change_from_row(row_el) -> str:
             m = ARROW_CHANGE_RE.search(v)
             if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
             if HOLD_PAT.search(v): return "0"
-
-    html = (row_el.inner_html() or "")
-    up_m = re.search(r"(?:↑|icon[-_ ]?up|rise)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
-    if up_m: return f"+{up_m.group(1)}"
-    down_m = re.search(r"(?:↓|icon[-_ ]?down|fall|drop)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
-    if down_m: return f"-{down_m.group(1)}"
-    if re.search(r"(持平|平|—|-)", html): return "0"
     return ""
 
-def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
-    data = []
+# ====== メインロジック ======
+def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
+    data: List[Dict] = []
     for el in page.query_selector_all("[data-rank-num]")[:topk]:
         rank_str = (el.get_attribute("data-rank-num") or "").strip()
         try:
@@ -157,6 +152,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
     data.sort(key=lambda r: r["rank"])
     return data[:topk]
 
+# ====== 実行部 ======
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
@@ -164,8 +160,6 @@ if __name__ == "__main__":
     ap.add_argument("--wait-ms", type=int, default=220)
     ap.add_argument("--max-scrolls", type=int, default=220)
     args = ap.parse_args()
-
-    global target_url
     target_url = args.url
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
@@ -176,13 +170,14 @@ if __name__ == "__main__":
                                               "AppleWebKit/537.36 (KHTML, like Gecko) "
                                               "Chrome/124.0.0.0 Safari/537.36"))
         page = ctx.new_page()
-        page.set_default_timeout(45000)  # 45s
+        page.set_default_timeout(45000)
         _wait_rank_list_ready(page, args.wait_ms, args.max_scrolls)
         rows = collect_rank_rows(page, topk=50)
 
         with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=[
-                "rank_seq","rank","seriesname","series_url","count","ev_count","phev_count","price","rank_change"
+                "rank_seq","rank","seriesname","series_url",
+                "count","ev_count","phev_count","price","rank_change"
             ])
             w.writeheader()
             for i, r in enumerate(rows, start=1):
@@ -198,4 +193,5 @@ if __name__ == "__main__":
                     "rank_change": r["rank_change"],
                 })
         print(f"[ok] rows={len(rows)} -> {args.out}")
-        ctx.close(); browser.close()
+        ctx.close()
+        browser.close()
