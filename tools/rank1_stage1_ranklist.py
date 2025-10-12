@@ -82,15 +82,16 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
     return ""
 
 def _series_name_from_row(row_el) -> str:
-    name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold")
+    # class名が変更された場合に備え、tw-text-base と tw-font-semibold も対象に追加
+    name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold, .tw-text-base, .tw-font-semibold")
     if name_el:
-        nm = (name_el.text_content() or "").strip()
+        nm = (name_el.inner_text() or "").strip()
         if nm: return nm
     a = row_el.query_selector("a[href]")
     if a:
         t = (a.get_attribute("title") or "").strip()
         if t: return t
-        tx = (a.text_content() or "").strip()
+        tx = (a.inner_text() or "").strip()
         if tx: return tx
     return ""
 
@@ -112,7 +113,7 @@ def _series_id_from_row(row_el) -> str:
     return ""
 
 def _rank_change_from_row(row_el) -> str:
-    t = (row_el.text_content() or "").strip()
+    t = (row_el.inner_text() or "").strip()
     m = ARROW_CHANGE_RE.search(t)
     if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
     if HOLD_PAT.search(t): return "0"
@@ -139,7 +140,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
         name = _series_name_from_row(el)
         sid = _series_id_from_row(el)
         url = f"{ABS_BASE}/{sid}" if sid else ""
-        txt = (el.text_content() or "").strip()
+        txt = (el.inner_text() or "").strip()
 
         row = {
             "rank": rank,
