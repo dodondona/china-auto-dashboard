@@ -31,14 +31,17 @@ def _abs_url(u: str) -> str:
 
 def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
     page.goto(target_url, wait_until="networkidle")
-    page.wait_for_timeout(8000)
+    page.wait_for_timeout(1500)
+
     last_cnt = -1
     for i in range(max_scrolls):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(wait_ms)
         cnt = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
-        if cnt >= 50: break
-        if cnt == last_cnt and i > 10: break
+        if cnt >= 50:
+            break
+        if cnt == last_cnt and i > 10:
+            break
         last_cnt = cnt
 
 # ====== 正規表現 ======
@@ -81,13 +84,13 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
 def _series_name_from_row(row_el) -> str:
     name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold")
     if name_el:
-        nm = (name_el.inner_text() or "").strip()
+        nm = (name_el.text_content() or "").strip()
         if nm: return nm
     a = row_el.query_selector("a[href]")
     if a:
         t = (a.get_attribute("title") or "").strip()
         if t: return t
-        tx = (a.inner_text() or "").strip()
+        tx = (a.text_content() or "").strip()
         if tx: return tx
     return ""
 
@@ -109,7 +112,7 @@ def _series_id_from_row(row_el) -> str:
     return ""
 
 def _rank_change_from_row(row_el) -> str:
-    t = (row_el.inner_text() or "").strip()
+    t = (row_el.text_content() or "").strip()
     m = ARROW_CHANGE_RE.search(t)
     if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
     if HOLD_PAT.search(t): return "0"
@@ -136,7 +139,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
         name = _series_name_from_row(el)
         sid = _series_id_from_row(el)
         url = f"{ABS_BASE}/{sid}" if sid else ""
-        txt = (el.inner_text() or "").strip()
+        txt = (el.text_content() or "").strip()
 
         row = {
             "rank": rank,
