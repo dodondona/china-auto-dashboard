@@ -30,6 +30,7 @@ def _abs_url(u: str) -> str:
     return urljoin(ABS_BASE + "/", u)
 
 def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
+    # Autohome は CSR描画が遅いので innerText に値が入るまで待機
     page.goto(target_url, wait_until="networkidle")
     page.wait_for_timeout(1500)
 
@@ -43,6 +44,11 @@ def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
         if cnt == last_cnt and i > 10:
             break
         last_cnt = cnt
+
+    # 追加: テキスト描画完了まで待つ（SSR/CSR 両対応）
+    page.wait_for_function(
+        "() => Array.from(document.querySelectorAll('[data-rank-num]')).filter(e => e.innerText && e.innerText.trim().length > 0).length >= 20"
+    )
 
 # ====== 正規表現 ======
 COUNT_RE_GENERIC = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})")
@@ -82,7 +88,7 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
     return ""
 
 def _series_name_from_row(row_el) -> str:
-    # class名が変更された場合に備え、tw-text-base と tw-font-semibold も対象に追加
+    # SSR: .tw-text-lg / CSR: .tw-text-base.tw-font-semibold 両対応
     name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold, .tw-text-base, .tw-font-semibold")
     if name_el:
         nm = (name_el.inner_text() or "").strip()
