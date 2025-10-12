@@ -1,201 +1,164 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Autohome rank/1（車系月销量榜）上位50件をベースCSVに出力。
-この段階では各シリーズURL等のリンクと、行テキストから取れる情報のみを保存する。
-(タイトルやエネルギー種別は第2段階で各シリーズページから取得)
-
-出力列:
-rank_seq,rank,seriesname,series_url,count,ev_count,phev_count,price,rank_change
-"""
-
 import argparse
 import csv
-import os
+import json
 import re
-from typing import List, Dict, Any
-from urllib.parse import urljoin
-from playwright.sync_api import sync_playwright, Browser, Page
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-ABS_BASE = "https://www.autohome.com.cn"
+# PlaywrightでスクロールしてHTMLを丸ごと取得する（既存インターフェイス踏襲）
+from playwright.sync_api import sync_playwright
 
-def _abs_url(u: str) -> str:
-    if not u: return ""
-    u = u.strip()
-    if u.startswith("//"):  return "https:" + u
-    if u.startswith("/"):   return ABS_BASE + u
-    if u.startswith("http"):return u
-    return urljoin(ABS_BASE + "/", u)
+NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(?P<json>{.+?})</script>',
+    re.DOTALL
+)
 
-def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
-    # 初期ロードを広めに待つ（GH Actionsの遅延対策）
-    page.goto(target_url, wait_until="networkidle")
-    page.wait_for_timeout(8000)
-    # 末尾まで2段階スクロールし、JSによる20位以降の挿入を待つ
-    last_cnt = -1
-    for i in range(max_scrolls):
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(wait_ms)
-        cnt = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
-        if cnt >= 50: break
-        if cnt == last_cnt and i > 10: break
-        last_cnt = cnt
+# "EV19916  PHEV4437" のようなテキストから抽出
+EV_PHEV_RE = re.compile(r'EV\s*(\d+).{0,5}PHEV\s*(\d+)', re.IGNORECASE)
 
-COUNT_RE_GENERIC = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})")
-PRICE_RE = re.compile(r"(?:指导价|售价|厂商指导价)[:：]?\s*([0-9]+(?:\.[0-9]+)?(?:\s*-\s*[0-9]+(?:\.[0-9]+)?)?)\s*万")
-EV_PATTERNS = [
-    r"(?:EV|纯电|纯电动)\s*[:：]?\s*(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?",
-    r"(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?\s*(?:EV|纯电|纯电动)",
-]
-PHEV_PATTERNS = [
-    r"(?:PHEV|插电|插混|DM-?i|DMI|插电混合)\s*[:：]?\s*(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?",
-    r"(\d{1,3}(?:,\d{3})+|\d{4,6})\s*辆?\s*(?:PHEV|插电|插混|DM-?i|DMI|插电混合)",
-]
-ARROW_CHANGE_RE = re.compile(r"(↑|↓)\s*(\d+)")
-HOLD_PAT = re.compile(r"(持平|平|—|-)")
+def fetch_html_with_playwright(url: str, wait_ms: int, max_scrolls: int) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+        # スクロールで後半が出るレイジーロード対策
+        last_height = 0
+        for _ in range(max_scrolls):
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(wait_ms / 1000.0)
+            height = page.evaluate("document.body.scrollHeight")
+            if height == last_height:
+                break
+            last_height = height
+        html = page.content()
+        ctx.close()
+        browser.close()
+        return html
 
-def _max_number(text: str) -> str:
-    best, best_val = "", -1
-    for m in COUNT_RE_GENERIC.findall(text.replace("\u00A0"," ")):
-        v = int(m.replace(",", ""))
-        if v > best_val:
-            best_val, best = v, str(v)
-    return best
+def find_all_series_items(obj: Any) -> List[Dict[str, Any]]:
+    """
+    __NEXT_DATA__ の深いツリーから
+    rank/seriesid/seriesname/count/rankchange/rcmdesc 等を持つ配列を見つけて返す。
+    """
+    found = []
 
-def _pick_price(text: str) -> str:
-    m = PRICE_RE.search(text.replace("\u00A0", " "))
-    return (m.group(1) + "万") if m else ""
+    def walk(x: Any):
+        if isinstance(x, list):
+            for it in x:
+                walk(it)
+        elif isinstance(x, dict):
+            # 候補: rankNum と seriesid を同時に持つ辞書
+            keys = set(x.keys())
+            if {"rankNum", "seriesid"} <= keys:
+                found.append(x)
+            # 再帰
+            for v in x.values():
+                walk(v)
 
-def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
-    t = text.replace("\u00A0", " ")
-    for pat in patterns:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            num = m.group(1) if m.lastindex else None
-            if num:
-                return str(int(num.replace(",", "")))
-    return ""
+    walk(obj)
+    return found
 
-def _series_name_from_row(row_el) -> str:
-    for sel in [".tw-text-lg", ".tw-font-medium", ".rank-name", ".main-title"]:
-        el = row_el.query_selector(sel)
-        if el:
-            s = (el.inner_text() or "").strip()
-            if s: return s
-    a = row_el.query_selector("a")
-    if a:
-        s = (a.inner_text() or "").strip()
-        if s and "查成交价" not in s:
-            return s.splitlines()[0].strip()
-    return ""
+def extract_next_data(html: str) -> Optional[Dict[str, Any]]:
+    m = NEXT_DATA_RE.search(html)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group("json"))
+    except json.JSONDecodeError:
+        return None
 
-def _series_id_from_row(row_el) -> str:
-    btn = row_el.query_selector("button[data-series-id]")
-    if btn:
-        sid = (btn.get_attribute("data-series-id") or "").strip()
-        if sid.isdigit(): return sid
-    a = row_el.query_selector('a[href^="/series/"][href$=".html"]')
-    if a:
-        href = a.get_attribute("href") or ""
-        m = re.search(r"/series/(\d+)\.html", href)
-        if m: return m.group(1)
-    a2 = row_el.query_selector("a[href]")
-    if a2:
-        href = a2.get_attribute("href") or ""
-        m = re.search(r"/(\d+)/?$", href)
-        if m: return m.group(1)
-    return ""
-
-def _rank_change_from_row(row_el) -> str:
-    t = (row_el.inner_text() or "").strip()
-    m = ARROW_CHANGE_RE.search(t)
-    if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
-    if HOLD_PAT.search(t): return "0"
-
-    for el in row_el.query_selector_all("*"):
-        for attr in ("title","aria-label","data-tip","data-title"):
-            v = el.get_attribute(attr)
-            if not v: continue
-            m = ARROW_CHANGE_RE.search(v)
-            if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
-            if HOLD_PAT.search(v): return "0"
-
-    html = (row_el.inner_html() or "")
-    up_m = re.search(r"(?:↑|icon[-_ ]?up|rise)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
-    if up_m: return f"+{up_m.group(1)}"
-    down_m = re.search(r"(?:↓|icon[-_ ]?down|fall|drop)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
-    if down_m: return f"-{down_m.group(1)}"
-    if re.search(r"(持平|平|—|-)", html): return "0"
-    return ""
-
-def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
-    data = []
-    for el in page.query_selector_all("[data-rank-num]")[:topk]:
-        rank_str = (el.get_attribute("data-rank-num") or "").strip()
+def parse_rank_list_from_next(next_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    NEXT_DATA からランキング配列を抽出。
+    """
+    items = find_all_series_items(next_data)
+    results = []
+    for it in items:
         try:
-            rank = int(rank_str) if rank_str.isdigit() else len(data) + 1
+            seriesid = it.get("seriesid")
+            seriesname = it.get("seriesname")
+            rank = it.get("rankNum")
+            # 総台数
+            count = it.get("count") or it.get("saleCount") or it.get("salecount")
+            # ランク変動
+            rank_change = it.get("rankchange") or it.get("rankChange")
+            # EV/PHEVの内訳説明（あれば）
+            rcmdesc = it.get("rcmdesc") or it.get("rcmDesc") or ""
+            ev_count = phev_count = ""
+            if rcmdesc:
+                m = EV_PHEV_RE.search(rcmdesc.replace("\u3000", " ").replace("&nbsp;", " "))
+                if m:
+                    ev_count, phev_count = m.group(1), m.group(2)
+
+            if seriesid and seriesname and rank:
+                results.append({
+                    "rank_seq": int(rank),
+                    "rank": int(rank),
+                    "seriesname": seriesname,
+                    "series_url": f"https://www.autohome.com.cn/{seriesid}/",
+                    "count": str(count) if count is not None else "",
+                    "rank_change": str(rank_change) if rank_change is not None else "",
+                    "ev_count": ev_count,
+                    "phev_count": phev_count,
+                })
         except Exception:
-            rank = len(data) + 1
+            continue
 
-        name = _series_name_from_row(el)
-        sid = _series_id_from_row(el)
-        url = f"{ABS_BASE}/{sid}" if sid else ""
-        txt = (el.inner_text() or "").strip()
+    # rank順に並べて上位50だけ
+    results.sort(key=lambda r: r["rank_seq"])
+    return results[:50]
 
-        row = {
-            "rank": rank,
-            "seriesname": name,
-            "series_url": url,
-            "count": _max_number(txt),
-            "price": _pick_price(txt),
-            "rank_change": _rank_change_from_row(el),
-            "ev_count": _pick_first_number_by_patterns(txt, EV_PATTERNS),
-            "phev_count": _pick_first_number_by_patterns(txt, PHEV_PATTERNS),
-        }
-        data.append(row)
-    data.sort(key=lambda r: r["rank"])
-    return data[:topk]
+def write_base_csv(rows: List[Dict[str, Any]], out_csv: Path):
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "rank_seq","rank","seriesname","series_url",
+        "brand","model","brand_conf","series_conf",
+        "title_raw","count","ev_count","phev_count","rank_change"
+    ]
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({
+                "rank_seq": r.get("rank_seq",""),
+                "rank": r.get("rank",""),
+                "seriesname": r.get("seriesname",""),
+                "series_url": r.get("series_url",""),
+                "brand": "",
+                "model": "",
+                "brand_conf": "0.0",
+                "series_conf": "0.0",
+                "title_raw": "",
+                "count": r.get("count",""),
+                "ev_count": r.get("ev_count",""),
+                "phev_count": r.get("phev_count",""),
+                "rank_change": r.get("rank_change",""),
+            })
 
-if __name__ == "__main__":
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--wait-ms", type=int, default=220)
-    ap.add_argument("--max-scrolls", type=int, default=220)
+    ap.add_argument("--wait-ms", type=int, default=200)
+    ap.add_argument("--max-scrolls", type=int, default=200)
     args = ap.parse_args()
 
-    global target_url
-    target_url = args.url
+    html = fetch_html_with_playwright(args.url, args.wait_ms, args.max_scrolls)
+    next_data = extract_next_data(html)
+    if not next_data:
+        print("[warn] __NEXT_DATA__ not found; no rows")
+        rows = []
+    else:
+        rows = parse_rank_list_from_next(next_data)
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    write_base_csv(rows, Path(args.out))
+    print(f"[ok] base rows={len(rows)} -> {args.out}")
 
-    with sync_playwright() as p:
-        browser: Browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context(user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                              "Chrome/124.0.0.0 Safari/537.36"))
-        page = ctx.new_page()
-        page.set_default_timeout(45000)  # 45s
-        _wait_rank_list_ready(page, args.wait_ms, args.max_scrolls)
-        rows = collect_rank_rows(page, topk=50)
-
-        with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=[
-                "rank_seq","rank","seriesname","series_url","count","ev_count","phev_count","price","rank_change"
-            ])
-            w.writeheader()
-            for i, r in enumerate(rows, start=1):
-                w.writerow({
-                    "rank_seq": i,
-                    "rank": r["rank"],
-                    "seriesname": r["seriesname"],
-                    "series_url": r["series_url"],
-                    "count": r["count"],
-                    "ev_count": r["ev_count"],
-                    "phev_count": r["phev_count"],
-                    "price": r["price"],
-                    "rank_change": r["rank_change"],
-                })
-        print(f"[ok] rows={len(rows)} -> {args.out}")
-        ctx.close(); browser.close()
+if __name__ == "__main__":
+    sys.exit(main() or 0)
