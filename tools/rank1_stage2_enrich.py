@@ -1,119 +1,189 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-ステージ1で作ったCSV（series_url入り）を読み、
-各シリーズページへアクセスして <title> と エネルギー種別 を追記する。
-
-入力列（最低限必要）: rank_seq,seriesname,series_url,...
-出力列:
-rank_seq,rank,seriesname,series_url,count,ev_count,phev_count,price,rank_change,
-title_raw,series_energy_raw,type_from_page,type_final,is_ev_binary
-"""
-
 import argparse
 import csv
-import os
+import html
 import re
-from typing import Dict, List
-from playwright.sync_api import sync_playwright, Browser, Page
+import sys
+from pathlib import Path
+from typing import Dict, Any, Optional
+import json
+import time
 
-ENERGY_LABEL_PAT = re.compile(r"(?:能源类型|能源|动力|驱动|动力类型)\s*[:：]?\s*([^\s/|·、，,　]{1,12})")
-NORMALIZE = {
-    "纯电":"EV","纯电动":"EV","电动":"EV","EV":"EV",
-    "插电混动":"PHEV","插混":"PHEV","PHEV":"PHEV","插电":"PHEV","插电式混合动力":"PHEV",
-    "增程":"EREV","增程式":"EREV","增程式电动":"EREV","REEV":"EREV",
-    "混动":"HEV","油电混合":"HEV","HEV":"HEV",
-    "轻混":"MHEV","MHEV":"MHEV",
-    "汽油":"ICE","燃油":"ICE","柴油":"ICE",
-}
-HINT_WORDS = ["纯电","纯电动","EV","插电","插混","PHEV","增程","增程式","REEV","混动","HEV","MHEV","轻混","燃油","汽油","柴油"]
+import urllib.request
 
-def _norm(word: str) -> str:
-    if not word: return "Unknown"
-    wcn = word.strip()
-    wup = wcn.upper()
-    if wcn in NORMALIZE: return NORMALIZE[wcn]
-    if wup in NORMALIZE: return NORMALIZE[wup]
-    for k,v in NORMALIZE.items():
-        if k in wcn or k in wup: return v
-    return "Unknown"
+NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(?P<json>{.+?})</script>',
+    re.DOTALL
+)
 
-def fetch_title_and_energy(page: Page, url: str) -> Dict[str, str]:
-    out = {"title_raw":"", "series_energy_raw":"", "type_from_page":"Unknown"}
-    if not url: return out
+META_OG_IMAGE_RE = re.compile(
+    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\'](?P<u>[^"\']+)["\']', re.I
+)
+
+TITLE_RE = re.compile(r'<title>(?P<t>.+?)</title>', re.DOTALL | re.IGNORECASE)
+
+def http_get(url: str, timeout: int = 20) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+        return data.decode("utf-8", errors="replace")
+
+def extract_next_data(html_str: str) -> Optional[Dict[str, Any]]:
+    m = NEXT_DATA_RE.search(html_str)
+    if not m:
+        return None
     try:
-        page.set_default_timeout(45000)
-        page.goto(url, wait_until="networkidle")
-        page.wait_for_timeout(1500)
-        out["title_raw"] = page.title() or ""
+        return json.loads(m.group("json"))
+    except json.JSONDecodeError:
+        return None
 
-        # スペック/概要領域優先で取得
-        block = page.evaluate("""
-            () => {
-              const parts = [];
-              const sels = ['.specs','.spec','.para','.information','.configs','.card','.main','.content','body'];
-              for (const s of sels) { const el = document.querySelector(s); if (el) parts.push(el.innerText); }
-              return parts.join('\\n\\n');
-            }
-        """) or ""
+def detect_type_hint_from_next(next_data: Dict[str, Any]) -> Optional[str]:
+    """
+    車種ページの NEXT_DATA からエネルギー種別を推定。
+    例: '纯电', '插电混动', '燃油' 等
+    """
+    found = []
 
-        m = ENERGY_LABEL_PAT.search(block)
-        if m:
-            raw = m.group(1).strip()
-            out["series_energy_raw"] = raw
-            out["type_from_page"]    = _norm(raw)
-            return out
+    def walk(x: Any, path: str = ""):
+        if isinstance(x, dict):
+            # シリーズ基本情報やスペックに "energy" 的なキーが出ることが多い
+            for k, v in x.items():
+                lk = k.lower()
+                if lk in ("energytype", "energy", "energytypename", "energy_type", "vehicletype", "powertype"):
+                    if isinstance(v, str):
+                        found.append(v)
+                walk(v, path + "/" + k)
+        elif isinstance(x, list):
+            for i, it in enumerate(x):
+                walk(it, path + f"/[{i}]")
 
-        # ラベル見つからない時は全体からヒント語
-        body_text = page.evaluate("() => document.body.innerText") or ""
-        for w in HINT_WORDS:
-            if w.lower() in body_text.lower():
-                out["series_energy_raw"] = w
-                out["type_from_page"]    = _norm(w)
-                break
-        return out
+    walk(next_data)
+    if found:
+        s = " ".join(found)
+        # 代表値を正規化
+        if "纯电" in s or "純電" in s or "纯电动" in s:
+            return "EV"
+        if "插电" in s or "PHEV" in s or "插电混动" in s:
+            return "PHEV"
+        if "混动" in s or "HEV" in s:
+            return "HEV"
+        if "燃油" in s:
+            return "ICE"
+    return None
+
+def detect_type_hint_from_text(html_str: str) -> Optional[str]:
+    # タイトル付近や見出しに「纯电」「插电混动」などのバッジがあるケース
+    s = html.unescape(html_str)
+    if re.search(r"纯电|純電|纯电动", s):
+        return "EV"
+    if re.search(r"插电|PHEV|插电混动", s, re.IGNORECASE):
+        return "PHEV"
+    if re.search(r"混动|HEV", s, re.IGNORECASE):
+        return "HEV"
+    if re.search(r"燃油", s):
+        return "ICE"
+    return None
+
+def extract_image_url(html_str: str) -> str:
+    m = META_OG_IMAGE_RE.search(html_str)
+    if m:
+        return html.unescape(m.group("u"))
+    return ""
+
+def extract_title_raw(html_str: str) -> str:
+    m = TITLE_RE.search(html_str)
+    if m:
+        return html.unescape(m.group("t")).strip()
+    return ""
+
+def enrich_row(row: Dict[str, str]) -> Dict[str, str]:
+    url = row.get("series_url", "")
+    if not url:
+        return row
+
+    try:
+        page = http_get(url)
+        # title
+        row["title_raw"] = extract_title_raw(page) or row.get("title_raw","")
+
+        # type hint
+        next_data = extract_next_data(page)
+        th = None
+        if next_data:
+            th = detect_type_hint_from_next(next_data)
+        if not th:
+            th = detect_type_hint_from_text(page)
+        row["type_hint"] = th or "Unknown"
+
+        # image
+        row["image_url"] = extract_image_url(page)
+
+        # brand / model を title から素直に分解（フォーマット固定：「【シリーズ】ブランド_シリーズ报价…」）
+        # 例：【Model 3】特斯拉_Model 3报价_…
+        t = row.get("title_raw","")
+        brand = row.get("brand","")
+        model = row.get("model","")
+        if not (brand and model) and t.startswith("【") and "】" in t:
+            # 【シリーズ】ブランド_シリーズ报价…
+            series_cn = t[1:t.index("】")]
+            # 「】」のあとは「ブランド_シリーズ报价…」の想定
+            after = t[t.index("】")+1:]
+            # 先頭のブランド候補は '_' まで
+            m_brand = after.split("_", 1)[0]
+            # モデルはシリーズ名（上記で抜いた series_cn）
+            if not brand:
+                brand = m_brand.strip()
+            if not model:
+                model = series_cn.strip()
+        row["brand"] = brand
+        row["model"] = model
+
     except Exception:
-        return out
+        # 失敗しても Unknown/空で返す（落とさない）
+        row.setdefault("type_hint", "Unknown")
+        row.setdefault("image_url", "")
+        row.setdefault("title_raw", row.get("title_raw",""))
 
-if __name__ == "__main__":
+    return row
+
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inp", required=True, help="ステージ1CSV")
-    ap.add_argument("--out", required=True, help="追記後CSV")
+    ap.add_argument("--inp", required=True)
+    ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    rows: List[Dict[str,str]] = []
-    with open(args.inp, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    inp = Path(args.inp)
+    out = Path(args.out)
+    rows = []
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    # 入力CSVを読み込み
+    with inp.open("r", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        rows = list(r)
 
-    with sync_playwright() as p:
-        browser: Browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context(user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                              "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                              "Chrome/124.0.0.0 Safari/537.36"))
-        page = ctx.new_page()
+    # 出力カラム（従来の列に追記するだけ。ワークフローは変更不要）
+    fieldnames = r.fieldnames + [c for c in ["type_hint","image_url"] if c not in r.fieldnames]
 
-        for r in rows:
-            info = fetch_title_and_energy(page, r.get("series_url",""))
-            r["title_raw"]        = info.get("title_raw","")
-            r["series_energy_raw"]= info.get("series_energy_raw","")
-            r["type_from_page"]   = info.get("type_from_page","Unknown")
-            # final: ページ情報優先（ページで不明なら Unknown のまま）
-            r["type_final"]       = r["type_from_page"]
-            r["is_ev_binary"]     = "1" if r["type_final"] == "EV" else "0"
+    # 逐次 enrich
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for row in rows:
+            row = enrich_row(row)
+            w.writerow(row)
+            # 軽いレート制御（相手サイト負荷配慮）
+            time.sleep(0.3)
 
-        fieldnames = [
-            "rank_seq","rank","seriesname","series_url","count","ev_count","phev_count","price","rank_change",
-            "title_raw","series_energy_raw","type_from_page","type_final","is_ev_binary"
-        ]
-        with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames)
-            w.writeheader()
-            for r in rows:
-                w.writerow({k: r.get(k,"") for k in fieldnames})
+    print(f"[ok] enriched rows={len(rows)} -> {args.out}")
 
-        print(f"[ok] enriched rows={len(rows)} -> {args.out}")
-        ctx.close(); browser.close()
+if __name__ == "__main__":
+    sys.exit(main() or 0)
