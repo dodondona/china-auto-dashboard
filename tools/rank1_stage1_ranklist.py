@@ -30,20 +30,34 @@ def _abs_url(u: str) -> str:
     return urljoin(ABS_BASE + "/", u)
 
 def _wait_rank_list_ready(page: Page, wait_ms: int, max_scrolls: int):
+    # ここだけ差し替え：仮想リスト対策として「段階スクロール＋可視化強制」を行う
     page.goto(target_url, wait_until="networkidle")
     page.wait_for_timeout(1500)
 
-    last_cnt = -1
+    last_height = 0
     for i in range(max_scrolls):
-        # ★変更1: 一気に最下部へ飛ばず、段階スクロールで可視化を促す
-        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.9))")
+        # 画面高の0.8倍ずつ段階的にスクロール（中間行も必ず可視域に入れる）
+        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.8))")
         page.wait_for_timeout(wait_ms)
+
+        # スクロールで描画が進んだかを確認（進んでいない場合は少し余分に待つ）
+        new_height = page.evaluate("() => document.body.scrollHeight")
+        if new_height == last_height:
+            page.wait_for_timeout(800)
+        last_height = new_height
+
+        # 読み込まれたランク行数を確認
         cnt = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
         if cnt >= 50:
             break
-        if cnt == last_cnt and i > 10:
-            break
-        last_cnt = cnt
+
+    # 全行を一度は可視化してIntersectionObserverを発火させる
+    page.evaluate("""
+        Array.from(document.querySelectorAll('[data-rank-num]')).forEach(e => {
+            try { e.scrollIntoView({block: 'center'}); } catch (_) {}
+        });
+    """)
+    page.wait_for_timeout(1500)
 
 # ====== 正規表現 ======
 COUNT_RE_GENERIC = re.compile(r"(\d{1,3}(?:,\d{3})+|\d{4,6})")
@@ -59,7 +73,7 @@ PHEV_PATTERNS = [
 ARROW_CHANGE_RE = re.compile(r"(↑|↓)\s*(\d+)")
 HOLD_PAT = re.compile(r"(持平|平|—|-)")
 
-# ====== 抽出関数 ======
+# ====== 抽出関数（元のまま） ======
 def _max_number(text: str) -> str:
     best, best_val = "", -1
     for m in COUNT_RE_GENERIC.findall(text.replace("\u00A0"," ")):
@@ -83,17 +97,15 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
     return ""
 
 def _series_name_from_row(row_el) -> str:
-    # （元のまま）
     name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold")
     if name_el:
-        # ★変更2: 非表示でも拾えるよう text_content() を使う
-        nm = (name_el.text_content() or "").strip()
+        nm = (name_el.inner_text() or "").strip()
         if nm: return nm
     a = row_el.query_selector("a[href]")
     if a:
         t = (a.get_attribute("title") or "").strip()
         if t: return t
-        tx = (a.text_content() or "").strip()  # ★text_content()
+        tx = (a.inner_text() or "").strip()
         if tx: return tx
     return ""
 
@@ -115,8 +127,7 @@ def _series_id_from_row(row_el) -> str:
     return ""
 
 def _rank_change_from_row(row_el) -> str:
-    # ★text_content() に変更
-    t = (row_el.text_content() or "").strip()
+    t = (row_el.inner_text() or "").strip()
     m = ARROW_CHANGE_RE.search(t)
     if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
     if HOLD_PAT.search(t): return "0"
@@ -130,7 +141,7 @@ def _rank_change_from_row(row_el) -> str:
             if HOLD_PAT.search(v): return "0"
     return ""
 
-# ====== メインロジック ======
+# ====== メインロジック（元のまま） ======
 def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
     data: List[Dict] = []
     for el in page.query_selector_all("[data-rank-num]")[:topk]:
@@ -143,8 +154,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
         name = _series_name_from_row(el)
         sid = _series_id_from_row(el)
         url = f"{ABS_BASE}/{sid}" if sid else ""
-        # ★text_content() に変更
-        txt = (el.text_content() or "").strip()
+        txt = (el.inner_text() or "").strip()
 
         row = {
             "rank": rank,
@@ -160,7 +170,7 @@ def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
     data.sort(key=lambda r: r["rank"])
     return data[:topk]
 
-# ====== 実行部 ======
+# ====== 実行部（元のまま） ======
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
