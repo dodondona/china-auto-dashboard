@@ -14,7 +14,7 @@ import argparse
 import csv
 import os
 import re
-from typing import List, Dict
+from typing import List, Dict, Any
 from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright, Browser, Page
 
@@ -74,22 +74,20 @@ def _pick_first_number_by_patterns(text: str, patterns: List[str]) -> str:
         if m:
             num = m.group(1) if m.lastindex else None
             if num:
-                return num.replace(",", "")
+                return str(int(num.replace(",", "")))
     return ""
 
 def _series_name_from_row(row_el) -> str:
-    # 車名（太字・大きめテキストが多い）
-    name_el = row_el.query_selector(".tw-text-lg, .tw-text-xl, .tw-font-bold")
-    if name_el:
-        nm = (name_el.inner_text() or "").strip()
-        if nm: return nm
-    # フォールバック：リンクのtitleかテキスト
-    a = row_el.query_selector("a[href]")
+    for sel in [".tw-text-lg", ".tw-font-medium", ".rank-name", ".main-title"]:
+        el = row_el.query_selector(sel)
+        if el:
+            s = (el.inner_text() or "").strip()
+            if s: return s
+    a = row_el.query_selector("a")
     if a:
-        t = (a.get_attribute("title") or "").strip()
-        if t: return t
-        tx = (a.inner_text() or "").strip()
-        if tx: return tx
+        s = (a.inner_text() or "").strip()
+        if s and "查成交价" not in s:
+            return s.splitlines()[0].strip()
     return ""
 
 def _series_id_from_row(row_el) -> str:
@@ -122,10 +120,17 @@ def _rank_change_from_row(row_el) -> str:
             m = ARROW_CHANGE_RE.search(v)
             if m: return f"{'+' if m.group(1)=='↑' else '-'}{m.group(2)}"
             if HOLD_PAT.search(v): return "0"
+
+    html = (row_el.inner_html() or "")
+    up_m = re.search(r"(?:↑|icon[-_ ]?up|rise)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
+    if up_m: return f"+{up_m.group(1)}"
+    down_m = re.search(r"(?:↓|icon[-_ ]?down|fall|drop)[^0-9]{0,12}(\d+)", html, flags=re.IGNORECASE)
+    if down_m: return f"-{down_m.group(1)}"
+    if re.search(r"(持平|平|—|-)", html): return "0"
     return ""
 
-def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict]:
-    data: List[Dict] = []
+def collect_rank_rows(page: Page, topk: int = 50) -> List[Dict[str, Any]]:
+    data = []
     for el in page.query_selector_all("[data-rank-num]")[:topk]:
         rank_str = (el.get_attribute("data-rank-num") or "").strip()
         try:
@@ -159,6 +164,8 @@ if __name__ == "__main__":
     ap.add_argument("--wait-ms", type=int, default=220)
     ap.add_argument("--max-scrolls", type=int, default=220)
     args = ap.parse_args()
+
+    global target_url
     target_url = args.url
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
