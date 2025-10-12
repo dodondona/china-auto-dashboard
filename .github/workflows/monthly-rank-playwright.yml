@@ -30,7 +30,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # ← ここを追加（Playwrightのブラウザをダウンロード）
+          # Playwrightのブラウザを確実にインストール
           playwright install chromium
 
       - name: Run Stage1 (rank list → base CSV)
@@ -39,7 +39,8 @@ jobs:
           python tools/rank1_stage1_ranklist.py \
             --url "https://www.autohome.com.cn/rank/1" \
             --out "data/rank1_base.csv" \
-            --topk 50
+            --wait-ms 220 \
+            --max-scrolls 220
 
       - name: Upload base CSV (artifact)
         uses: actions/upload-artifact@v4
