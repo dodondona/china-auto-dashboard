@@ -1,70 +1,48 @@
 name: autohome_notify
 
 on:
-  schedule:
-    - cron: "20 9 11 * *"  # 毎月11日 09:20 UTC（中国時間17:20頃）
-  workflow_dispatch:
+  push:
+    paths:
+      - 'data/rank1_enriched.csv'   # このファイルが更新された時だけ通知
+  workflow_dispatch: {}             # 手動実行も可
 
 jobs:
-  detect_and_notify:
+  notify:
     runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Shanghai
-      TARGET_URL: "https://www.autohome.com.cn/rank/1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: 変更検出
+        id: diff
         run: |
-          python -m pip install -U pip playwright
-          python -m playwright install chromium
-          python -m playwright install-deps
-
-      # ====== スクレイピング（既存Stage1/Stage2利用） ======
-      - name: Run scraper
-        run: |
-          mkdir -p data
-          python tools/rank1_stage1_ranklist.py --url "${TARGET_URL}" --out "data/autohome_raw_latest.csv"
-          python tools/rank1_stage2_enrich.py --inp "data/autohome_raw_latest.csv" --out "data/autohome_raw_latest_enriched.csv"
-
-      # ====== ハッシュ比較 ======
-      - name: Compare hash
-        id: check
-        run: |
-          md5sum data/autohome_raw_latest_enriched.csv > new_hash.txt
-          if [ -f data/last_hash.txt ]; then
-            diff data/last_hash.txt new_hash.txt && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
-          else
+          set -e
+          # 直近コミットで data/rank1_enriched.csv が含まれているか
+          if git show --name-only --pretty="" HEAD | grep -q '^data/rank1_enriched.csv$'; then
             echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Save hash
-        if: always()
-        run: cp new_hash.txt data/last_hash.txt
-
-      # ====== 通知（GitHub Actions標準メール） ======
-      - name: Notify if changed
-        if: ${{ steps.check.outputs.changed == 'true' }}
-        uses: actions/github-script@v7
+      - name: メール送信
+        if: steps.diff.outputs.changed == 'true'
+        uses: dawidd6/action-send-mail@v3
         with:
-          script: |
-            const msg = `
-📊 **Autohomeランキングが更新されました**
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}   # 例: 587
+          username: ${{ secrets.SMTP_USERNAME }}  # 例: Gmail の場合はメールアドレス
+          password: ${{ secrets.SMTP_PASSWORD }}  # 例: Gmail のアプリパスワード
+          subject: "Autohomeランキング更新: ${{ github.repository }} / ${{ github.ref_name }}"
+          from: ${{ secrets.FROM_EMAIL }}
+          to:   ${{ secrets.TO_EMAIL }}
+          # コロンやURLを含む本文はブロックスカラで。これが L59 付近の文法エラーの典型対策です
+          body: |
+            rank1_enriched.csv が更新されました。
 
-URL: ${process.env.TARGET_URL}
-日時: ${new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}
-ファイル: data/autohome_raw_latest_enriched.csv
+            Repository : ${{ github.repository }}
+            Branch     : ${{ github.ref_name }}
+            Commit     : ${{ github.sha }}
+            Commit URL : https://github.com/${{ github.repository }}/commit/${{ github.sha }}
 
-→ GitHub上でこのActions runを確認してください。
-`;
-            core.notice(msg);
-            core.summary.addHeading("Autohomeランキング更新通知");
-            core.summary.addCodeBlock(msg);
-            await core.summary.write();
+            変更ファイル:
+            - data/rank1_enriched.csv
