@@ -5,7 +5,7 @@
 下ごしらえ専用:
 - ランキングページ (例: https://www.autohome.com.cn/rank/1) を開き、上位50件の车系列リンクを収集
 - 各 车系列 ページの HTML を保存
-- ついでにランキングページの HTML スナップショットも保存
+- ランキングページの HTML スナップショットも保存
 - 既存の Stage1/Stage2 には影響を与えない（出力は専用ディレクトリに保存）
 
 出力:
@@ -36,8 +36,8 @@ from urllib.parse import urljoin
 from playwright.sync_api import sync_playwright, Page, Browser
 
 ABS_BASE = "https://www.autohome.com.cn"
-SERIES_ID_RE = re.compile(r"/series/(\d+)\.html|/(\d+)/?$")
-
+SERIES_ANCHOR_RE = re.compile(r'href="(?:/series/(\d+)\.html|/(\d+)/?)"')
+DATA_RANK_RE = re.compile(r'data-rank-num="(\d+)"')
 
 def abs_url(u: str) -> str:
     if not u:
@@ -51,61 +51,43 @@ def abs_url(u: str) -> str:
         return u
     return urljoin(ABS_BASE + "/", u)
 
-
 def extract_series_id(href: str) -> str:
-    if not href:
-        return ""
-    m = SERIES_ID_RE.search(href)
+    m = re.search(r"/series/(\d+)\.html|/(\d+)/?$", href)
     if not m:
         return ""
-    # グループ1が /series/12345.html、グループ2が /12345/ のパターン
     sid = m.group(1) or m.group(2) or ""
-    return sid.strip() if (sid and sid.isdigit()) else ""
-
+    return sid if (sid and sid.isdigit()) else ""
 
 def wait_rank_list_ready(page: Page, target_url: str, wait_ms: int, max_scrolls: int):
-    """
-    無限スクロール&仮想リスト対策:
-    - networkidle で大枠の読み込み完了を待つ
-    - 0.8画面ずつ段階スクロールして、IntersectionObserver を確実に発火
-    - 最後に全行を中心表示して描画を確定
-    """
-    page.goto(target_url, wait_until="networkidle")
-    page.wait_for_timeout(1500)
+    # 中国サイトで networkidle が詰まりやすい環境があるため domcontentloaded に寄せる
+    page.goto(target_url, wait_until="domcontentloaded")
+    page.wait_for_timeout(1000)
 
-    last_height = 0
     last_count = -1
     for i in range(max_scrolls):
-        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.8))")
+        # 段階スクロールで仮想リストを必ず可視化
+        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.85))")
         page.wait_for_timeout(wait_ms)
-
-        # 新しい行が増えているか
         cnt = page.evaluate("() => document.querySelectorAll('[data-rank-num]').length")
         if cnt >= 50:
             break
         if cnt == last_count and i > 10:
-            # スクロールしても増えないなら軽く待つ
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(500)
         last_count = cnt
 
-        # 高さの変化（レンダリング進捗）も観測
-        new_h = page.evaluate("() => document.body.scrollHeight")
-        last_height = new_h
-
-    # 全行を一度は可視化（描画を確定させる）
+    # すべての行を一度は可視化
     page.evaluate("""
         Array.from(document.querySelectorAll('[data-rank-num]')).forEach(e => {
             try { e.scrollIntoView({block: 'center'}); } catch (e) {}
         });
     """)
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(800)
 
-
-def collect_series_links(page: Page, topk: int = 50) -> List[Tuple[int, str, str]]:
+def collect_series_links_dom(page: Page, topk: int = 50) -> List[Tuple[int, str, str]]:
     """
-    [ (rank, series_id, series_url), ... ] を rank 昇順で返す
+    DOMから rank, series_id, series_url を収集
     """
-    items = []
+    items: List[Tuple[int, str, str]] = []
     rows = page.query_selector_all("[data-rank-num]")[:topk]
     for el in rows:
         rank_str = (el.get_attribute("data-rank-num") or "").strip()
@@ -121,11 +103,9 @@ def collect_series_links(page: Page, topk: int = 50) -> List[Tuple[int, str, str
         if sid and url:
             items.append((rank, sid, url))
 
-    # rank順で整列 & 上位topkまで
+    # rank順＆重複排除
     items.sort(key=lambda x: x[0])
-    # 同一series_idが重複する場合（あり得ないが）を防御的に除外
-    seen = set()
-    dedup = []
+    seen, dedup = set(), []
     for r, sid, url in items:
         if sid in seen:
             continue
@@ -133,30 +113,76 @@ def collect_series_links(page: Page, topk: int = 50) -> List[Tuple[int, str, str
         dedup.append((r, sid, url))
     return dedup[:topk]
 
+def collect_series_links_fallback(rank_html: str, topk: int = 50) -> List[Tuple[int, str, str]]:
+    """
+    フォールバック: HTMLテキストを正規表現で直読みしてリンク抽出。
+    data-rank-num が見つからない/DOMが読めない環境でも、href の出現順で rank を付与。
+    """
+    links: List[Tuple[int, str, str]] = []
+
+    # 1) data-rank-num に紐づく近傍の href を優先的に拾う（あればより正確）
+    ranks = [int(x) for x in DATA_RANK_RE.findall(rank_html)]
+    if ranks:
+        # data-rank-num の並びに沿って、その近傍に現れる series リンクを紐付け
+        # シンプルに、全hrefを前から拾いながら rank を割り振る
+        seen = set()
+        idx = 0
+        for m in SERIES_ANCHOR_RE.finditer(rank_html):
+            sid = m.group(1) or m.group(2)
+            if not (sid and sid.isdigit()):
+                continue
+            if sid in seen:
+                continue
+            seen.add(sid)
+            rank = ranks[idx] if idx < len(ranks) else (idx + 1)
+            url = abs_url(m.group(0).split('"')[1])
+            links.append((rank, sid, url))
+            idx += 1
+            if len(links) >= topk:
+                break
+    else:
+        # 2) 最悪ケース: href 出現順で rank=1.. を割当
+        seen = set()
+        rank = 1
+        for m in SERIES_ANCHOR_RE.finditer(rank_html):
+            sid = m.group(1) or m.group(2)
+            if not (sid and sid.isdigit()):
+                continue
+            if sid in seen:
+                continue
+            seen.add(sid)
+            url = abs_url(m.group(0).split('"')[1])
+            links.append((rank, sid, url))
+            rank += 1
+            if len(links) >= topk:
+                break
+
+    # rank昇順＋重複排除（念のため）
+    links.sort(key=lambda x: x[0])
+    dedup, seen2 = [], set()
+    for r, sid, url in links:
+        if sid in seen2:  # 同じsidが混じった場合の防御
+            continue
+        seen2.add(sid)
+        dedup.append((r, sid, url))
+    return dedup[:topk]
 
 def save_text(path: str, text: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
-
 def fetch_series_html(page: Page, url: str, retries: int = 3, wait_ms: int = 800) -> str:
-    """
-    车系列ページのHTMLを取得（単純保存用）
-    - HTML本体が欲しいだけなので、networkidle→短い待機でOK
-    - 失敗時はリトライ
-    """
     last_err = None
     for _ in range(retries):
         try:
-            page.goto(url, wait_until="networkidle")
+            page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(wait_ms)
             return page.content()
         except Exception as e:
             last_err = e
             time.sleep(1.0)
     raise last_err
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -174,21 +200,30 @@ def main():
         ctx = browser.new_context(
             user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"))
+                        "Chrome/124.0.0.0 Safari/537.36"),
+            locale="zh-CN",
+            **{"accept_downloads": True}
+        )
         page = ctx.new_page()
         page.set_default_timeout(45000)
 
-        # 1) ランキングページを安定描画させる
+        # 1) ランキングページ描画
         wait_rank_list_ready(page, args.url, args.wait_ms, args.max_scrolls)
 
-        # 2) スナップショット保存（参考: 解析用）
+        # 2) スナップショット保存
         rank_html = page.content()
         save_text(os.path.join(args.outdir, "rank_page.html"), rank_html)
 
-        # 3) 上位max件の series リンク抽出
-        links = collect_series_links(page, topk=args.max)
+        # 3) 上位max件の series リンク抽出（DOM → 失敗時はHTML直読みフォールバック）
+        links = collect_series_links_dom(page, topk=args.max)
         if not links:
-            raise SystemExit("No series links collected.")
+            links = collect_series_links_fallback(rank_html, topk=args.max)
+
+        if not links:
+            # 403/検証ページの可能性もあるのでヒントを書き出して終了
+            hint_path = os.path.join(args.outdir, "rank_page.head.txt")
+            save_text(hint_path, rank_html[:4000])
+            raise SystemExit("No series links collected. (Wrote rank_page.html for debugging)")
 
         # 4) インデックスCSV保存
         index_csv = os.path.join(args.outdir, "index.csv")
@@ -199,15 +234,12 @@ def main():
                 w.writerow([r, sid, url])
 
         # 5) 各 车系列ページ HTML を保存
-        # 同じタブ page を使い回す（安定・高速）
         for r, sid, url in links:
             try:
                 html = fetch_series_html(page, url, retries=3, wait_ms=800)
                 fname = f"series_{r:02d}_{sid}.html"
                 save_text(os.path.join(args.outdir, fname), html)
-                # ランキングページに戻さなくてよい（HTML保存が目的のため）
             except Exception as e:
-                # 失敗しても全体を止めたくない場合はログだけにする
                 err_name = f"series_{r:02d}_{sid}.error.txt"
                 save_text(os.path.join(args.outdir, err_name), f"{type(e).__name__}: {e}")
 
@@ -215,7 +247,6 @@ def main():
 
         ctx.close()
         browser.close()
-
 
 if __name__ == "__main__":
     main()
