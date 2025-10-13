@@ -1,22 +1,33 @@
-# .github/workflows/monthly.yml
-name: Monthly fetch and enrich
+name: Monthly fetch and enrich (with image capture)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"
+    - cron: "15 1 2 * *"  # 毎月2日 01:15 UTC
 
 jobs:
   stage0_capture_images:
+    name: Stage0 – Capture Rank Images
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # ✅ 文字化け対策：CJKフォント導入
+      - name: Install CJK fonts (fix mojibake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
+          fc-cache -f -v
 
       - name: Install Playwright
         run: |
@@ -42,3 +53,66 @@ jobs:
         with:
           name: rank1_images
           path: data/rank1_images
+
+  # 既存の Stage1 / Stage2 も必要に応じて残す
+  stage1_rank_to_csv:
+    name: Stage1 – Rank list → Base CSV
+    runs-on: ubuntu-latest
+    needs: stage0_capture_images
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install chromium
+
+      - name: Run Stage1 (rank list → base CSV)
+        run: |
+          mkdir -p data
+          python tools/rank1_stage1_ranklist.py \
+            --url "https://www.autohome.com.cn/rank/1" \
+            --out data/rank1_base.csv \
+            --max-scrolls 220 \
+            --wait-ms 220
+
+      - name: Upload base CSV (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_base
+          path: data/rank1_base.csv
+
+  stage2_enrich_csv:
+    name: Stage2 – Enrich CSV
+    runs-on: ubuntu-latest
+    needs: stage1_rank_to_csv
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Stage2 (enrich CSV)
+        run: |
+          python tools/rank1_stage2_enrich.py \
+            --in data/rank1_base.csv \
+            --out data/rank1_enriched.csv
+
+      - name: Upload enriched CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_enriched
+          path: data/rank1_enriched.csv
