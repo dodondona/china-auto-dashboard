@@ -7,34 +7,38 @@ on:
     - cron: "15 1 2 * *"
 
 jobs:
-  stage0_fetch_html:
+  stage0_capture_images:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Playwright and browsers
+      - name: Install Playwright
         run: |
+          python -m pip install --upgrade pip
           pip install playwright
-          playwright install chromium
+          python -m playwright install chromium
 
-      - name: Fetch top 50 ranking + series pages
+      - name: Capture rank page tiles (images only)
         run: |
-          mkdir -p data/html_rank1
-          python tools/rank1_stage0_fetch_html.py \
+          mkdir -p data/rank1_images
+          python tools/rank1_stage0_capture_images.py \
             --url "https://www.autohome.com.cn/rank/1" \
-            --outdir "data/html_rank1" \
-            --max 50 \
-            --wait-ms 220 \
-            --max-scrolls 220
+            --outdir "data/rank1_images" \
+            --viewport-w 1280 \
+            --tile-height 900 \
+            --max-tiles 12 \
+            --wait-ms 350 \
+            --pre-wait 1500 \
+            --stride-ratio 0.90
 
-      - name: Upload fetched HTML as artifact
+      - name: Upload screenshots
         uses: actions/upload-artifact@v4
         with:
-          name: html_rank1_snapshot
-          path: data/html_rank1
+          name: rank1_images
+          path: data/rank1_images
