@@ -43,10 +43,10 @@ jobs:
             --outdir "data/rank1_images" \
             --viewport-w 1280 \
             --tile-height 900 \
-            --max-tiles 12 \
+            --max-tiles 16 \
             --wait-ms 350 \
             --pre-wait 1500 \
-            --stride-ratio 0.90
+            --stride-ratio 0.75
 
       - name: Upload screenshots
         uses: actions/upload-artifact@v4
