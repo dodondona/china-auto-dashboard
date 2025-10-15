@@ -1,12 +1,8 @@
 # tools/rank1_stage0_fullimage_and_links.py
-# === Autohome rank list full capture + series links ===
-# 保持内容：
-#  - Playwrightでフルページを撮影
-#  - 全車系リンクを抽出して index.csv に保存
+# === Autohome rank list full capture + series links (with --pre-wait restored) ===
 
 import os
 import csv
-import json
 import time
 import argparse
 from playwright.sync_api import sync_playwright
@@ -23,7 +19,7 @@ def collect_links(page):
     links = set()
 
     # パターン1（PCページ）
-    anchors = page.query_selector_all("a[href*='/auto/'] , a[href*='/spec/'], a[href*='/series/']")
+    anchors = page.query_selector_all("a[href*='/auto/'], a[href*='/spec/'], a[href*='/series/']")
     for a in anchors:
         href = a.get_attribute("href")
         if href and href.startswith("https://www.autohome.com.cn/") and "series" in href:
@@ -51,6 +47,7 @@ def main():
     parser.add_argument("--max", type=int, default=50)
     parser.add_argument("--wait-ms", type=int, default=220)
     parser.add_argument("--max-scrolls", type=int, default=220)
+    parser.add_argument("--pre-wait", type=int, default=1500)  # ← 復活
     parser.add_argument("--image-name", default="rank_full.png")
     args = parser.parse_args()
 
@@ -62,8 +59,13 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1500, "height": 2400})
+
         print(f"[info] Navigating to {args.url}")
         page.goto(args.url, timeout=90000)
+
+        # ここで pre-wait
+        time.sleep(args.pre_wait / 1000)
+
         scroll_page(page, args.max_scrolls, args.wait_ms)
 
         print(f"[info] Saving full screenshot: {out_img}")
@@ -79,9 +81,7 @@ def main():
             browser.close()
             exit(1)
 
-        # 上位N件に制限
         links = links[:args.max]
-
         with open(out_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["rank", "series_url"])
