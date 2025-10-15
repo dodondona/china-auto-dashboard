@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Autohomeランキングページから順位順に series_url を抽出し、
-フルページ画像を保存する。
+フルページ画像を保存する安定版。
 """
 
 import re
@@ -11,13 +11,14 @@ import time
 import argparse
 from playwright.sync_api import sync_playwright
 
-# AutohomeのURLにクエリやハッシュが付いてもマッチ可能
+# --- Autohome URL 末尾に ? や # が付いてもOK ---
 SERIES_HREF_RE = re.compile(
     r"(?:/series/(\d+)\.html)(?:[?#].*)?$|(?:/(\d+))(?:/)?(?:[?#].*)?$",
     re.I
 )
 
 def _abs_url(href: str) -> str:
+    """相対パスを絶対URL化"""
     if not href:
         return ""
     if href.startswith("http"):
@@ -30,6 +31,7 @@ def _abs_url(href: str) -> str:
 
 
 def _series_id_from_href(href: str) -> str:
+    """hrefからseries_idを抽出"""
     if not href:
         return ""
     m = SERIES_HREF_RE.search(href)
@@ -68,14 +70,14 @@ def main():
     parser.add_argument("--max", type=int, default=50)
     parser.add_argument("--wait-ms", type=int, default=250)
     parser.add_argument("--max-scrolls", type=int, default=200)
-    # === 旧ワークフロー互換 ===
+    # --- 旧ワークフロー互換引数 ---
     parser.add_argument("--pre-wait", type=int, default=1500)
     parser.add_argument("--image-name", type=str, default="rank_full.png")
     parser.add_argument("--full-image", action="store_true")
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
-    out_img = os.path.join(args.outdir, args.image-name if args.image_name else "rank_full.png")
+    out_img = os.path.join(args.outdir, args.image_name if args.image_name else "rank_full.png")
     out_csv = os.path.join(args.outdir, "index.csv")
 
     with sync_playwright() as p:
@@ -95,7 +97,7 @@ def main():
                 print(f"  scroll {i}/{args.max_scrolls}")
         time.sleep(2.0)
 
-        # === フル画像キャプチャ ===
+        # === フルページ画像キャプチャ ===
         print(f"[info] Saving full screenshot: {out_img}")
         page.screenshot(path=out_img, full_page=True)
 
