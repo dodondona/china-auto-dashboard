@@ -13,26 +13,35 @@ from playwright.sync_api import sync_playwright, Browser, Page
 ABS_BASE = "https://www.autohome.com.cn"
 SERIES_HREF_RE = re.compile(r"(?:/series/(\d+)\.html)|(?:/(\d+)/?)$", re.I)
 
+
 def _abs_url(u: str) -> str:
-    if not u: return ""
+    if not u:
+        return ""
     u = u.strip()
-    if u.startswith("//"):  return "https:" + u
-    if u.startswith("/"):   return ABS_BASE + u
-    if u.startswith("http"):return u
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
+        return ABS_BASE + u
+    if u.startswith("http"):
+        return u
     return urljoin(ABS_BASE + "/", u)
+
 
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
+
 
 def _save_text(path: str, text: str):
     _ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
+
 def _save_json(path: str, data):
     _ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 def _progressive_scroll(page: Page, wait_ms: int, max_scrolls: int):
     last_h = 0
@@ -44,85 +53,44 @@ def _progressive_scroll(page: Page, wait_ms: int, max_scrolls: int):
             page.wait_for_timeout(400)
         last_h = new_h
 
+
 def _series_id_from_href(href: str) -> str:
     m = SERIES_HREF_RE.search(href or "")
-    if not m: return ""
+    if not m:
+        return ""
     sid = m.group(1) or m.group(2) or ""
     return sid if (sid and sid.isdigit()) else ""
 
+
+# === リンク抽出部分（完全に元の形に戻した）===
 def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
     """
-    優先: [data-rank-num] 行ごとの seriesリンクを抽出して (rank, href)
-    失敗: ページ全体の seriesリンクを DOM 出現順で列挙し (index+1, href)
+    ページ全体から seriesリンクをDOM順に抽出
+    - /series/数字.html または /数字/ パターンのみ
+    - DOM出現順 = ランキング順
     """
-    pairs = page.evaluate(
-        """
-        () => {
-          const isSeries = (h) => {
-            if (!h) return false;
-            try {
-              const u = h.trim();
-              if (/^https?:/.test(u)) {
-                const p = new URL(u).pathname;
-                return /\\/series\\/\\d+\\.html/.test(p) || /^\\/(\\d+)(\\/)?$/.test(p);
-              }
-              if (u.startsWith('/')) {
-                return /\\/series\\/\\d+\\.html/.test(u) || /^\\/(\\d+)(\\/)?$/.test(u);
-              }
-              return false;
-            } catch { return false; }
-          };
-
-          // 1) 通常ルート: [data-rank-num] 行から抽出
-          const rows = Array.from(document.querySelectorAll('[data-rank-num]'));
-          const out = [];
-          for (const row of rows) {
-            const rStr = row.getAttribute('data-rank-num') || '';
-            const r = parseInt(rStr, 10);
-            if (!Number.isFinite(r)) continue;
-            const as = Array.from(row.querySelectorAll('a[href]'))
-              .map(a => a.getAttribute('href') || '')
-              .filter(h => isSeries(h));
-            if (as.length === 0) continue;
-            let chosen = as.find(h => /\\/series\\/\\d+\\.html/.test(h)) || as[0];
-            out.push([r, chosen]);
-          }
-          if (out.length > 0) return { mode: "by-row", pairs: out };
-
-          // 2) フォールバック: ページ全体から seriesリンクだけを DOM順に抽出
-          const anchors = Array.from(document.querySelectorAll('a[href]'))
-            .map(a => a.getAttribute('href') || '')
-            .filter(h => isSeries(h));
-
-          // 連続重複を避ける（同一seriesが繰返し出る場合）
-          const seen = new Set();
-          const flat = [];
-          for (const h of anchors) {
-            const key = h;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            flat.push(h);
-          }
-
-          const fb = flat.map((h, i) => [i + 1, h]); // 出現順 = ランク
-          return { mode: "fallback", pairs: fb };
-        }
-        """
-    ) or {"mode": "none", "pairs": []}
-
-    mode = pairs.get("mode", "none")
-    raw = pairs.get("pairs", [])
-
-    norm: List[Tuple[int, str]] = []
-    for r, href in raw:
-        try:
-            r = int(r)
-        except:
+    anchors = page.query_selector_all("a[href]")
+    links = []
+    for a in anchors:
+        href = a.get_attribute("href")
+        if not href:
             continue
-        norm.append((r, _abs_url(href)))
-    # デバッグ表示
-    print(f"[debug] link-extract mode = {mode}, found = {len(norm)}")
-    return norm
+        if "/series/" in href or re.match(r"^/\d+/?$", href):
+            links.append(_abs_url(href))
+
+    # 重複除去しつつ順序維持
+    seen = set()
+    unique_links = []
+    for h in links:
+        if h not in seen:
+            seen.add(h)
+            unique_links.append(h)
+
+    # ランク順に番号を振る
+    pairs = [(i + 1, h) for i, h in enumerate(unique_links)]
+    print(f"[debug] extracted {len(pairs)} links in DOM order")
+    return pairs
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -140,7 +108,8 @@ def main():
     with sync_playwright() as p:
         browser: Browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--lang=zh-CN"])
         ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
             locale="zh-CN",
             viewport={"width": 1280, "height": 900},
             device_scale_factor=2
@@ -148,7 +117,6 @@ def main():
         page: Page = ctx.new_page()
         page.set_default_timeout(45000)
 
-        # ネットワークJSONは保存だけ（順位付けには使わない）
         def _grab(resp):
             try:
                 ct = (resp.headers.get("content-type") or "").lower()
@@ -158,6 +126,7 @@ def main():
                     captured_json.append({"url": url, "data": data})
             except:
                 pass
+
         page.on("response", _grab)
 
         page.goto(args.url, wait_until="domcontentloaded")
@@ -173,7 +142,7 @@ def main():
 
         pairs = _extract_rank_link_pairs(page)
 
-        # フルページ1枚キャプチャ（timeout無効化）
+        # === フルページスクリーンショット ===
         try:
             page.screenshot(
                 path=os.path.join(args.outdir, args.image_name),
@@ -197,13 +166,13 @@ def main():
                 _save_json(os.path.join(args.outdir, "captured_json", f"resp_{i:02d}.json"), blob)
         _save_text(os.path.join(args.outdir, "page.html"), page.content())
 
-        # rank → href を確定
+        # rank→href を確定
         rank2href: Dict[int, str] = {}
         for r, href in pairs:
             if r not in rank2href:
                 rank2href[r] = href
 
-        # DOM順フォールバックのときは 1..N の連番になるため、そのまま rank 昇順でOK
+        # CSV出力
         rows: List[Tuple[int, str, str]] = []
         for r in sorted(rank2href.keys()):
             href = rank2href[r]
@@ -217,8 +186,6 @@ def main():
             missing = [x for x in range(1, max(ranks)+1) if x not in ranks]
             if missing:
                 print(f"[warn] missing ranks detected: {missing}")
-        else:
-            print("[warn] no rank→link pairs extracted")
 
         with open(os.path.join(args.outdir, "index.csv"), "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
@@ -230,6 +197,7 @@ def main():
 
         ctx.close()
         browser.close()
+
 
 if __name__ == "__main__":
     main()
