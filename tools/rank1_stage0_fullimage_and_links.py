@@ -1,95 +1,76 @@
 # tools/rank1_stage0_fullimage_and_links.py
-# === Autohome rank list full capture + series links (with --pre-wait restored) ===
+# =========================================================
+# Autohome月間ランキングページのフル画像キャプチャ＋車両リンク収集
+# =========================================================
 
-import os
-import csv
 import time
-import argparse
+import json
+import os
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-def scroll_page(page, max_scrolls=200, wait_ms=220):
-    """段階的にスクロールして全要素を読み込む"""
-    for i in range(max_scrolls):
-        page.evaluate("window.scrollBy(0, document.body.scrollHeight / 10)")
-        print(f"scroll {i*10}/{max_scrolls*10}")
-        time.sleep(wait_ms / 1000)
-
-def collect_links(page):
-    """ランキングページから車系リンクを取得"""
-    links = set()
-
-    # パターン1（PCページ）
-    anchors = page.query_selector_all("a[href*='/auto/'], a[href*='/spec/'], a[href*='/series/']")
-    for a in anchors:
-        href = a.get_attribute("href")
-        if href and href.startswith("https://www.autohome.com.cn/") and "series" in href:
-            links.add(href.split("#")[0])
-
-    # パターン2（モバイル or 動的読み込み）
-    if not links:
-        anchors = page.query_selector_all("a[href]")
-        for a in anchors:
-            href = a.get_attribute("href")
-            if href and "series" in href:
-                if href.startswith("//"):
-                    href = "https:" + href
-                elif href.startswith("/"):
-                    href = "https://www.autohome.com.cn" + href
-                links.add(href.split("#")[0])
-
-    print(f"[debug] Collected {len(links)} links")
-    return sorted(links)
-
 def main():
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--max", type=int, default=50)
-    parser.add_argument("--wait-ms", type=int, default=220)
-    parser.add_argument("--max-scrolls", type=int, default=220)
-    parser.add_argument("--pre-wait", type=int, default=1500)  # ← 復活
+    parser.add_argument("--wait-ms", type=int, default=200)
+    parser.add_argument("--max-scrolls", type=int, default=2200)
     parser.add_argument("--image-name", default="rank_full.png")
+    parser.add_argument("--pre-wait", type=int, default=1500)  # ← 復活
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
     out_img = os.path.join(args.outdir, args.image_name)
+    out_json = os.path.join(args.outdir, "debug_links.json")
     out_csv = os.path.join(args.outdir, "index.csv")
-    out_html = os.path.join(args.outdir, "rank_page.html")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1500, "height": 2400})
-
+        page = browser.new_page(viewport={"width": 1200, "height": 1600})
         print(f"[info] Navigating to {args.url}")
-        page.goto(args.url, timeout=90000)
+        page.goto(args.url, wait_until="networkidle")
+        time.sleep(args.pre_wait / 1000)  # ← 復活
 
-        # ここで pre-wait
-        time.sleep(args.pre_wait / 1000)
+        # ===== スクロール処理 =====
+        total_scrolls = args.max_scrolls
+        for i in range(0, total_scrolls, 10):
+            page.evaluate(f"window.scrollBy(0, 300)")
+            time.sleep(args.wait_ms / 1000)
+            if i % 200 == 0:
+                print(f"scroll {i}/{total_scrolls}")
 
-        scroll_page(page, args.max_scrolls, args.wait_ms)
+        # ===== ページHTMLを保存 =====
+        html_path = os.path.join(args.outdir, "rank_page.html")  # ← 復活
+        Path(html_path).write_text(page.content(), encoding="utf-8")  # ← 復活
+        print(f"[info] Saved HTML snapshot to {html_path}")
 
-        print(f"[info] Saving full screenshot: {out_img}")
+        # ===== スクリーンショット保存 =====
         page.screenshot(path=out_img, full_page=True)
+        print(f"[info] Saving full screenshot: {out_img}")
 
-        html = page.content()
-        with open(out_html, "w", encoding="utf-8") as f:
-            f.write(html)
+        # ===== 車両リンク収集 =====
+        anchors = page.query_selector_all("a[href*='/spec/']")
+        links = []
+        for a in anchors:
+            href = a.get_attribute("href")
+            if href and href.startswith("https://"):
+                links.append(href)
+        print(f"[debug] Collected {len(links)} links")
 
-        links = collect_links(page)
-        if not links:
-            print("No series links collected.")
-            browser.close()
-            exit(1)
+        # ===== 保存 =====
+        json.dump(links, open(out_json, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+        with open(out_csv, "w", encoding="utf-8") as f:
+            f.write("rank,series_url\n")
+            for i, link in enumerate(links, 1):
+                f.write(f"{i},{link}\n")
 
-        links = links[:args.max]
-        with open(out_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["rank", "series_url"])
-            for i, link in enumerate(links, start=1):
-                writer.writerow([i, link])
+        if len(links) == 0:
+            raise SystemExit("No series links collected.")
 
-        print(f"[info] Saved {len(links)} links → {out_csv}")
         browser.close()
+
 
 if __name__ == "__main__":
     main()
