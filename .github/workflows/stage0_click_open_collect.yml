@@ -1,15 +1,24 @@
-name: Stage0 Click→Open→Collect (Autohome series URLs)
+name: Monthly Autohome Rank (Playwright)
 
 on:
   workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Autohome ranking URL (e.g. https://www.autohome.com.cn/beijing/sales/2025-10)'
+        required: true
+        default: 'https://www.autohome.com.cn/beijing/sales/2025-09'
+      top_n:
+        description: 'How many ranks to collect'
+        required: true
+        default: '100'
   schedule:
-    - cron: "15 1 2 * *"  # 毎月2日 01:15 UTC
+    - cron: '15 1 2 * *' # 毎月2日 01:15 UTC
 
 jobs:
-  run:
-    name: Run Stage0 (click & collect series URLs)
+  stage0_click_collect:
+    name: Stage0 Click→Open→Collect
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repo
@@ -18,28 +27,33 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install Playwright + Chromium
         run: |
           python -m pip install --upgrade pip
           pip install playwright==1.*
           python -m playwright install --with-deps chromium
 
-      - name: Click open & collect series URLs
+      - name: Collect series URLs by clicking (ranking order)
         run: |
+          URL="${{ github.event.inputs.target_url }}"
+          TOPN="${{ github.event.inputs.top_n }}"
+          if [ -z "$URL" ]; then URL="https://www.autohome.com.cn/beijing/sales/2025-09"; fi
+          if [ -z "$TOPN" ]; then TOPN="100"; fi
+
           python tools/rank1_stage0_click_open_collect.py \
-            --url "https://www.autohome.com.cn/beijing/sales/2025-09" \
+            --url "$URL" \
             --outdir data/rank1_click \
-            --max 100 \
+            --max "$TOPN" \
             --wait-ms 220 \
             --max-scrolls 240 \
             --pre-wait 1200
 
       - name: Show CSV (head)
         run: |
-          echo "--- series_urls.csv ---"
-          head -n 20 data/rank1_click/series_urls.csv || true
+          echo "--- data/rank1_click/series_urls.csv ---"
+          sed -n '1,20p' data/rank1_click/series_urls.csv || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
