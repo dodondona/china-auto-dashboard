@@ -1,201 +1,114 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+rank1_stage0_fullimage_and_links.py
+Autohomeランキングページから順位順に series_url を抽出し、
+フルページ画像を保存する。
+"""
 
-import argparse
-import csv
-import json
-import os
 import re
-from typing import List, Tuple, Dict
-from urllib.parse import urljoin
-from playwright.sync_api import sync_playwright, Browser, Page
+import os
+import time
+import argparse
+from playwright.sync_api import sync_playwright
 
-ABS_BASE = "https://www.autohome.com.cn"
-SERIES_HREF_RE = re.compile(r"(?:/series/(\d+)\.html)|(?:/(\d+)/?)$", re.I)
+# === 改善済み: Autohomeのクエリパラメータにも対応 ===
+SERIES_HREF_RE = re.compile(
+    r"(?:/series/(\d+)\.html)(?:[?#].*)?$|(?:/(\d+))(?:/)?(?:[?#].*)?$",
+    re.I
+)
 
 
-def _abs_url(u: str) -> str:
-    if not u:
+def _abs_url(href: str) -> str:
+    if not href:
         return ""
-    u = u.strip()
-    if u.startswith("//"):
-        return "https:" + u
-    if u.startswith("/"):
-        return ABS_BASE + u
-    if u.startswith("http"):
-        return u
-    return urljoin(ABS_BASE + "/", u)
-
-
-def _ensure_dir(p: str):
-    os.makedirs(p, exist_ok=True)
-
-
-def _save_text(path: str, text: str):
-    _ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-
-def _save_json(path: str, data):
-    _ensure_dir(os.path.dirname(path))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _progressive_scroll(page: Page, wait_ms: int, max_scrolls: int):
-    last_h = 0
-    for _ in range(max_scrolls):
-        page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 0.85))")
-        page.wait_for_timeout(wait_ms)
-        new_h = page.evaluate("() => document.body.scrollHeight")
-        if new_h == last_h:
-            page.wait_for_timeout(400)
-        last_h = new_h
+    if href.startswith("http"):
+        return href
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("/"):
+        return "https://www.autohome.com.cn" + href
+    return "https://www.autohome.com.cn/" + href
 
 
 def _series_id_from_href(href: str) -> str:
-    m = SERIES_HREF_RE.search(href or "")
+    if not href:
+        return ""
+    m = SERIES_HREF_RE.search(href)
     if not m:
         return ""
     sid = m.group(1) or m.group(2) or ""
-    return sid if (sid and sid.isdigit()) else ""
+    return sid if sid.isdigit() else ""
 
 
-# === リンク抽出部分（完全に元の形に戻した）===
-def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
-    """
-    ページ全体から seriesリンクをDOM順に抽出
-    - /series/数字.html または /数字/ パターンのみ
-    - DOM出現順 = ランキング順
-    """
+def _extract_rank_link_pairs(page):
+    """ランキング順に series リンクを抽出"""
     anchors = page.query_selector_all("a[href]")
-    links = []
+    seen = set()
+    results = []
+
     for a in anchors:
         href = a.get_attribute("href")
         if not href:
             continue
-        if "/series/" in href or re.match(r"^/\d+/?$", href):
-            links.append(_abs_url(href))
+        if "/series/" in href or re.match(r"^/\d+/?", href):
+            full_url = _abs_url(href)
+            sid = _series_id_from_href(href)
+            if sid and sid not in seen:
+                seen.add(sid)
+                results.append((len(results) + 1, full_url))
 
-    # 重複除去しつつ順序維持
-    seen = set()
-    unique_links = []
-    for h in links:
-        if h not in seen:
-            seen.add(h)
-            unique_links.append(h)
-
-    # ランク順に番号を振る
-    pairs = [(i + 1, h) for i, h in enumerate(unique_links)]
-    print(f"[debug] extracted {len(pairs)} links in DOM order")
-    return pairs
+    print(f"[debug] Collected {len(results)} links")
+    return results
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--url", required=True)
-    ap.add_argument("--outdir", required=True)
-    ap.add_argument("--image-name", default="rank_full.png")
-    ap.add_argument("--pre-wait", type=int, default=1500)
-    ap.add_argument("--wait-ms", type=int, default=300)
-    ap.add_argument("--max-scrolls", type=int, default=220)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", type=str, default="https://www.autohome.com.cn/rank/1")
+    parser.add_argument("--outdir", type=str, default="data/html_rank1")
+    parser.add_argument("--max", type=int, default=50)
+    parser.add_argument("--wait-ms", type=int, default=250)
+    parser.add_argument("--max-scrolls", type=int, default=200)
+    parser.add_argument("--full-image", action="store_true")
+    args = parser.parse_args()
 
-    _ensure_dir(args.outdir)
-    captured_json = []
+    os.makedirs(args.outdir, exist_ok=True)
+    out_img = os.path.join(args.outdir, "rank1_full.png")
+    out_csv = os.path.join(args.outdir, "index.csv")
 
     with sync_playwright() as p:
-        browser: Browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--lang=zh-CN"])
-        ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-            locale="zh-CN",
-            viewport={"width": 1280, "height": 900},
-            device_scale_factor=2
-        )
-        page: Page = ctx.new_page()
-        page.set_default_timeout(45000)
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        print(f"[info] Navigating to {args.url}")
+        page.goto(args.url, wait_until="networkidle")
 
-        def _grab(resp):
-            try:
-                ct = (resp.headers.get("content-type") or "").lower()
-                url = resp.url
-                if "application/json" in ct and any(k in url for k in ("rank", "series", "config", "list", "car")):
-                    data = resp.json()
-                    captured_json.append({"url": url, "data": data})
-            except:
-                pass
+        # スクロール実施
+        for i in range(args.max_scrolls):
+            page.mouse.wheel(0, 2000)
+            time.sleep(args.wait_ms / 1000)
+            if i % 20 == 0:
+                print(f"  scroll {i}/{args.max_scrolls}")
+        time.sleep(2.0)
 
-        page.on("response", _grab)
+        # === フル画像キャプチャ ===
+        print(f"[info] Saving full screenshot: {out_img}")
+        page.screenshot(path=out_img, full_page=True)
 
-        page.goto(args.url, wait_until="domcontentloaded")
-        page.wait_for_timeout(args.pre_wait)
-        page.evaluate("() => window.scrollTo(0, 0)")
-        page.wait_for_timeout(300)
-
-        _progressive_scroll(page, args.wait_ms, args.max_scrolls)
-        page.evaluate("() => window.scrollTo(0, Math.max(0, document.body.scrollHeight - window.innerHeight))")
-        page.wait_for_timeout(600)
-        page.evaluate("() => window.scrollTo(0, 0)")
-        page.wait_for_timeout(300)
-
+        # === リンク抽出 ===
         pairs = _extract_rank_link_pairs(page)
+        if not pairs:
+            print("No series links collected.")
+            with open(os.path.join(args.outdir, "rank_page.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+            raise SystemExit(1)
 
-        # === フルページスクリーンショット ===
-        try:
-            page.screenshot(
-                path=os.path.join(args.outdir, args.image_name),
-                full_page=True,
-                timeout=0,
-                animations="disabled",
-                scale="device"
-            )
-        except Exception as e:
-            print(f"[warn] screenshot failed: {e}")
-            try:
-                page.screenshot(
-                    path=os.path.join(args.outdir, args.image_name.replace('.png', '_viewport.png')),
-                    full_page=False
-                )
-            except Exception as e2:
-                print(f"[fatal] fallback screenshot also failed: {e2}")
+        # === CSV出力 ===
+        with open(out_csv, "w", encoding="utf-8") as f:
+            f.write("rank,series_url\n")
+            for rank, link in pairs[:args.max]:
+                f.write(f"{rank},{link}\n")
 
-        if captured_json:
-            for i, blob in enumerate(captured_json, start=1):
-                _save_json(os.path.join(args.outdir, "captured_json", f"resp_{i:02d}.json"), blob)
-        _save_text(os.path.join(args.outdir, "page.html"), page.content())
-
-        # rank→href を確定
-        rank2href: Dict[int, str] = {}
-        for r, href in pairs:
-            if r not in rank2href:
-                rank2href[r] = href
-
-        # CSV出力
-        rows: List[Tuple[int, str, str]] = []
-        for r in sorted(rank2href.keys()):
-            href = rank2href[r]
-            sid = _series_id_from_href(href)
-            if not sid:
-                continue
-            rows.append((r, sid, _abs_url(href)))
-
-        if rows:
-            ranks = [r for r, _, _ in rows]
-            missing = [x for x in range(1, max(ranks)+1) if x not in ranks]
-            if missing:
-                print(f"[warn] missing ranks detected: {missing}")
-
-        with open(os.path.join(args.outdir, "index.csv"), "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            w.writerow(["rank", "series_id", "series_url"])
-            for r, sid, url in rows:
-                w.writerow([r, sid, url])
-
-        print(f"[ok] mapped {len(rows)} rank→series links (sorted by rank) -> {os.path.join(args.outdir, 'index.csv')}")
-
-        ctx.close()
+        print(f"[info] Saved {len(pairs[:args.max])} links to {out_csv}")
         browser.close()
 
 
