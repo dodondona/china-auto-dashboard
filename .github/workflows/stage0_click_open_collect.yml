@@ -1,0 +1,152 @@
+# .github/workflows/monthly-rank-playwright.yml
+name: Monthly fetch and enrich (with image capture)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Autohome ranking URL (e.g. https://www.autohome.com.cn/rank/1)'
+        required: true
+        default: 'https://www.autohome.com.cn/rank/1'
+      top_n:
+        description: 'How many to collect in Stage0'
+        required: true
+        default: '100'
+  schedule:
+    - cron: "15 1 2 * *"  # 毎月2日 01:15 UTC
+
+jobs:
+  stage0_fullimage_and_links:
+    name: Stage0 – Full-page image & series links
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 文字化け対策：CJKフォント
+      - name: Install CJK fonts (fix mojibake)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-noto-cjk-extra fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-color-emoji
+          fc-cache -f -v
+
+      - name: Install Playwright + Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install 'playwright==1.*'
+          python -m playwright install --with-deps chromium
+
+      - name: Run Stage0 (full image + network link capture)
+        run: |
+          URL="${{ github.event.inputs.target_url }}"
+          [ -z "$URL" ] && URL="https://www.autohome.com.cn/rank/1"
+          mkdir -p data/rank1_full
+          python tools/rank1_stage0_fullimage_and_links.py \
+            --url "$URL" \
+            --outdir "data/rank1_full" \
+            --pre-wait 1500 \
+            --wait-ms 300 \
+            --max-scrolls 220 \
+            --image-name "rank_full.png"
+
+      - name: Upload full image
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_full_image
+          path: data/rank1_full/rank_full.png
+
+      - name: Upload series links (index.csv)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_series_links
+          path: data/rank1_full/index.csv
+
+      - name: Upload captured JSON blobs (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_captured_json
+          path: data/rank1_full/captured_json
+
+      - name: Upload page HTML snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_page_html
+          path: data/rank1_full/page.html
+
+  stage1_ranklist_to_base:
+    name: Stage1 – Rank list → Base CSV
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: stage0_fullimage_and_links
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install 'playwright==1.*'
+          python -m playwright install chromium
+
+      - name: Run Stage1 (rank list → base CSV)
+        run: |
+          URL="${{ github.event.inputs.target_url }}"
+          [ -z "$URL" ] && URL="https://www.autohome.com.cn/rank/1"
+          mkdir -p data
+          python tools/rank1_stage1_ranklist.py \
+            --url "$URL" \
+            --out data/rank1_base.csv \
+            --max-scrolls 220 \
+            --wait-ms 220
+          echo "--- head(data/rank1_base.csv) ---"
+          sed -n '1,20p' data/rank1_base.csv || true
+
+      - name: Upload base CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_base
+          path: data/rank1_base.csv
+
+  stage2_enrich:
+    name: Stage2 – Enrich CSV
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: stage1_ranklist_to_base
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Stage2 (enrich CSV)
+        run: |
+          python tools/rank1_stage2_enrich.py \
+            --in data/rank1_base.csv \
+            --out data/rank1_enriched.csv
+
+      - name: Upload enriched CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_enriched
+          path: data/rank1_enriched.csv
