@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--wait-ms", type=int, default=200)
     parser.add_argument("--max-scrolls", type=int, default=2200)
     parser.add_argument("--image-name", default="rank_full.png")
-    parser.add_argument("--pre-wait", type=int, default=1500)  # ← 復活
+    parser.add_argument("--pre-wait", type=int, default=1500)
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -31,32 +31,36 @@ def main():
         page = browser.new_page(viewport={"width": 1200, "height": 1600})
         print(f"[info] Navigating to {args.url}")
         page.goto(args.url, wait_until="networkidle")
-        time.sleep(args.pre_wait / 1000)  # ← 復活
+        time.sleep(args.pre_wait / 1000)
 
         # ===== スクロール処理 =====
         total_scrolls = args.max_scrolls
         for i in range(0, total_scrolls, 10):
-            page.evaluate(f"window.scrollBy(0, 300)")
+            page.evaluate("window.scrollBy(0, 300)")
             time.sleep(args.wait_ms / 1000)
             if i % 200 == 0:
                 print(f"scroll {i}/{total_scrolls}")
 
         # ===== ページHTMLを保存 =====
-        html_path = os.path.join(args.outdir, "rank_page.html")  # ← 復活
-        Path(html_path).write_text(page.content(), encoding="utf-8")  # ← 復活
+        html_path = os.path.join(args.outdir, "rank_page.html")
+        Path(html_path).write_text(page.content(), encoding="utf-8")
         print(f"[info] Saved HTML snapshot to {html_path}")
 
         # ===== スクリーンショット保存 =====
         page.screenshot(path=out_img, full_page=True)
         print(f"[info] Saving full screenshot: {out_img}")
 
-        # ===== 車両リンク収集 =====
-        anchors = page.query_selector_all("a[href*='/spec/']")
+        # ===== 車両リンク収集（data-seriesid対応） =====
+        anchors = page.query_selector_all("a[data-seriesid]")
         links = []
         for a in anchors:
             href = a.get_attribute("href")
-            if href and href.startswith("https://"):
+            sid = a.get_attribute("data-seriesid")
+            if href and href.startswith("https://www.autohome.com.cn/"):
                 links.append(href)
+            elif sid:
+                links.append(f"https://www.autohome.com.cn/{sid}/")
+
         print(f"[debug] Collected {len(links)} links")
 
         # ===== 保存 =====
