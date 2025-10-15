@@ -1,0 +1,54 @@
+name: Stage0 Click-Open Collect
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stage0-click-open-collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright (Chromium)
+        run: |
+          pip install --upgrade pip
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Run Stage0 (click-open collect)
+        env:
+          RANK_URL: "https://www.autohome.com.cn/rank/1"
+          OUT_DIR: "data/rank1_click_collect"
+          MAX_ITEMS: "50"
+          WAIT_MS: "220"
+          MAX_SCROLLS: "220"
+          PRE_WAIT: "1500"
+          IMAGE_NAME: "rank_full.png"
+        run: |
+          mkdir -p "${OUT_DIR}"
+          python tools/rank1_stage0_click_open_collect.py \
+            --url "${RANK_URL}" \
+            --outdir "${OUT_DIR}" \
+            --max "${MAX_ITEMS}" \
+            --wait-ms "${WAIT_MS}" \
+            --max-scrolls "${MAX_SCROLLS}" \
+            --pre-wait "${PRE_WAIT}" \
+            --image-name "${IMAGE_NAME}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_click_open_collect_outputs
+          path: |
+            data/rank1_click_collect/index.csv
+            data/rank1_click_collect/rank_full.png
+            data/rank1_click_collect/rank_page.html
+            data/rank1_click_collect/series_html/
+          if-no-files-found: error
