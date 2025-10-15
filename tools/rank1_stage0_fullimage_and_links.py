@@ -52,8 +52,8 @@ def _series_id_from_href(href: str) -> str:
 
 def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
     """
-    1行=1車種の [data-rank-num] を走査し、
-    行内の a[href] から **seriesページ** だけを厳格に抽出して (rank, href) を返す。
+    優先: [data-rank-num] 行ごとの seriesリンクを抽出して (rank, href)
+    失敗: ページ全体の seriesリンクを DOM 出現順で列挙し (index+1, href)
     """
     pairs = page.evaluate(
         """
@@ -62,40 +62,66 @@ def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
             if (!h) return false;
             try {
               const u = h.trim();
-              if (/^https?:/.test(u)) return /\\/series\\/\\d+\\.html/.test(u) || /\\/\\d+\\/?$/.test(new URL(u).pathname);
-              if (u.startsWith('/')) return /\\/series\\/\\d+\\.html/.test(u) || /\\/\\d+\\/?$/.test(u);
+              if (/^https?:/.test(u)) {
+                const p = new URL(u).pathname;
+                return /\\/series\\/\\d+\\.html/.test(p) || /^\\/(\\d+)(\\/)?$/.test(p);
+              }
+              if (u.startsWith('/')) {
+                return /\\/series\\/\\d+\\.html/.test(u) || /^\\/(\\d+)(\\/)?$/.test(u);
+              }
               return false;
             } catch { return false; }
           };
 
+          // 1) 通常ルート: [data-rank-num] 行から抽出
           const rows = Array.from(document.querySelectorAll('[data-rank-num]'));
           const out = [];
           for (const row of rows) {
             const rStr = row.getAttribute('data-rank-num') || '';
             const r = parseInt(rStr, 10);
             if (!Number.isFinite(r)) continue;
-
             const as = Array.from(row.querySelectorAll('a[href]'))
               .map(a => a.getAttribute('href') || '')
               .filter(h => isSeries(h));
-
             if (as.length === 0) continue;
-
             let chosen = as.find(h => /\\/series\\/\\d+\\.html/.test(h)) || as[0];
             out.push([r, chosen]);
           }
-          return out;
+          if (out.length > 0) return { mode: "by-row", pairs: out };
+
+          // 2) フォールバック: ページ全体から seriesリンクだけを DOM順に抽出
+          const anchors = Array.from(document.querySelectorAll('a[href]'))
+            .map(a => a.getAttribute('href') || '')
+            .filter(h => isSeries(h));
+
+          // 連続重複を避ける（同一seriesが繰返し出る場合）
+          const seen = new Set();
+          const flat = [];
+          for (const h of anchors) {
+            const key = h;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            flat.push(h);
+          }
+
+          const fb = flat.map((h, i) => [i + 1, h]); // 出現順 = ランク
+          return { mode: "fallback", pairs: fb };
         }
         """
-    ) or []
+    ) or {"mode": "none", "pairs": []}
+
+    mode = pairs.get("mode", "none")
+    raw = pairs.get("pairs", [])
 
     norm: List[Tuple[int, str]] = []
-    for r, href in pairs:
+    for r, href in raw:
         try:
             r = int(r)
         except:
             continue
         norm.append((r, _abs_url(href)))
+    # デバッグ表示
+    print(f"[debug] link-extract mode = {mode}, found = {len(norm)}")
     return norm
 
 def main():
@@ -122,6 +148,7 @@ def main():
         page: Page = ctx.new_page()
         page.set_default_timeout(45000)
 
+        # ネットワークJSONは保存だけ（順位付けには使わない）
         def _grab(resp):
             try:
                 ct = (resp.headers.get("content-type") or "").lower()
@@ -146,12 +173,12 @@ def main():
 
         pairs = _extract_rank_link_pairs(page)
 
-        # === ★修正版: フルページキャプチャ with no timeout ===
+        # フルページ1枚キャプチャ（timeout無効化）
         try:
             page.screenshot(
                 path=os.path.join(args.outdir, args.image_name),
                 full_page=True,
-                timeout=0,  # タイムアウト無効化
+                timeout=0,
                 animations="disabled",
                 scale="device"
             )
@@ -170,11 +197,13 @@ def main():
                 _save_json(os.path.join(args.outdir, "captured_json", f"resp_{i:02d}.json"), blob)
         _save_text(os.path.join(args.outdir, "page.html"), page.content())
 
+        # rank → href を確定
         rank2href: Dict[int, str] = {}
         for r, href in pairs:
             if r not in rank2href:
                 rank2href[r] = href
 
+        # DOM順フォールバックのときは 1..N の連番になるため、そのまま rank 昇順でOK
         rows: List[Tuple[int, str, str]] = []
         for r in sorted(rank2href.keys()):
             href = rank2href[r]
@@ -188,6 +217,8 @@ def main():
             missing = [x for x in range(1, max(ranks)+1) if x not in ranks]
             if missing:
                 print(f"[warn] missing ranks detected: {missing}")
+        else:
+            print("[warn] no rank→link pairs extracted")
 
         with open(os.path.join(args.outdir, "index.csv"), "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
