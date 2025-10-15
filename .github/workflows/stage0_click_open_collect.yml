@@ -1,4 +1,4 @@
-name: Monthly rank (Playwright full image & link)
+name: Stage0 Click→Open→Collect (Autohome series URLs)
 
 on:
   workflow_dispatch:
@@ -7,63 +7,43 @@ on:
 
 jobs:
   run:
-    name: Run Stage0 (full image + network link collection)
+    name: Run Stage0 (click & collect series URLs)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install CJK fonts
+      - name: Install deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-noto-cjk fonts-arphic-uming fonts-arphic-ukai
+          python -m pip install --upgrade pip
+          pip install playwright==1.*
+          python -m playwright install --with-deps chromium
 
-      - name: Install Playwright
+      - name: Click open & collect series URLs
         run: |
-          pip install playwright
-          playwright install chromium
-
-      - name: Run Stage0 (full image + network link capture)
-        run: |
-          mkdir -p data/rank1_full
           python tools/rank1_stage0_click_open_collect.py \
-            --url "https://www.autohome.com.cn/rank/1" \
-            --outdir "data/rank1_full" \
-            --wait-ms 1500 \
-            --max-scrolls 2200 \
-            --image-name "rank_full.png"
+            --url "https://www.autohome.com.cn/beijing/sales/2025-09" \
+            --outdir data/rank1_click \
+            --max 100 \
+            --wait-ms 220 \
+            --max-scrolls 240 \
+            --pre-wait 1200
 
-      - name: Upload full image
+      - name: Show CSV (head)
+        run: |
+          echo "--- series_urls.csv ---"
+          head -n 20 data/rank1_click/series_urls.csv || true
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rank1_full_image
-          path: data/rank1_full/rank_full.png
-          if-no-files-found: ignore
-
-      - name: Upload series links (index.csv)
-        uses: actions/upload-artifact@v4
-        with:
-          name: rank1_links_csv
-          path: data/rank1_full/index.csv
-          if-no-files-found: ignore
-
-      - name: Upload captured JSON (debug)
-        uses: actions/upload-artifact@v4
-        with:
-          name: rank1_debug_json
-          path: data/rank1_full/debug.json
-          if-no-files-found: ignore
-
-      - name: Upload page HTML snapshot
-        uses: actions/upload-artifact@v4
-        with:
-          name: rank1_html_snapshot
-          path: data/rank1_full/rank_page.html
-          if-no-files-found: ignore
+          name: rank1_click_series_urls
+          path: data/rank1_click/series_urls.csv
+          if-no-files-found: error
