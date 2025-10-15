@@ -75,14 +75,12 @@ def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
             const r = parseInt(rStr, 10);
             if (!Number.isFinite(r)) continue;
 
-            // 行内の a[href] を全列挙 → seriesパターンのみ残す
             const as = Array.from(row.querySelectorAll('a[href]'))
               .map(a => a.getAttribute('href') || '')
               .filter(h => isSeries(h));
 
             if (as.length === 0) continue;
 
-            // 優先順位: /series/xxxx.html を最優先、なければ /xxxx/ を採用
             let chosen = as.find(h => /\\/series\\/\\d+\\.html/.test(h)) || as[0];
             out.push([r, chosen]);
           }
@@ -91,7 +89,6 @@ def _extract_rank_link_pairs(page: Page) -> List[Tuple[int, str]]:
         """
     ) or []
 
-    # 絶対URL化＆rank型整形
     norm: List[Tuple[int, str]] = []
     for r, href in pairs:
         try:
@@ -125,7 +122,6 @@ def main():
         page: Page = ctx.new_page()
         page.set_default_timeout(45000)
 
-        # ネットワークJSONは保険として保存（順位付けには使わない）
         def _grab(resp):
             try:
                 ct = (resp.headers.get("content-type") or "").lower()
@@ -133,7 +129,7 @@ def main():
                 if "application/json" in ct and any(k in url for k in ("rank", "series", "config", "list", "car")):
                     data = resp.json()
                     captured_json.append({"url": url, "data": data})
-            except:  # noqa
+            except:
                 pass
         page.on("response", _grab)
 
@@ -142,31 +138,40 @@ def main():
         page.evaluate("() => window.scrollTo(0, 0)")
         page.wait_for_timeout(300)
 
-        # スクロールしながら描画を発火させる
         _progressive_scroll(page, args.wait_ms, args.max_scrolls)
-        # 念のため最下端へ
         page.evaluate("() => window.scrollTo(0, Math.max(0, document.body.scrollHeight - window.innerHeight))")
         page.wait_for_timeout(600)
-        # もう一度トップへ（可視判定に依らず全行がDOM上に残っているケースに対応）
         page.evaluate("() => window.scrollTo(0, 0)")
         page.wait_for_timeout(300)
 
-        # ★ ここで最終的に rank→seriesリンク を収集
         pairs = _extract_rank_link_pairs(page)
 
-        # フルページ1枚キャプチャ
-        page.screenshot(path=os.path.join(args.outdir, args.image_name), full_page=True)
+        # === ★修正版: フルページキャプチャ with no timeout ===
+        try:
+            page.screenshot(
+                path=os.path.join(args.outdir, args.image_name),
+                full_page=True,
+                timeout=0,  # タイムアウト無効化
+                animations="disabled",
+                scale="device"
+            )
+        except Exception as e:
+            print(f"[warn] screenshot failed: {e}")
+            try:
+                page.screenshot(
+                    path=os.path.join(args.outdir, args.image_name.replace('.png', '_viewport.png')),
+                    full_page=False
+                )
+            except Exception as e2:
+                print(f"[fatal] fallback screenshot also failed: {e2}")
 
-        # デバッグ用保存
         if captured_json:
             for i, blob in enumerate(captured_json, start=1):
                 _save_json(os.path.join(args.outdir, "captured_json", f"resp_{i:02d}.json"), blob)
         _save_text(os.path.join(args.outdir, "page.html"), page.content())
 
-        # rank順に整列し、series_id を付与して CSV
         rank2href: Dict[int, str] = {}
         for r, href in pairs:
-            # 重複は最初の検出を優先
             if r not in rank2href:
                 rank2href[r] = href
 
@@ -178,7 +183,6 @@ def main():
                 continue
             rows.append((r, sid, _abs_url(href)))
 
-        # 1..N 連番になっているか簡易チェック（欠番があればログ）
         if rows:
             ranks = [r for r, _, _ in rows]
             missing = [x for x in range(1, max(ranks)+1) if x not in ranks]
