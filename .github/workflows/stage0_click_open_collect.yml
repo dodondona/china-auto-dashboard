@@ -1,14 +1,18 @@
-name: Stage0 Click-Open Collect
+name: monthly-rank-playwright
 
 on:
+  # 定期実行（必要なければ消してOK）
+  schedule:
+    - cron: '0 1 * * *'
+  # 手動実行
   workflow_dispatch:
 
 jobs:
-  stage0-click-open-collect:
+  scrape:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -23,24 +27,16 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run Stage0 (click-open collect)
-        env:
-          RANK_URL: "https://www.autohome.com.cn/rank/1"
-          OUT_DIR: "data/rank1_click_collect"
-          MAX_ITEMS: "50"
-          WAIT_MS: "220"
-          MAX_SCROLLS: "220"
-          PRE_WAIT: "1500"
-          IMAGE_NAME: "rank_full.png"
         run: |
-          mkdir -p "${OUT_DIR}"
+          mkdir -p data/rank1_click_collect
           python tools/rank1_stage0_click_open_collect.py \
-            --url "${RANK_URL}" \
-            --outdir "${OUT_DIR}" \
-            --max "${MAX_ITEMS}" \
-            --wait-ms "${WAIT_MS}" \
-            --max-scrolls "${MAX_SCROLLS}" \
-            --pre-wait "${PRE_WAIT}" \
-            --image-name "${IMAGE_NAME}"
+            --url "https://www.autohome.com.cn/rank/1" \
+            --outdir "data/rank1_click_collect" \
+            --max 50 \
+            --wait-ms 220 \
+            --max-scrolls 220 \
+            --pre-wait 1500 \
+            --image-name rank_full.png
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
