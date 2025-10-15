@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-rank1_stage0_fullimage_and_links.py
 Autohomeランキングページから順位順に series_url を抽出し、
 フルページ画像を保存する。
 """
@@ -12,12 +11,11 @@ import time
 import argparse
 from playwright.sync_api import sync_playwright
 
-# === 改善済み: Autohomeのクエリパラメータにも対応 ===
+# AutohomeのURLにクエリやハッシュが付いてもマッチ可能
 SERIES_HREF_RE = re.compile(
     r"(?:/series/(\d+)\.html)(?:[?#].*)?$|(?:/(\d+))(?:/)?(?:[?#].*)?$",
     re.I
 )
-
 
 def _abs_url(href: str) -> str:
     if not href:
@@ -51,6 +49,7 @@ def _extract_rank_link_pairs(page):
         href = a.get_attribute("href")
         if not href:
             continue
+        # /series/ または /数字/ のみを対象
         if "/series/" in href or re.match(r"^/\d+/?", href):
             full_url = _abs_url(href)
             sid = _series_id_from_href(href)
@@ -69,11 +68,14 @@ def main():
     parser.add_argument("--max", type=int, default=50)
     parser.add_argument("--wait-ms", type=int, default=250)
     parser.add_argument("--max-scrolls", type=int, default=200)
+    # === 旧ワークフロー互換 ===
+    parser.add_argument("--pre-wait", type=int, default=1500)
+    parser.add_argument("--image-name", type=str, default="rank_full.png")
     parser.add_argument("--full-image", action="store_true")
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
-    out_img = os.path.join(args.outdir, "rank1_full.png")
+    out_img = os.path.join(args.outdir, args.image-name if args.image_name else "rank_full.png")
     out_csv = os.path.join(args.outdir, "index.csv")
 
     with sync_playwright() as p:
@@ -81,6 +83,9 @@ def main():
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         print(f"[info] Navigating to {args.url}")
         page.goto(args.url, wait_until="networkidle")
+
+        # ページ安定待ち
+        time.sleep(args.pre_wait / 1000)
 
         # スクロール実施
         for i in range(args.max_scrolls):
