@@ -1,80 +1,75 @@
 # tools/rank1_stage0_fullimage_and_links.py
-# =========================================================
-# Autohome月間ランキングページのフル画像キャプチャ＋車両リンク収集
-# =========================================================
-
-import time
 import json
+import time
 import os
+import argparse
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--outdir", required=True)
-    parser.add_argument("--max", type=int, default=50)
+    parser.add_argument("--max-scrolls", type=int, default=200)
     parser.add_argument("--wait-ms", type=int, default=200)
-    parser.add_argument("--max-scrolls", type=int, default=2200)
     parser.add_argument("--image-name", default="rank_full.png")
-    parser.add_argument("--pre-wait", type=int, default=1500)
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
-    out_img = os.path.join(args.outdir, args.image_name)
-    out_json = os.path.join(args.outdir, "debug_links.json")
-    out_csv = os.path.join(args.outdir, "index.csv")
+    html_path = os.path.join(args.outdir, "rank_page.html")
+    img_path = os.path.join(args.outdir, args.image_name)
+    csv_path = os.path.join(args.outdir, "index.csv")
+    json_path = os.path.join(args.outdir, "captured_api.json")
+
+    captured = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1200, "height": 1600})
+        page = browser.new_page()
+
+        def handle_response(resp):
+            if "rank/series/ranklist" in resp.url and resp.status == 200:
+                try:
+                    data = resp.json()
+                    captured.append(data)
+                except Exception:
+                    pass
+
+        page.on("response", handle_response)
+
         print(f"[info] Navigating to {args.url}")
         page.goto(args.url, wait_until="networkidle")
-        time.sleep(args.pre_wait / 1000)
-
-        # ===== スクロール処理 =====
-        total_scrolls = args.max_scrolls
-        for i in range(0, total_scrolls, 10):
-            page.evaluate("window.scrollBy(0, 300)")
+        for i in range(0, args.max_scrolls, 20):
+            page.evaluate(f"window.scrollBy(0, document.body.scrollHeight)")
             time.sleep(args.wait_ms / 1000)
-            if i % 200 == 0:
-                print(f"scroll {i}/{total_scrolls}")
+            print(f"scroll {i}/{args.max_scrolls}")
 
-        # ===== ページHTMLを保存 =====
-        html_path = os.path.join(args.outdir, "rank_page.html")
         Path(html_path).write_text(page.content(), encoding="utf-8")
-        print(f"[info] Saved HTML snapshot to {html_path}")
+        page.screenshot(path=img_path, full_page=True)
+        print(f"[info] Saved HTML snapshot: {html_path}")
+        print(f"[info] Saved full screenshot: {img_path}")
 
-        # ===== スクリーンショット保存 =====
-        page.screenshot(path=out_img, full_page=True)
-        print(f"[info] Saving full screenshot: {out_img}")
+        # JSON保存
+        Path(json_path).write_text(json.dumps(captured, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # ===== 車両リンク収集（data-seriesid対応） =====
-        anchors = page.query_selector_all("a[data-seriesid]")
+        # seriesId抽出
         links = []
-        for a in anchors:
-            href = a.get_attribute("href")
-            sid = a.get_attribute("data-seriesid")
-            if href and href.startswith("https://www.autohome.com.cn/"):
-                links.append(href)
-            elif sid:
-                links.append(f"https://www.autohome.com.cn/{sid}/")
+        for block in captured:
+            if not block:
+                continue
+            series_list = block.get("data", {}).get("series", [])
+            for s in series_list:
+                sid = s.get("seriesId")
+                if sid:
+                    links.append(f"https://www.autohome.com.cn/{sid}/")
 
-        print(f"[debug] Collected {len(links)} links")
-
-        # ===== 保存 =====
-        json.dump(links, open(out_json, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-        with open(out_csv, "w", encoding="utf-8") as f:
+        with open(csv_path, "w", encoding="utf-8") as f:
             f.write("rank,series_url\n")
             for i, link in enumerate(links, 1):
                 f.write(f"{i},{link}\n")
 
-        if len(links) == 0:
-            raise SystemExit("No series links collected.")
-
+        print(f"[debug] Collected {len(links)} links")
         browser.close()
-
 
 if __name__ == "__main__":
     main()
