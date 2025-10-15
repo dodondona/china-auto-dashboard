@@ -1,50 +1,69 @@
-name: monthly-rank-playwright
+name: Monthly rank (Playwright full image & link)
 
 on:
-  # 定期実行（必要なければ消してOK）
-  schedule:
-    - cron: '0 1 * * *'
-  # 手動実行
   workflow_dispatch:
+  schedule:
+    - cron: "15 1 2 * *"  # 毎月2日 01:15 UTC
 
 jobs:
-  scrape:
+  run:
+    name: Run Stage0 (full image + network link collection)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Playwright (Chromium)
+      - name: Install CJK fonts
         run: |
-          pip install --upgrade pip
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk fonts-arphic-uming fonts-arphic-ukai
+
+      - name: Install Playwright
+        run: |
           pip install playwright
-          playwright install --with-deps chromium
+          playwright install chromium
 
-      - name: Run Stage0 (click-open collect)
+      - name: Run Stage0 (full image + network link capture)
         run: |
-          mkdir -p data/rank1_click_collect
+          mkdir -p data/rank1_full
           python tools/rank1_stage0_click_open_collect.py \
             --url "https://www.autohome.com.cn/rank/1" \
-            --outdir "data/rank1_click_collect" \
-            --max 50 \
-            --wait-ms 220 \
-            --max-scrolls 220 \
-            --pre-wait 1500 \
-            --image-name rank_full.png
+            --outdir "data/rank1_full" \
+            --wait-ms 1500 \
+            --max-scrolls 2200 \
+            --image-name "rank_full.png"
 
-      - name: Upload artifacts
+      - name: Upload full image
         uses: actions/upload-artifact@v4
         with:
-          name: rank1_click_open_collect_outputs
-          path: |
-            data/rank1_click_collect/index.csv
-            data/rank1_click_collect/rank_full.png
-            data/rank1_click_collect/rank_page.html
-            data/rank1_click_collect/series_html/
-          if-no-files-found: error
+          name: rank1_full_image
+          path: data/rank1_full/rank_full.png
+          if-no-files-found: ignore
+
+      - name: Upload series links (index.csv)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_links_csv
+          path: data/rank1_full/index.csv
+          if-no-files-found: ignore
+
+      - name: Upload captured JSON (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_debug_json
+          path: data/rank1_full/debug.json
+          if-no-files-found: ignore
+
+      - name: Upload page HTML snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: rank1_html_snapshot
+          path: data/rank1_full/rank_page.html
+          if-no-files-found: ignore
