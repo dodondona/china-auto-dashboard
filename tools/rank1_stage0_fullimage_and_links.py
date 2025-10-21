@@ -40,7 +40,15 @@ def main():
             page.evaluate("() => window.scrollBy(0, window.innerHeight*0.85)")
             page.wait_for_timeout(a.wait_ms)
         page.wait_for_timeout(800)
-        page.screenshot(path=os.path.join(a.outdir,a.image_name), full_page=True)
+
+        # ここから追加：上部だけをキャプチャ（約100位まで）
+        scroll_height = page.evaluate("() => document.body.scrollHeight")
+        capture_height = min(scroll_height, 12000)  # ← 高さ制限（100位前後）
+        page.screenshot(
+            path=os.path.join(a.outdir,a.image_name),
+            full_page=False,
+            clip={"x": 0, "y": 0, "width": 1280, "height": capture_height}
+        )
 
         # 保存
         with open(os.path.join(a.outdir,"page.html"),"w",encoding="utf-8") as f: f.write(page.content())
