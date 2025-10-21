@@ -41,9 +41,18 @@ def main():
             page.wait_for_timeout(a.wait_ms)
         page.wait_for_timeout(800)
 
-        # ここから追加：上部だけをキャプチャ（約100位まで）
+        # 追加：最上部へ戻して仮想リストを再描画（上位が確実にレンダリングされるように）
+        page.evaluate("() => window.scrollTo(0, 0)")
+        page.wait_for_function("() => window.scrollY === 0")
+        page.wait_for_timeout(600)
+        page.evaluate("() => window.scrollBy(0, 1)")
+        page.wait_for_timeout(100)
+        page.evaluate("() => window.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
+
+        # 上部だけをキャプチャ（約100位まで）
         scroll_height = page.evaluate("() => document.body.scrollHeight")
-        capture_height = min(scroll_height, 12000)  # ← 高さ制限（100位前後）
+        capture_height = min(scroll_height, 12000)  # 目安：100位前後
         page.screenshot(
             path=os.path.join(a.outdir,a.image_name),
             full_page=False,
