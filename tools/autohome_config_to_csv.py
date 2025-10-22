@@ -4,10 +4,10 @@ import os
 from playwright.sync_api import sync_playwright
 
 def _cell_text_enriched(cell):
-    """疑似要素(●/○/-)＋子要素テキスト＋単位を合成して1セル文字列に"""
+    """Autohome参数配置表から単位・記号(●○-)を含めて1セルのテキストを抽出"""
     base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
 
-    # 🔸 Autohome特有のiconfontクラス→記号変換（フォントで描画されるため）
+    # 🔸 Autohome特有: iconfontクラス → 記号変換
     try:
         for k in cell.query_selector_all("i, span, em"):
             cls = (k.get_attribute("class") or "")
@@ -20,7 +20,7 @@ def _cell_text_enriched(cell):
     except Exception:
         pass
 
-    # 疑似要素（::before, ::after）
+    # 疑似要素 (::before, ::after)
     def pseudo(el, which):
         try:
             v = el.evaluate(f"el => getComputedStyle(el, '::{which}').content")
@@ -33,18 +33,18 @@ def _cell_text_enriched(cell):
     icon_before = pseudo(cell, "before")
     icon_after  = pseudo(cell, "after")
 
-    # 子要素に疑似要素がある場合も補完
+    # 子要素の疑似要素も探索
     try:
         for k in cell.query_selector_all("*")[:8]:
             cls = (k.get_attribute("class") or "")
-            if any(s in cls for s in ("icon", "dot", "point", "state")):
+            if any(s in cls for s in ("icon","dot","point","state")):
                 ib, ia = pseudo(k, "before"), pseudo(k, "after")
                 if ib: icon_before = ib + (" " + icon_before if icon_before else "")
                 if ia: icon_after  = (icon_after + " " if icon_after else "") + ia
     except Exception:
         pass
 
-    # 単位候補
+    # 単位 (.unit, data-unit 等)
     unit_txt = ""
     for sel in (".unit", "[data-unit]", "[aria-label*='单位']", "[class*='unit']"):
         try:
@@ -57,7 +57,7 @@ def _cell_text_enriched(cell):
         except Exception:
             continue
 
-    # 子要素のテキスト
+    # 子要素テキスト補完
     parts = []
     try:
         for sel in ("span", "i", "em"):
@@ -69,7 +69,7 @@ def _cell_text_enriched(cell):
         pass
     extra = " ".join(parts)
 
-    # SVGやフォントアイコン用フォールバック
+    # テキストが空なら textContent で再取得
     if not base.strip():
         try:
             alt = cell.evaluate("el => el.textContent.trim()") or ""
@@ -78,10 +78,10 @@ def _cell_text_enriched(cell):
             pass
 
     pieces = [p for p in [icon_before, base, extra, unit_txt, icon_after] if p]
-    s = " ".join(pieces).strip()
-    return s.replace("－", "-")
+    return " ".join(pieces).strip().replace("－", "-")
 
 def extract_matrix(table):
+    """テーブルを2次元配列に展開"""
     rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
     grid, max_cols = [], 0
 
@@ -127,7 +127,8 @@ def save_csv(matrix, outpath):
     print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
 
 def main():
-    url = "https://car.autohome.com.cn/config/series/7578.html"
+    # www.autohome.com.cn / car.autohome.com.cn どちらにも対応
+    url = "https://www.autohome.com.cn/config/series/7578.html#pvareaid=3454437"
     out_csv = "output/autohome/7578/config_7578.csv"
 
     with sync_playwright() as pw:
@@ -142,24 +143,24 @@ def main():
         )
         page = context.new_page()
         print("Loading:", url)
-        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.goto(url, wait_until="networkidle", timeout=120000)
 
-        # ゆっくり深くスクロール（遅延描画対策）
+        # ゆっくりスクロール（lazy load対策）
         for _ in range(25):
             page.mouse.wheel(0, 1200)
             page.wait_for_timeout(800)
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(5000)
 
-        # ✅ 本体テーブルを確実に取得 (#config_content以下に限定)
-        tables = page.query_selector_all("div#config_content table")
-        print(f"Found {len(tables)} config table(s) under #config_content")
+        # ✅ Autohome構造差吸収: id名に'config'を含むすべてのtableを探索
+        tables = page.query_selector_all("div[id*='config'] table")
+        print(f"Found {len(tables)} table(s) under div[id*='config']")
         if not tables:
-            print("❌ No tables found in #config_content. Exiting.")
+            print("❌ No tables found under div[id*='config']. Exiting.")
             browser.close()
             return
 
-        # 最大テーブルを選択
+        # 最大のテーブルを選択
         best_table = None
         best_score = 0
         for t in tables:
@@ -179,7 +180,6 @@ def main():
         print(f"Selected largest table with score={best_score}")
         matrix = extract_matrix(best_table)
         save_csv(matrix, out_csv)
-
         browser.close()
 
 if __name__ == "__main__":
