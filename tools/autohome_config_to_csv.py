@@ -2,7 +2,6 @@ import re
 import asyncio
 from playwright.async_api import async_playwright
 
-# 黒丸・白丸を class から判定
 DOT_CLASS_PATTERNS = [
     (re.compile(r"style_col_dot_solid__|dot_solid", re.I), "●"),
     (re.compile(r"style_col_dot_outline__|dot_outline", re.I), "○"),
@@ -56,10 +55,12 @@ async def extract_table(page):
 async def main():
     url = "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437"
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = await browser.new_page()
-        await page.goto(url)
-        await page.wait_for_selector("table")
+        await page.goto(url, wait_until="networkidle")
+        # JSレンダリングを待つ（AutohomeはReact＋lazy load）
+        await page.wait_for_selector("table", timeout=60000)
+        await page.wait_for_timeout(2000)  # 追加安全マージン2秒
         rows = await extract_table(page)
         for row in rows:
             print(",".join(row))
