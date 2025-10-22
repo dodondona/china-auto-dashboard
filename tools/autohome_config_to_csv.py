@@ -1,160 +1,122 @@
 # tools/autohome_config_to_csv.py
-import csv
+# -*- coding: utf-8 -*-
+"""
+Autohome 参数配置ページをPlaywrightでロードし、HTMLテーブルをCSVに出力。
+不可視文字（\xa0, \u200b, \ufeff）による文字欠け（例：前置→置）を防止済み。
+"""
+
 import os
-from pathlib import Path
+import re
+import csv
+import sys
+import pathlib
 from playwright.sync_api import sync_playwright
 
-URL = "https://car.autohome.com.cn/config/series/7578.html"
-OUTDIR = Path("output/autohome/7578")
-OUTDIR.mkdir(parents=True, exist_ok=True)
+def normalize_value(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if s in {"—", "-", "–", "×", "无"}:
+        return "0"
+    if s in {"●", "•"}:
+        return "1"
+    if s == "○":
+        return "opt"
+    return s
 
-# ← ここに一度ブラウザで調べたクラス名をマッピングしてください（例）
-ICON_MAP = {
-    "icon-point-on": "●",     # 標配
-    "icon-point-off": "○",    # 選配
-    "icon-point-none": "-",    # 無
-    # もし他のクラス名なら行を足すだけ（例："icon-yes": "●" など）
-}
+def safe_text(el):
+    """Playwright要素から安全にテキストを抽出（不可視文字除去＋strip）"""
+    txt = el.inner_text().replace("\xa0", "").replace("\u200b", "").replace("\ufeff", "").strip()
+    return normalize_value(txt)
 
-def _cell_text_enriched(cell):
-    """1セルをテキスト化：●○-（iconfont）→記号 / 単位→結合 / 本文→そのまま"""
-    base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
+def ensure_dir(p: pathlib.Path):
+    p.mkdir(parents=True, exist_ok=True)
 
-    # 1) iconfontのclass名で ●/○/- を判定
-    mark = ""
-    try:
-        for k in cell.query_selector_all("i, span, em"):
-            cls = (k.get_attribute("class") or "")
-            for key, sym in ICON_MAP.items():
-                if key in cls:
-                    mark = sym
-                    break
-            if mark:
-                break
-    except Exception:
-        pass
+def dump_csv(path: pathlib.Path, rows):
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        csv.writer(f).writerows(rows)
 
-    # 2) 単位（.unit / data-unit / class*='unit'）
-    unit = ""
-    for sel in (".unit", "[data-unit]", "[class*='unit']"):
-        try:
-            u = cell.query_selector(sel)
-            if u:
-                t = (u.inner_text() or "").strip()
-                if t and t not in ("-", "—"):
-                    unit = t
-                    break
-        except Exception:
-            continue
-
-    # 3) baseが空なら textContent をフォールバック
-    if not base:
-        try:
-            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0"," ").strip()
-        except Exception:
-            pass
-
-    # 4) 最終合成：記号→本文→単位（「整车质保 ● 六年或15万公里」等を再現）
-    parts = []
-    if mark: parts.append(mark)
-    if base: parts.append(base)
-    if unit and not base.endswith(unit):
-        parts.append(unit)
-    return " ".join(parts).strip().replace("－","-")
-
-def extract_matrix(table):
-    rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-    grid, max_cols = [], 0
-
-    def next_free(ridx):
-        c = 0
-        while True:
-            if c >= len(grid[ridx]):
-                grid[ridx].extend([""]*(c - len(grid[ridx]) + 1))
-            if grid[ridx][c] == "":
-                return c
-            c += 1
-
-    for ri, r in enumerate(rows):
-        grid.append([])
-        for cell in r.query_selector_all("th,td"):
-            txt = _cell_text_enriched(cell)
-            rs = int(cell.get_attribute("rowspan") or "1")
-            cs = int(cell.get_attribute("colspan") or "1")
-            col = next_free(ri)
-            need = col + cs
-            if need > len(grid[ri]):
-                grid[ri].extend([""]*(need - len(grid[ri])))
-            grid[ri][col] = txt
-            if rs > 1:
-                for k in range(1, rs):
-                    rr = ri + k
-                    while rr >= len(grid):
-                        grid.append([])
-                    if len(grid[rr]) < need:
-                        grid[rr].extend([""]*(need - len(grid[rr])))
-            max_cols = max(max_cols, need)
-
-    for i in range(len(grid)):
-        if len(grid[i]) < max_cols:
-            grid[i].extend([""]*(max_cols - len(grid[i])))
-    return grid
-
-def save_csv(matrix, outpath):
-    outpath.parent.mkdir(parents=True, exist_ok=True)
-    with open(outpath, "w", newline="", encoding="utf-8-sig") as f:
-        csv.writer(f).writerows(matrix)
-    print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
+def series_id_from_url(url: str) -> str:
+    m = re.search(r"/series/(\d+)", url)
+    return m.group(1) if m else "series"
 
 def main():
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1366, "height": 900},
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36")
-        )
-        page = context.new_page()
-        print("Loading:", URL)
-        page.goto(URL, wait_until="networkidle", timeout=120000)
+    urls = sys.argv[1:]
+    if not urls:
+        urls = ["https://car.autohome.com.cn/config/series/7806.html"]
 
-        # ← 遅延ロード安定化（“大量に取れた回”の再現）
-        last_h = 0
-        for _ in range(40):
-            page.mouse.wheel(0, 1400)
-            page.wait_for_timeout(700)
-            h = page.evaluate("document.scrollingElement.scrollHeight")
-            if h == last_h:
-                break
-            last_h = h
-        page.wait_for_timeout(5000)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        page.set_default_timeout(45000)
 
-        # 余計な絞り込みをせず、可視tableを全部CSVにする（上の方の表も取りこぼさない）
-        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
-        print(f"Found {len(tables)} table(s)")
-        if not tables:
-            print("❌ No tables found. Exiting.")
-            browser.close()
-            return
+        for url in urls:
+            sid = series_id_from_url(url)
+            print(f"Loading: {url}", flush=True)
+            page.goto(url, wait_until="networkidle")
 
-        # すべて個別保存（index順）。必要なら最大テーブルだけ別名で重ねて保存。
-        biggest = (None, 0, -1)
-        for idx, t in enumerate(tables, start=1):
-            rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-            rcount = len(rows)
-            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
-            score = rcount * ccount
-            mat = extract_matrix(t)
-            save_csv(mat, OUTDIR / f"table_{idx:02d}.csv")
-            if score > biggest[1]:
-                biggest = (mat, score, idx)
+            # スクロールで遅延ロード要素を展開
+            try:
+                total_h = page.evaluate("() => document.body.scrollHeight")
+                y = 0
+                while y < total_h:
+                    page.evaluate(f"() => window.scrollTo(0, {y})")
+                    page.wait_for_timeout(100)
+                    y += 800
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
 
-        # 最大テーブルは従来互換のファイル名でも保存
-        if biggest[0] is not None:
-            save_csv(biggest[0], OUTDIR / "config_7578.csv")
+            # テーブル・グリッド抽出
+            tables = page.query_selector_all("table")
+            grids = page.query_selector_all('[role="table"], [role="grid"]')
+            objs = [("table", el) for el in tables] + [("grid", el) for el in grids]
+
+            if not objs:
+                print("No table found.")
+                continue
+
+            out_dir = pathlib.Path("output") / "autohome" / sid
+            ensure_dir(out_dir)
+            all_rows = []
+            saved = 0
+
+            for idx, (kind, root) in enumerate(objs, start=1):
+                if kind == "table":
+                    trs = root.query_selector_all("tr")
+                    rows = []
+                    for tr in trs:
+                        tds = tr.query_selector_all("th,td")
+                        row = [safe_text(td) for td in tds]
+                        if any(row):
+                            rows.append(row)
+                else:
+                    rows = []
+                    child_rows = root.query_selector_all(":scope > *")
+                    for r in child_rows:
+                        cells = r.query_selector_all(":scope > *")
+                        if not cells:
+                            continue
+                        row = [safe_text(td) for td in cells]
+                        if any(row):
+                            rows.append(row)
+
+                if not rows:
+                    continue
+
+                width = max(len(r) for r in rows)
+                rows = [r + [""] * (width - len(r)) for r in rows]
+                saved += 1
+                part_path = out_dir / f"table_{idx:02d}.csv"
+                dump_csv(part_path, rows)
+                print(f"✅ Saved: {part_path} ({len(rows)} rows)")
+                all_rows.extend(rows)
+
+            print(f"Found {saved} table(s)")
+            if all_rows:
+                merged_path = out_dir / f"config_{sid}.csv"
+                dump_csv(merged_path, all_rows)
+                print(f"✅ Saved: {merged_path} ({len(all_rows)} rows)")
 
         browser.close()
 
