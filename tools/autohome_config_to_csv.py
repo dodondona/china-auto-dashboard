@@ -4,6 +4,7 @@ import csv
 import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup  # requires: beautifulsoup4
 
 # --------------------------------
 # 共通設定
@@ -15,7 +16,7 @@ def norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 # --------------------------------
-# 旧テーブル(<table>)用：行列展開（あなたの元コードを踏襲）
+# 旧テーブル(<table>)用：行列展開
 # --------------------------------
 ICON_MAP_LEGACY = {
     "icon-point-on": "●",
@@ -24,10 +25,8 @@ ICON_MAP_LEGACY = {
 }
 
 def _cell_text_enriched(cell):
-    """1セルをテキスト化：●○-（iconfont）→記号 / 単位→結合 / 本文→そのまま"""
+    """1セルをテキスト化（iconfontやunitを含む）"""
     base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
-
-    # 1) iconfont class 判定（部分一致）
     mark = ""
     try:
         for k in cell.query_selector_all("i, span, em"):
@@ -41,7 +40,6 @@ def _cell_text_enriched(cell):
     except Exception:
         pass
 
-    # 2) 単位
     unit = ""
     for sel in (".unit", "[data-unit]", "[class*='unit']"):
         try:
@@ -54,14 +52,12 @@ def _cell_text_enriched(cell):
         except Exception:
             continue
 
-    # 3) baseが空なら textContent
     if not base:
         try:
             base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0"," ").strip()
         except Exception:
             pass
 
-    # 4) 合成
     parts = []
     if mark: parts.append(mark)
     if base: parts.append(base)
@@ -114,18 +110,14 @@ def save_csv_matrix(matrix, outpath: Path):
     print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
 
 # --------------------------------
-# 新レイアウト(divベース)用：横長（セクション＋項目＋各車型）
-# （SingleFile解析で確立したロジックを、page.content()で適用）
+# 新レイアウト(divベース)用
 # --------------------------------
-from bs4 import BeautifulSoup  # requires: beautifulsoup4
-
 def parse_div_layout_to_wide_csv(html: str):
     soup = BeautifulSoup(html, "html.parser")
 
-    # ヘッダ（各車型）
     head = soup.select_one('[class*="style_table_head__"]')
     if not head:
-        return None  # 新レイアウト不在
+        return None
 
     head_cells = [c for c in head.find_all(recursive=False) if getattr(c, "name", None)]
     def clean_model_name(t):
@@ -134,10 +126,9 @@ def parse_div_layout_to_wide_csv(html: str):
         t = re.sub(r"\s*对比\s*$", "", t)
         return norm_space(t)
 
-    model_names = [clean_model_name(c.get_text(" ", strip=True)) for c in head_cells[1:]]  # 最左の合計セル等は除外
+    model_names = [clean_model_name(c.get_text(" ", strip=True)) for c in head_cells[1:]]
     n_models = len(model_names)
 
-    # ヘッダ＋行＋セクションを同時に内包するコンテナを探索
     def find_container_with(head_node):
         p = head_node
         for _ in range(12):
@@ -158,14 +149,18 @@ def parse_div_layout_to_wide_csv(html: str):
 
     def get_section_from_title(node):
         sticky = node.find(class_=re.compile(r"table_title_col"))
-        return norm_space(sticky.get_text(" ", strip=True) if sticky else node.get_text(" ", strip=True))
+        sec = norm_space(sticky.get_text(" ", strip=True) if sticky else node.get_text(" ", strip=True))
+        # ✅ セクション名を簡潔化
+        sec = re.sub(r"\s*标配.*$", "", sec)
+        sec = re.sub(r"\s*选配.*$", "", sec)
+        sec = re.sub(r"\s*- 无.*$", "", sec)
+        return norm_space(sec)
 
     def is_data_row(node):
         cls = " ".join(node.get("class", []))
         return "style_row__" in cls
 
     def cell_value(td):
-        # ● / ○ 判定（ハッシュ付きクラスは部分一致）
         is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
         is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
         txt = norm_space(td.get_text(" ", strip=True))
@@ -191,7 +186,6 @@ def parse_div_layout_to_wide_csv(html: str):
                 continue
             left = norm_space(kids[0].get_text(" ", strip=True))
             cells = kids[1:1+n_models]
-            # 幅合わせ
             if len(cells) < n_models:
                 cells = cells + [soup.new_tag("div")] * (n_models - len(cells))
             elif len(cells) > n_models:
@@ -199,11 +193,9 @@ def parse_div_layout_to_wide_csv(html: str):
             vals = [cell_value(td) for td in cells]
             records.append([current_section, left] + vals)
 
-    # レコードなしなら失敗扱い
     if not records:
         return None
 
-    # CSV行列を返す（ヘッダ含む）
     header = ["セクション", "項目"] + model_names
     return [header] + records
 
@@ -220,7 +212,6 @@ def main():
     series = args.series.strip()
     outdir = Path(args.outdir) / series
     outdir.mkdir(parents=True, exist_ok=True)
-
     url = (MOBILE_URL if args.mobile else PC_URL).format(series=series)
 
     with sync_playwright() as pw:
@@ -237,7 +228,6 @@ def main():
         print("Loading:", url)
         page.goto(url, wait_until="networkidle", timeout=120000)
 
-        # スクロールで遅延ロードを完了させる（あなたの元コード踏襲）
         last_h = 0
         for _ in range(40):
             page.mouse.wheel(0, 1400)
@@ -248,7 +238,6 @@ def main():
             last_h = h
         page.wait_for_timeout(5000)
 
-        # ---- まずは新レイアウト(div)での抽出を試す ----
         html = page.content()
         wide_matrix = parse_div_layout_to_wide_csv(html)
 
@@ -260,11 +249,10 @@ def main():
             browser.close()
             return
 
-        # ---- フォールバック：可視<table>を全部CSV化（旧レイアウト）----
         tables = [t for t in page.query_selector_all("table") if t.is_visible()]
         print(f"Found {len(tables)} table(s)")
         if not tables:
-            print("❌ No tables found. Exiting.")
+            print("❌ No tables found.")
             browser.close()
             return
 
@@ -280,7 +268,6 @@ def main():
             if score > biggest[1]:
                 biggest = (mat, score, idx)
 
-        # 最大テーブルを標準ファイル名でも保存
         if biggest[0] is not None:
             out_csv_std = outdir / f"config_{series}.csv"
             save_csv_matrix(biggest[0], out_csv_std)
