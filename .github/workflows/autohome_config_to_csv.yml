@@ -1,42 +1,35 @@
-name: autohome_config_to_csv
+name: Autohome Config to CSV
 
 on:
-  workflow_dispatch:  # 必要なら schedule にも対応可
+  workflow_dispatch:
 
 jobs:
-  extract_config_csv:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Playwright
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
           pip install playwright
           python -m playwright install chromium
 
-      - name: Run extractor (PC site)
+      - name: Run Autohome Config to CSV
         run: |
-          python tools/autohome_config_to_csv.py \
-            --series 7578 \
-            --outdir output/autohome
+          python tools/autohome_config_to_csv.py https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437
 
-      # もしPCで有効テーブルがゼロ等なら、コメントアウトを外してモバイル版も試してOK
-      # - name: Run extractor (Mobile site fallback)
-      #   run: |
-      #     python tools/autohome_config_to_csv.py \
-      #       --series 7578 \
-      #       --outdir output/autohome \
-      #       --mobile
-
-      - name: Upload CSV artifacts
+      - name: Upload CSV outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: autohome_config_7578_csv
-          path: output/autohome/7578/*.csv
+          name: autohome-config-csv
+          path: output/autohome/**
