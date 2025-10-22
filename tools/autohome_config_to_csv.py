@@ -107,7 +107,7 @@ def save_csv(matrix, outpath):
 
 def main():
     url = "https://car.autohome.com.cn/config/series/7578.html"
-    out_csv = "output/autohome/config_7578.csv"
+    out_csv = "output/autohome/7578/config_7578.csv"
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -134,8 +134,25 @@ def main():
             browser.close()
             return
 
-        # 最初の表だけでテスト
-        matrix = extract_matrix(tables[0])
+        # 最も大きい表を選ぶ
+        best_table = None
+        best_score = 0
+        for t in tables:
+            rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
+            rcount = len(rows)
+            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
+            score = rcount * ccount
+            if score > best_score:
+                best_table = t
+                best_score = score
+
+        if not best_table:
+            print("❌ No usable table found.")
+            browser.close()
+            return
+
+        print(f"Selected largest table with score={best_score}")
+        matrix = extract_matrix(best_table)
         save_csv(matrix, out_csv)
 
         browser.close()
