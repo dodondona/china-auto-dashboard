@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install "openai>=1.40.0" pillow playwright
+          pip install "openai>=1.35.0" pillow playwright
           python -m playwright install chromium
 
       - name: Capture fullpage screenshot
