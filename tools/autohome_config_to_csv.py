@@ -3,6 +3,7 @@
 """
 Autohome 参数配置ページをPlaywrightでロードし、HTMLテーブルをCSVに出力。
 不可視文字（\xa0, \u200b, \ufeff）による文字欠け（例：前置→置）を防止済み。
+テーブル描画完了待機（.style_row__XPu4s）を追加。
 """
 
 import os
@@ -41,9 +42,9 @@ def series_id_from_url(url: str) -> str:
     return m.group(1) if m else "series"
 
 def main():
-    urls = sys.argv[1:]
+    urls = [u for u in sys.argv[1:] if u.startswith("http")]
     if not urls:
-        urls = ["https://car.autohome.com.cn/config/series/7806.html"]
+        urls = ["https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437"]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -54,6 +55,12 @@ def main():
             sid = series_id_from_url(url)
             print(f"Loading: {url}", flush=True)
             page.goto(url, wait_until="networkidle")
+
+            # ★追加：JS描画完了を待機（参数配置テーブルが表示されるまで）
+            try:
+                page.wait_for_selector(".style_row__XPu4s", timeout=15000)
+            except Exception:
+                print("⚠️ Timeout: 表描画が確認できませんでしたが続行します。")
 
             # スクロールで遅延ロード要素を展開
             try:
@@ -69,7 +76,7 @@ def main():
 
             # テーブル・グリッド抽出
             tables = page.query_selector_all("table")
-            grids = page.query_selector_all('[role="table"], [role="grid"]')
+            grids = page.query_selector_all('[role=\"table\"], [role=\"grid\"]')
             objs = [("table", el) for el in tables] + [("grid", el) for el in grids]
 
             if not objs:
