@@ -1,7 +1,16 @@
 name: autohome_config_to_csv
 
 on:
-  workflow_dispatch:  # 必要なら schedule にも対応可
+  workflow_dispatch:
+    inputs:
+      series:
+        description: "Autohome series id (e.g., 6814)"
+        required: true
+        default: "7578"
+      mobile:
+        description: "Use mobile site"
+        required: false
+        default: "false"
 
 jobs:
   extract_config_csv:
@@ -15,28 +24,29 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Playwright
+      - name: Install dependencies (Playwright + BeautifulSoup)
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
+          pip install playwright beautifulsoup4
           python -m playwright install chromium
 
       - name: Run extractor (PC site)
+        if: ${{ inputs.mobile == 'false' }}
         run: |
           python tools/autohome_config_to_csv.py \
-            --series 7578 \
+            --series "${{ inputs.series }}" \
             --outdir output/autohome
 
-      # もしPCで有効テーブルがゼロ等なら、コメントアウトを外してモバイル版も試してOK
-      # - name: Run extractor (Mobile site fallback)
-      #   run: |
-      #     python tools/autohome_config_to_csv.py \
-      #       --series 7578 \
-      #       --outdir output/autohome \
-      #       --mobile
+      - name: Run extractor (Mobile site)
+        if: ${{ inputs.mobile == 'true' }}
+        run: |
+          python tools/autohome_config_to_csv.py \
+            --series "${{ inputs.series }}" \
+            --outdir output/autohome \
+            --mobile
 
       - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome_config_7578_csv
-          path: output/autohome/7578/*.csv
+          name: autohome_config_${{ inputs.series }}_csv
+          path: output/autohome/${{ inputs.series }}/*.csv
