@@ -7,6 +7,20 @@ def _cell_text_enriched(cell):
     """疑似要素(●/○/-)＋子要素テキスト＋単位を合成して1セル文字列に"""
     base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
 
+    # 🔸 Autohome特有のiconfontクラス→記号変換（フォントで描画されるため）
+    try:
+        for k in cell.query_selector_all("i, span, em"):
+            cls = (k.get_attribute("class") or "")
+            if "icon-point-on" in cls:
+                return "●"
+            if "icon-point-off" in cls:
+                return "○"
+            if "icon-point-none" in cls:
+                return "-"
+    except Exception:
+        pass
+
+    # 疑似要素（::before, ::after）
     def pseudo(el, which):
         try:
             v = el.evaluate(f"el => getComputedStyle(el, '::{which}').content")
@@ -19,16 +33,18 @@ def _cell_text_enriched(cell):
     icon_before = pseudo(cell, "before")
     icon_after  = pseudo(cell, "after")
 
+    # 子要素に疑似要素がある場合も補完
     try:
         for k in cell.query_selector_all("*")[:8]:
             cls = (k.get_attribute("class") or "")
-            if any(s in cls for s in ("icon","dot","point","state")):
+            if any(s in cls for s in ("icon", "dot", "point", "state")):
                 ib, ia = pseudo(k, "before"), pseudo(k, "after")
                 if ib: icon_before = ib + (" " + icon_before if icon_before else "")
                 if ia: icon_after  = (icon_after + " " if icon_after else "") + ia
     except Exception:
         pass
 
+    # 単位候補
     unit_txt = ""
     for sel in (".unit", "[data-unit]", "[aria-label*='单位']", "[class*='unit']"):
         try:
@@ -41,6 +57,7 @@ def _cell_text_enriched(cell):
         except Exception:
             continue
 
+    # 子要素のテキスト
     parts = []
     try:
         for sel in ("span", "i", "em"):
@@ -52,7 +69,7 @@ def _cell_text_enriched(cell):
         pass
     extra = " ".join(parts)
 
-    # SVGやフォントアイコンで描画されている場合のフォールバック
+    # SVGやフォントアイコン用フォールバック
     if not base.strip():
         try:
             alt = cell.evaluate("el => el.textContent.trim()") or ""
@@ -127,20 +144,22 @@ def main():
         print("Loading:", url)
         page.goto(url, wait_until="networkidle", timeout=90000)
 
-        # ゆっくり全域スクロールして遅延描画を促す
+        # ゆっくり深くスクロール（遅延描画対策）
         for _ in range(25):
             page.mouse.wheel(0, 1200)
             page.wait_for_timeout(800)
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(5000)
 
-        tables = page.query_selector_all("table")
-        print(f"Found {len(tables)} table(s)")
+        # ✅ 本体テーブルを確実に取得 (#config_content以下に限定)
+        tables = page.query_selector_all("div#config_content table")
+        print(f"Found {len(tables)} config table(s) under #config_content")
         if not tables:
-            print("❌ No tables found. Exiting.")
+            print("❌ No tables found in #config_content. Exiting.")
             browser.close()
             return
 
+        # 最大テーブルを選択
         best_table = None
         best_score = 0
         for t in tables:
