@@ -7,7 +7,6 @@ def _cell_text_enriched(cell):
     """疑似要素(●/○/-)＋子要素テキスト＋単位を合成して1セル文字列に"""
     base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
 
-    # ::before / ::after の記号（●/○/-）
     def pseudo(el, which):
         try:
             v = el.evaluate(f"el => getComputedStyle(el, '::{which}').content")
@@ -20,7 +19,6 @@ def _cell_text_enriched(cell):
     icon_before = pseudo(cell, "before")
     icon_after  = pseudo(cell, "after")
 
-    # 子要素側に付くアイコンも軽く探索（classに icon/dot/point などを含む）
     try:
         for k in cell.query_selector_all("*")[:8]:
             cls = (k.get_attribute("class") or "")
@@ -31,7 +29,6 @@ def _cell_text_enriched(cell):
     except Exception:
         pass
 
-    # 単位候補（.unit, [data-unit], ariaラベル, “unit”を含むclass）
     unit_txt = ""
     for sel in (".unit", "[data-unit]", "[aria-label*='单位']", "[class*='unit']"):
         try:
@@ -44,7 +41,6 @@ def _cell_text_enriched(cell):
         except Exception:
             continue
 
-    # 子要素のテキストも最低限結合（span/i/em）
     parts = []
     try:
         for sel in ("span", "i", "em"):
@@ -56,10 +52,17 @@ def _cell_text_enriched(cell):
         pass
     extra = " ".join(parts)
 
+    # SVGやフォントアイコンで描画されている場合のフォールバック
+    if not base.strip():
+        try:
+            alt = cell.evaluate("el => el.textContent.trim()") or ""
+            base = alt.replace("\u00a0", " ").strip()
+        except Exception:
+            pass
+
     pieces = [p for p in [icon_before, base, extra, unit_txt, icon_after] if p]
     s = " ".join(pieces).strip()
-    return s.replace("－", "-")  # 記号の統一
-
+    return s.replace("－", "-")
 
 def extract_matrix(table):
     rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
@@ -82,13 +85,16 @@ def extract_matrix(table):
             cs = int(cell.get_attribute("colspan") or "1")
             col = next_free(ri)
             need = col + cs
-            if need > len(grid[ri]): grid[ri].extend([""]*(need - len(grid[ri])))
+            if need > len(grid[ri]):
+                grid[ri].extend([""]*(need - len(grid[ri])))
             grid[ri][col] = txt
             if rs > 1:
                 for k in range(1, rs):
                     rr = ri + k
-                    while rr >= len(grid): grid.append([])
-                    if len(grid[rr]) < need: grid[rr].extend([""]*(need - len(grid[rr])))
+                    while rr >= len(grid):
+                        grid.append([])
+                    if len(grid[rr]) < need:
+                        grid[rr].extend([""]*(need - len(grid[rr])))
             max_cols = max(max_cols, need)
 
     for i in range(len(grid)):
@@ -96,14 +102,12 @@ def extract_matrix(table):
             grid[i].extend([""]*(max_cols - len(grid[i])))
     return grid
 
-
 def save_csv(matrix, outpath):
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
     with open(outpath, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerows(matrix)
     print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
-
 
 def main():
     url = "https://car.autohome.com.cn/config/series/7578.html"
@@ -115,18 +119,21 @@ def main():
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
             viewport={"width": 1366, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/122.0.0.0 Safari/537.36"
         )
         page = context.new_page()
         print("Loading:", url)
         page.goto(url, wait_until="networkidle", timeout=90000)
 
-        # ページを安定させるためスクロール
-        for _ in range(6):
+        # ゆっくり全域スクロールして遅延描画を促す
+        for _ in range(25):
             page.mouse.wheel(0, 1200)
-            page.wait_for_timeout(400)
+            page.wait_for_timeout(800)
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(5000)
 
-        # 表抽出
         tables = page.query_selector_all("table")
         print(f"Found {len(tables)} table(s)")
         if not tables:
@@ -134,13 +141,12 @@ def main():
             browser.close()
             return
 
-        # 最も大きい表を選ぶ
         best_table = None
         best_score = 0
         for t in tables:
             rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
             rcount = len(rows)
-            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
+            ccount = max((len(r.query_selector_all('th,td')) for r in rows), default=0)
             score = rcount * ccount
             if score > best_score:
                 best_table = t
@@ -156,7 +162,6 @@ def main():
         save_csv(matrix, out_csv)
 
         browser.close()
-
 
 if __name__ == "__main__":
     main()
