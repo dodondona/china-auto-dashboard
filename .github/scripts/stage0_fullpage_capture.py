@@ -1,9 +1,16 @@
-import asyncio, os, time, re, math
+import asyncio, os, time, re
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
 
 URLS_FILE = "urls.txt"
 OUT_DIR = "captures"
+
+# ---- デフォルトURL（urls.txtが無いとき用） ----
+DEFAULT_URLS = [
+    "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437",
+    # 必要に応じて増やす
+    # "https://www.autohome.com.cn/config/series/7855.html#pvareaid=3454437",
+]
 
 JS_CLEAN = """
 (() => {
@@ -28,7 +35,14 @@ def safe_name(url):
 
 async def capture():
     os.makedirs(OUT_DIR, exist_ok=True)
-    urls = [x.strip() for x in open(URLS_FILE, encoding="utf-8") if x.strip()]
+    try:
+        with open(URLS_FILE, encoding="utf-8") as f:
+            urls = [x.strip() for x in f if x.strip()]
+        print(f"✅ loaded {len(urls)} URLs from {URLS_FILE}")
+    except FileNotFoundError:
+        urls = DEFAULT_URLS
+        print(f"⚠️  {URLS_FILE} not found → fallback to DEFAULT_URLS ({len(urls)}件)")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=[
             "--disable-gpu","--disable-dev-shm-usage","--no-sandbox"
@@ -44,7 +58,8 @@ async def capture():
             print(f"[+] {name}: {url}")
             await page.goto(url, wait_until="networkidle")
             await page.add_script_tag(content=JS_CLEAN)
-            # lazy要素全展開
+
+            # lazyロード展開
             prev = 0
             for _ in range(20):
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
@@ -59,7 +74,9 @@ async def capture():
             out_path = os.path.join(OUT_DIR, f"{name}.png")
             await page.screenshot(path=out_path, full_page=True)
             print(f"  saved {out_path}")
-        await ctx.close(); await browser.close()
+
+        await ctx.close()
+        await browser.close()
 
 if __name__ == "__main__":
     asyncio.run(capture())
