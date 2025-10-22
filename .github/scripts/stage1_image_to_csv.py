@@ -1,25 +1,19 @@
 import os, base64
-
-# pip install openai==1.* でOK
 from openai import OpenAI
 
-MODEL  = "gpt-4o-mini"       # 必要なら gpt-4o に変更可
+MODEL = "gpt-4o-mini"   # 画像読み取りOK
 IN_DIR = "captures"
 OUT_DIR = "csv"
 
 PROMPT = (
-    "この画像は汽车之家（autohome.com.cn）の参数配置比较表です。"
-    "表の行・列構造を保持してCSVにしてください。"
-    "出力はUTF-8のカンマ区切り（,）、1行目は列ヘッダ。"
-    "中国語の項目名・数値・記号（●/○/—）はそのまま保持し、順序も画像通りに。"
+    "这是一张汽车之家（autohome.com.cn）的车型参数配置对比表截图。"
+    "请识别表格结构并输出CSV格式，保留中文字段、数值和符号（●/○/—）。"
+    "输出为UTF-8编码的逗号分隔文本，第一行为表头。不要输出任何解释文字。"
 )
 
 def data_uri_from_path(path: str) -> str:
-    # PILは使わず、PNGバイトをそのままbase64化してデータURIに
     with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    # ここではPNG前提。必要なら拡張子で切り替え可
-    return f"data:image/png;base64,{b64}"
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -27,26 +21,25 @@ def main():
 
     files = sorted([f for f in os.listdir(IN_DIR) if f.lower().endswith(".png")])
     if not files:
-        print("No PNG files in captures/")
+        print("No PNG files found in captures/")
         return
 
     for fname in files:
-        in_path  = os.path.join(IN_DIR, fname)
-        base     = os.path.splitext(fname)[0]
-        out_csv  = os.path.join(OUT_DIR, f"{base}.csv")
+        in_path = os.path.join(IN_DIR, fname)
+        base = os.path.splitext(fname)[0]
+        out_csv = os.path.join(OUT_DIR, f"{base}.csv")
         print(f"[+] Converting {fname} -> {out_csv}")
 
-        image_data_uri = data_uri_from_path(in_path)
+        img_b64 = data_uri_from_path(in_path)
 
-        # ✅ chat.completions API を使用（messages引数OK）
         resp = client.chat.completions.create(
             model=MODEL,
             temperature=0,
             messages=[
-                {"role": "system", "content": "You convert tables in screenshots into clean CSV text."},
+                {"role": "system", "content": "You are a highly accurate table recognizer."},
                 {"role": "user", "content": [
                     {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": image_data_uri}}
+                    {"type": "image_url", "image_url": img_b64}
                 ]}
             ],
         )
@@ -55,8 +48,7 @@ def main():
 
         with open(out_csv, "w", encoding="utf-8-sig") as f:
             f.write(csv_text)
-
-        print(f"✅ saved {out_csv}")
+        print(f"✅ Saved {out_csv}")
 
 if __name__ == "__main__":
     main()
