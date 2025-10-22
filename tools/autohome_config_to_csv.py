@@ -1,13 +1,12 @@
 import re
-import sys
 import asyncio
 from playwright.async_api import async_playwright
 
+# 黒丸・白丸を class から判定
 DOT_CLASS_PATTERNS = [
     (re.compile(r"style_col_dot_solid__|dot_solid", re.I), "●"),
     (re.compile(r"style_col_dot_outline__|dot_outline", re.I), "○"),
 ]
-
 
 def _detect_dot_by_class(cell):
     try:
@@ -19,7 +18,6 @@ def _detect_dot_by_class(cell):
     except Exception:
         pass
     return ""
-
 
 async def extract_table(page):
     rows = []
@@ -55,9 +53,8 @@ async def extract_table(page):
             rows.append(row)
     return rows
 
-
 async def main():
-    url = sys.argv[1]
+    url = "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437"
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -67,7 +64,6 @@ async def main():
         for row in rows:
             print(",".join(row))
         await browser.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
