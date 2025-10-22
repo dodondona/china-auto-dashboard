@@ -1,30 +1,31 @@
 name: stage1_image_to_csv
-
-on:
-  workflow_dispatch:
+on: { workflow_dispatch: {} }
 
 jobs:
   image_to_csv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
-      - name: Install dependencies
+      - name: Install dependencies (force fresh OpenAI>=1.40)
         run: |
           python -m pip install -U pip
-          pip install "openai>=1.35.0" pillow playwright
+          python -m pip uninstall -y openai || true
+          python -m pip install --no-cache-dir --force-reinstall "openai>=1.40.0" pillow playwright
           python -m playwright install chromium
+          python - <<'PY'
+          import openai, sys
+          print("OPENAI_VERSION=", openai.__version__)
+          PY
 
       - name: Capture fullpage screenshot
         run: |
           mkdir -p captures
           python .github/scripts/stage0_fullpage_capture.py
 
-      - name: Convert image to CSV via GPT-4o
+      - name: Convert image to CSV via GPT-4o (attachments)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
