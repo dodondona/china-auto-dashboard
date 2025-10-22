@@ -4,10 +4,10 @@ import os
 from playwright.sync_api import sync_playwright
 
 def _cell_text_enriched(cell):
-    """Autohome参数配置表から単位・記号(●○-)を含めて1セルのテキストを抽出"""
+    """1セルの表示をテキスト化（●○- と単位を補完）"""
     base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
 
-    # 🔸 Autohome特有: iconfontクラス → 記号変換
+    # iconfont のクラス名で ●/○/- を判定（Autohomeで頻出）
     try:
         for k in cell.query_selector_all("i, span, em"):
             cls = (k.get_attribute("class") or "")
@@ -20,33 +20,9 @@ def _cell_text_enriched(cell):
     except Exception:
         pass
 
-    # 疑似要素 (::before, ::after)
-    def pseudo(el, which):
-        try:
-            v = el.evaluate(f"el => getComputedStyle(el, '::{which}').content")
-            if v and v not in ('none', '""', "''"):
-                return v.strip('"').strip("'")
-        except Exception:
-            pass
-        return ""
-
-    icon_before = pseudo(cell, "before")
-    icon_after  = pseudo(cell, "after")
-
-    # 子要素の疑似要素も探索
-    try:
-        for k in cell.query_selector_all("*")[:8]:
-            cls = (k.get_attribute("class") or "")
-            if any(s in cls for s in ("icon","dot","point","state")):
-                ib, ia = pseudo(k, "before"), pseudo(k, "after")
-                if ib: icon_before = ib + (" " + icon_before if icon_before else "")
-                if ia: icon_after  = (icon_after + " " if icon_after else "") + ia
-    except Exception:
-        pass
-
-    # 単位 (.unit, data-unit 等)
+    # 単位（.unit / data-unit / class*='unit'）
     unit_txt = ""
-    for sel in (".unit", "[data-unit]", "[aria-label*='单位']", "[class*='unit']"):
+    for sel in (".unit", "[data-unit]", "[class*='unit']"):
         try:
             u = cell.query_selector(sel)
             if u:
@@ -57,31 +33,31 @@ def _cell_text_enriched(cell):
         except Exception:
             continue
 
-    # 子要素テキスト補完
-    parts = []
-    try:
-        for sel in ("span", "i", "em"):
-            for n in cell.query_selector_all(sel)[:6]:
-                tt = (n.inner_text() or "").strip()
-                if tt and tt not in parts:
-                    parts.append(tt)
-    except Exception:
-        pass
-    extra = " ".join(parts)
-
-    # テキストが空なら textContent で再取得
-    if not base.strip():
+    # テキストが空なら textContent でフォールバック
+    if not base:
         try:
             alt = cell.evaluate("el => el.textContent.trim()") or ""
             base = alt.replace("\u00a0", " ").strip()
         except Exception:
             pass
 
-    pieces = [p for p in [icon_before, base, extra, unit_txt, icon_after] if p]
+    # 軽く子要素のテキストも結合（過剰にはしない）
+    extra = ""
+    try:
+        parts = []
+        for sel in ("span", "i", "em"):
+            for n in cell.query_selector_all(sel)[:6]:
+                tt = (n.inner_text() or "").strip()
+                if tt and tt not in parts:
+                    parts.append(tt)
+        extra = " ".join(parts)
+    except Exception:
+        pass
+
+    pieces = [p for p in [base, extra, unit_txt] if p]
     return " ".join(pieces).strip().replace("－", "-")
 
 def extract_matrix(table):
-    """テーブルを2次元配列に展開"""
     rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
     grid, max_cols = [], 0
 
@@ -127,8 +103,8 @@ def save_csv(matrix, outpath):
     print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
 
 def main():
-    # www.autohome.com.cn / car.autohome.com.cn どちらにも対応
-    url = "https://www.autohome.com.cn/config/series/7578.html#pvareaid=3454437"
+    # 安定する car.* を使う（見ている www.* と内容は同じ）
+    url = "https://car.autohome.com.cn/config/series/7578.html"
     out_csv = "output/autohome/7578/config_7578.csv"
 
     with sync_playwright() as pw:
@@ -137,49 +113,42 @@ def main():
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
             viewport={"width": 1366, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/122.0.0.0 Safari/537.36"
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36")
         )
         page = context.new_page()
         print("Loading:", url)
         page.goto(url, wait_until="networkidle", timeout=120000)
 
-        # ゆっくりスクロール（lazy load対策）
+        # ゆっくり深くスクロールして遅延描画を完了させる
         for _ in range(25):
             page.mouse.wheel(0, 1200)
             page.wait_for_timeout(800)
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(5000)
 
-        # ✅ Autohome構造差吸収: id名に'config'を含むすべてのtableを探索
-        tables = page.query_selector_all("div[id*='config'] table")
-        print(f"Found {len(tables)} table(s) under div[id*='config']")
+        # 余計な縛りはかけず、ページ内の <table> から最大を採用（以前うまくいっていた方法）
+        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
+        print(f"Found {len(tables)} table(s)")
         if not tables:
-            print("❌ No tables found under div[id*='config']. Exiting.")
+            print("❌ No tables found. Exiting.")
             browser.close()
             return
 
-        # 最大のテーブルを選択
-        best_table = None
-        best_score = 0
+        best_table, best_score = None, 0
         for t in tables:
             rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
             rcount = len(rows)
             ccount = max((len(r.query_selector_all('th,td')) for r in rows), default=0)
             score = rcount * ccount
             if score > best_score:
-                best_table = t
-                best_score = score
-
-        if not best_table:
-            print("❌ No usable table found.")
-            browser.close()
-            return
+                best_table, best_score = t, score
 
         print(f"Selected largest table with score={best_score}")
         matrix = extract_matrix(best_table)
         save_csv(matrix, out_csv)
+
         browser.close()
 
 if __name__ == "__main__":
