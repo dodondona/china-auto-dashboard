@@ -1,0 +1,48 @@
+name: stage1_image_to_csv
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 2 2 * *"  # 毎月2日 10:30 JST
+
+jobs:
+  image_to_csv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install playwright openai pillow pandas
+          python -m playwright install chromium
+
+      - name: Capture fullpage screenshot
+        run: |
+          mkdir -p captures
+          python .github/scripts/stage0_fullpage_capture.py
+
+      - name: Convert image to CSV via LLM
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          mkdir -p csv
+          python .github/scripts/stage1_image_to_csv.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-csv
+          path: |
+            captures/**/*.png
+            csv/**/*.csv
