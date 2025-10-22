@@ -1,4 +1,4 @@
-import os
+import os, base64
 from openai import OpenAI
 
 MODEL = "gpt-4o"
@@ -12,6 +12,10 @@ PROMPT = (
     "不要输出任何解释或说明。"
 )
 
+def data_uri_from_path(path):
+    with open(path, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -23,20 +27,21 @@ def main():
         out_csv = os.path.join(OUT_DIR, os.path.splitext(fname)[0] + ".csv")
         print(f"[+] {fname} → {out_csv}")
 
-        with open(path, "rb") as f:
-            image_bytes = f.read()
+        img_b64 = data_uri_from_path(path)
 
         resp = client.chat.completions.create(
             model=MODEL,
             temperature=0,
             messages=[
                 {"role": "system", "content": "You are a precise table recognizer."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": "attachment://image"}},
-                ]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": PROMPT},
+                        {"type": "image_url", "image_url": {"url": img_b64}},
+                    ],
+                },
             ],
-            attachments=[{"name": "image", "data": image_bytes}],
         )
 
         csv_text = resp.choices[0].message.content.strip()
