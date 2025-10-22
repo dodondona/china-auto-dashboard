@@ -1,7 +1,7 @@
 import os, base64
 from openai import OpenAI
 
-MODEL = "gpt-4o-mini"   # 画像読み取りOK
+MODEL = "gpt-4o"          # mini が失敗する場合はこちらを推奨
 IN_DIR = "captures"
 OUT_DIR = "csv"
 
@@ -13,15 +13,16 @@ PROMPT = (
 
 def data_uri_from_path(path: str) -> str:
     with open(path, "rb") as f:
-        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+        b64 = base64.b64encode(f.read()).decode()
+    return f"data:image/png;base64,{b64}"
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    files = sorted([f for f in os.listdir(IN_DIR) if f.lower().endswith(".png")])
+    files = [f for f in sorted(os.listdir(IN_DIR)) if f.lower().endswith(".png")]
     if not files:
-        print("No PNG files found in captures/")
+        print("No PNG files in captures/")
         return
 
     for fname in files:
@@ -32,20 +33,23 @@ def main():
 
         img_b64 = data_uri_from_path(in_path)
 
+        # ✅ 正しい chat.completions API フォーマット
         resp = client.chat.completions.create(
             model=MODEL,
             temperature=0,
             messages=[
                 {"role": "system", "content": "You are a highly accurate table recognizer."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": img_b64}
-                ]}
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": PROMPT},
+                        {"type": "image_url", "image_url": {"url": img_b64}},
+                    ],
+                },
             ],
         )
 
         csv_text = resp.choices[0].message.content.strip()
-
         with open(out_csv, "w", encoding="utf-8-sig") as f:
             f.write(csv_text)
         print(f"✅ Saved {out_csv}")
