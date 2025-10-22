@@ -1,84 +1,71 @@
 # tools/autohome_config_to_csv.py
-# 使い方例:
-#   python tools/autohome_config_to_csv.py --series 7578 --outdir output/autohome
-# 出力:
-#   output/autohome/7578/
-#     7578__参数配置__基本参数.csv
-#     7578__参数配置__车身.csv
-#     ...（複数）...
-#     7578__ALL_tables_concat.csv  ← 全テーブル連結1枚
-
-import re, csv, os, argparse, unicodedata
+import csv
+import os
 from pathlib import Path
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
-PC_TPL = "https://car.autohome.com.cn/config/series/{sid}.html"
-M_TPL  = "https://car.m.autohome.com.cn/config/series/{sid}.html"
+URL = "https://car.autohome.com.cn/config/series/7578.html"
+OUTDIR = Path("output/autohome/7578")
+OUTDIR.mkdir(parents=True, exist_ok=True)
 
-def slug(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s)
-    s = re.sub(r"[^\w\u4e00-\u9fff\-]+", "_", s)  # 漢字は残す
-    return re.sub(r"_+", "_", s).strip("_")[:40] or "section"
+# ← ここに一度ブラウザで調べたクラス名をマッピングしてください（例）
+ICON_MAP = {
+    "icon-point-on": "●",     # 標配
+    "icon-point-off": "○",    # 選配
+    "icon-point-none": "-",    # 無
+    # もし他のクラス名なら行を足すだけ（例："icon-yes": "●" など）
+}
 
-def humanize_context(pw):
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox","--disable-dev-shm-usage","--disable-gpu",
-        ],
-    )
-    ctx = browser.new_context(
-        locale="zh-CN",
-        timezone_id="Asia/Shanghai",
-        viewport={"width": 1366, "height": 900},
-        user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"),
-    )
-    ctx.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        const getParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter){
-          if (parameter === 37445) return "Google Inc.";
-          if (parameter === 37446) return "ANGLE (Intel, Intel(R) UHD Graphics, D3D11)";
-          return getParameter.call(this, parameter);
-        };
-        Object.defineProperty(Notification, 'permission', { get: () => 'denied' });
-    """)
-    return browser, ctx
+def _cell_text_enriched(cell):
+    """1セルをテキスト化：●○-（iconfont）→記号 / 単位→結合 / 本文→そのまま"""
+    base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
 
-def ensure_param_tab(page):
-    # 念のため「参数配置」をクリック
-    for txt in ("参数配置", "参数", "配置"):
+    # 1) iconfontのclass名で ●/○/- を判定
+    mark = ""
+    try:
+        for k in cell.query_selector_all("i, span, em"):
+            cls = (k.get_attribute("class") or "")
+            for key, sym in ICON_MAP.items():
+                if key in cls:
+                    mark = sym
+                    break
+            if mark:
+                break
+    except Exception:
+        pass
+
+    # 2) 単位（.unit / data-unit / class*='unit'）
+    unit = ""
+    for sel in (".unit", "[data-unit]", "[class*='unit']"):
         try:
-            page.get_by_text(txt, exact=False).click(timeout=1500)
-            page.wait_for_load_state("networkidle", timeout=8000)
-            break
+            u = cell.query_selector(sel)
+            if u:
+                t = (u.inner_text() or "").strip()
+                if t and t not in ("-", "—"):
+                    unit = t
+                    break
+        except Exception:
+            continue
+
+    # 3) baseが空なら textContent をフォールバック
+    if not base:
+        try:
+            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0"," ").strip()
         except Exception:
             pass
 
-def auto_scroll(page, steps=10, dy=1400, wait=400):
-    for _ in range(steps):
-        page.mouse.wheel(0, dy)
-        page.wait_for_timeout(wait)
-
-def table_score(tbl):
-    # 小さすぎる表を除外するためのスコア
-    rows = tbl.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-    r = len(rows)
-    c = 0
-    for tr in rows:
-        c = max(c, len(tr.query_selector_all("th,td")))
-    # フィルタUIを除去するためのキーワード
-    txt = (tbl.inner_text() or "").strip()
-    if "筛选条件" in txt or "年代款" in txt:
-        return 0  # フィルタ表は除外
-    return r * c
+    # 4) 最終合成：記号→本文→単位（「整车质保 ● 六年或15万公里」等を再現）
+    parts = []
+    if mark: parts.append(mark)
+    if base: parts.append(base)
+    if unit and not base.endswith(unit):
+        parts.append(unit)
+    return " ".join(parts).strip().replace("－","-")
 
 def extract_matrix(table):
     rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
     grid, max_cols = [], 0
+
     def next_free(ridx):
         c = 0
         while True:
@@ -87,116 +74,89 @@ def extract_matrix(table):
             if grid[ridx][c] == "":
                 return c
             c += 1
+
     for ri, r in enumerate(rows):
         grid.append([])
         for cell in r.query_selector_all("th,td"):
-            txt = (cell.inner_text() or "").replace("\u00a0"," ").strip()
+            txt = _cell_text_enriched(cell)
             rs = int(cell.get_attribute("rowspan") or "1")
             cs = int(cell.get_attribute("colspan") or "1")
             col = next_free(ri)
             need = col + cs
-            if need > len(grid[ri]): grid[ri].extend([""]*(need-len(grid[ri])))
+            if need > len(grid[ri]):
+                grid[ri].extend([""]*(need - len(grid[ri])))
             grid[ri][col] = txt
             if rs > 1:
                 for k in range(1, rs):
                     rr = ri + k
-                    while rr >= len(grid): grid.append([])
-                    if len(grid[rr]) < need: grid[rr].extend([""]*(need-len(grid[rr])))
+                    while rr >= len(grid):
+                        grid.append([])
+                    if len(grid[rr]) < need:
+                        grid[rr].extend([""]*(need - len(grid[rr])))
             max_cols = max(max_cols, need)
+
     for i in range(len(grid)):
         if len(grid[i]) < max_cols:
-            grid[i].extend([""]*(max_cols-len(grid[i])))
-    # 空行の連続は軽く詰める（任意）
+            grid[i].extend([""]*(max_cols - len(grid[i])))
     return grid
 
-def section_name_for_table(page, tbl):
-    # 直近の見出しを拾ってセクション名にする
-    name = "参数配置"
-    try:
-        # 表の前方にある見出し要素を探索
-        heading = tbl.evaluate("""
-            (el)=>{
-              function prevHead(e){
-                while(e && e.previousElementSibling){
-                  e = e.previousElementSibling;
-                  if(!e) break;
-                  const tag = (e.tagName||'').toLowerCase();
-                  if(['h1','h2','h3','h4'].includes(tag)) return e.innerText.trim();
-                  if(e.className && /title|tit|hd|header|subhead/i.test(e.className)) return e.innerText.trim();
-                }
-                return null;
-              }
-              return prevHead(el);
-            }
-        """)
-        if heading and len(heading) <= 40:
-            name = heading
-        else:
-            # 行頭のラベルから推測（例：基本参数/车身/发动机…）
-            txt = (tbl.inner_text() or "").splitlines()
-            for line in txt[:5]:
-                if len(line.strip())>=2 and len(line.strip())<=12:
-                    name = line.strip()
-                    break
-    except Exception:
-        pass
-    return slug(name)
-
-def write_csv(path: Path, matrix):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        for row in matrix:
-            w.writerow(row)
-
-def collect(url, outdir, series):
-    with sync_playwright() as pw:
-        browser, ctx = humanize_context(pw)
-        page = ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_load_state("networkidle", timeout=30000)
-        ensure_param_tab(page)
-        auto_scroll(page, steps=12)
-
-        # 全テーブルを取得し、有用なものだけ残す
-        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
-        scored = sorted([(table_score(t), t) for t in tables], key=lambda x: x[0], reverse=True)
-        # 0スコア（フィルタなど）は除外
-        scored = [x for x in scored if x[0] >= 6]  # 行×列が小さすぎる表も落とす
-
-        out_base = Path(outdir) / str(series)
-        concat_rows = []
-
-        if not scored:
-            raise SystemExit("見出し以外の有効なテーブルが見つかりませんでした。")
-
-        for idx, (_, t) in enumerate(scored, 1):
-            sec = section_name_for_table(page, t)
-            mat = extract_matrix(t)
-            # セクションタイトル行を付けて連結用にも保存
-            concat_rows.append([f"[{sec}]"])
-            concat_rows.extend(mat)
-            concat_rows.append([])
-
-            fname = f"{series}__参数配置__{sec}.csv"
-            write_csv(out_base / fname, mat)
-            print(f"Saved: {out_base/fname}")
-
-        # 連結版も保存（レビューしやすい）
-        write_csv(out_base / f"{series}__ALL_tables_concat.csv", concat_rows)
-        print(f"Saved: {out_base/(str(series)+'__ALL_tables_concat.csv')}")
-
-        ctx.close(); browser.close()
+def save_csv(matrix, outpath):
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(outpath, "w", newline="", encoding="utf-8-sig") as f:
+        csv.writer(f).writerows(matrix)
+    print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--series", type=int, required=True, help="Autohome series id, e.g., 7578")
-    ap.add_argument("--outdir", type=str, required=True, help="Output directory, e.g., output/autohome")
-    ap.add_argument("--mobile", action="store_true", help="Use mobile site")
-    args = ap.parse_args()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1366, "height": 900},
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36")
+        )
+        page = context.new_page()
+        print("Loading:", URL)
+        page.goto(URL, wait_until="networkidle", timeout=120000)
 
-    url = (M_TPL if args.mobile else PC_TPL).format(sid=args.series)
-    collect(url, args.outdir, args.series)
+        # ← 遅延ロード安定化（“大量に取れた回”の再現）
+        last_h = 0
+        for _ in range(40):
+            page.mouse.wheel(0, 1400)
+            page.wait_for_timeout(700)
+            h = page.evaluate("document.scrollingElement.scrollHeight")
+            if h == last_h:
+                break
+            last_h = h
+        page.wait_for_timeout(5000)
+
+        # 余計な絞り込みをせず、可視tableを全部CSVにする（上の方の表も取りこぼさない）
+        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
+        print(f"Found {len(tables)} table(s)")
+        if not tables:
+            print("❌ No tables found. Exiting.")
+            browser.close()
+            return
+
+        # すべて個別保存（index順）。必要なら最大テーブルだけ別名で重ねて保存。
+        biggest = (None, 0, -1)
+        for idx, t in enumerate(tables, start=1):
+            rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
+            rcount = len(rows)
+            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
+            score = rcount * ccount
+            mat = extract_matrix(t)
+            save_csv(mat, OUTDIR / f"table_{idx:02d}.csv")
+            if score > biggest[1]:
+                biggest = (mat, score, idx)
+
+        # 最大テーブルは従来互換のファイル名でも保存
+        if biggest[0] is not None:
+            save_csv(biggest[0], OUTDIR / "config_7578.csv")
+
+        browser.close()
 
 if __name__ == "__main__":
     main()
