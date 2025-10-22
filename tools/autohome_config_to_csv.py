@@ -1,81 +1,73 @@
-# tools/autohome_config_to_csv.py
-# -*- coding: utf-8 -*-
-"""
-Autohome 参数配置ページ（https://www.autohome.com.cn/config/series/<id>.html）
-HTML埋め込みJSON(window.CONFIG)を解析してCSV出力する。
-不可視文字（\xa0, \u200b, \ufeff）による欠落対策を追加。
-"""
-
-import os
 import re
 import sys
-import json
-import csv
-import pathlib
-import requests
-import pandas as pd
+import asyncio
+from playwright.async_api import async_playwright
 
-def clean_text(s):
-    """不可視文字・全角空白の除去"""
-    if not isinstance(s, str):
-        return s
-    return (
-        s.replace("\xa0", "")
-         .replace("\u200b", "")
-         .replace("\ufeff", "")
-         .replace("\u3000", "")
-         .strip()
-    )
+DOT_CLASS_PATTERNS = [
+    (re.compile(r"style_col_dot_solid__|dot_solid", re.I), "●"),
+    (re.compile(r"style_col_dot_outline__|dot_outline", re.I), "○"),
+]
 
-def extract_config_json(html):
-    """window.CONFIG JSONを抽出"""
-    m = re.search(r'window\.CONFIG\s*=\s*(\{.*?\});', html, re.S)
-    if not m:
-        raise ValueError("window.CONFIG not found")
-    js = m.group(1)
-    return json.loads(js)
 
-def ensure_dir(p: pathlib.Path):
-    p.mkdir(parents=True, exist_ok=True)
+def _detect_dot_by_class(cell):
+    try:
+        for i in cell.query_selector_all("i"):
+            cls = (i.get_attribute("class") or "")
+            for pat, sym in DOT_CLASS_PATTERNS:
+                if pat.search(cls):
+                    return sym
+    except Exception:
+        pass
+    return ""
 
-def dump_csv(path, rows):
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
 
-def parse_config_data(cfg):
-    """CONFIG JSON から仕様比較表を行列化"""
-    # JSON構造例: cfg['result']['paramtypeitems']
-    param_groups = cfg.get("result", {}).get("paramtypeitems", [])
-    header = []
-    tables = []
-    for g in param_groups:
-        group_name = g.get("name")
-        for pitem in g.get("paramitems", []):
-            name = clean_text(pitem.get("name"))
-            vals = [clean_text(v.get("value")) for v in pitem.get("valueitems", [])]
-            row = [group_name, name] + vals
-            tables.append(row)
-    return tables
+async def extract_table(page):
+    rows = []
+    for tr in await page.query_selector_all("table tr"):
+        row = []
+        for td in await tr.query_selector_all("th, td"):
+            mark = _detect_dot_by_class(td)
+            if mark:
+                try:
+                    base = await td.evaluate(
+                        """(el) => {
+                            const c = el.cloneNode(true);
+                            c.querySelectorAll('i').forEach(n=>n.remove());
+                            return (c.innerText || '').replace(/\\s+/g, ' ').trim();
+                        }"""
+                    )
+                except Exception:
+                    base = ""
+                text = f"{mark} {base}".strip() if base else mark
+            else:
+                try:
+                    text = (
+                        await td.evaluate(
+                            """(el) => (el.innerText || '').replace(/\\s+/g, ' ').trim()"""
+                        )
+                    ) or ""
+                except Exception:
+                    text = ""
+            if text in ("-", "—"):
+                text = ""
+            row.append(text)
+        if any(x for x in row):
+            rows.append(row)
+    return rows
 
-def main():
-    urls = [u for u in sys.argv[1:] if u.startswith("http")]
-    if not urls:
-        urls = ["https://www.autohome.com.cn/config/series/7806.html"]
 
-    for url in urls:
-        print(f"Loading: {url}")
-        sid_match = re.search(r"/series/(\d+)", url)
-        sid = sid_match.group(1) if sid_match else "series"
-        html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}).text
-        cfg = extract_config_json(html)
-        rows = parse_config_data(cfg)
+async def main():
+    url = sys.argv[1]
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(url)
+        await page.wait_for_selector("table")
+        rows = await extract_table(page)
+        for row in rows:
+            print(",".join(row))
+        await browser.close()
 
-        out_dir = pathlib.Path("output") / "autohome" / sid
-        ensure_dir(out_dir)
-        out_path = out_dir / f"config_{sid}.csv"
-        dump_csv(out_path, rows)
-        print(f"✅ Saved: {out_path} ({len(rows)} rows)")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
