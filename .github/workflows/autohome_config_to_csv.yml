@@ -8,7 +8,7 @@ on:
         required: true
         default: "7578"
       mobile:
-        description: "Use mobile site"
+        description: "Use mobile site (true/false)"
         required: false
         default: "false"
 
@@ -18,19 +18,22 @@ jobs:
 
     steps:
       # -----------------------------
-      # 0️⃣ Repository checkout
+      # 0️⃣ Checkout repository
       # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # -----------------------------
-      # 1️⃣ Python environment
+      # 1️⃣ Set up Python
       # -----------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # -----------------------------
+      # 2️⃣ Install dependencies
+      # -----------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -38,7 +41,7 @@ jobs:
           python -m playwright install chromium
 
       # -----------------------------
-      # 2️⃣ Autohome Config Extraction
+      # 3️⃣ Extract config table (Autohome)
       # -----------------------------
       - name: Run extractor (PC site)
         if: ${{ inputs.mobile == 'false' }}
@@ -56,7 +59,7 @@ jobs:
             --mobile
 
       # -----------------------------
-      # 3️⃣ CN→JA Translation (セクション＋項目＋セル本文)
+      # 4️⃣ Translate CN→JA (sections/items/values)
       # -----------------------------
       - name: Translate CN→JA via OpenAI (full table)
         env:
@@ -64,12 +67,13 @@ jobs:
           OPENAI_MODEL: gpt-4.1-mini
           CSV_IN:  output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
           CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
-          TRANSLATE_VALUES: "true"   # ← セル本文も翻訳（falseなら縦列のみ）
+          TRANSLATE_VALUES: "true"   # セル本文も翻訳
+          EXRATE_CNY_TO_JPY: "21.0"  # CNY→JPY 為替レート（例: 1元=21円）
         run: |
           python tools/translate_columns.py
 
       # -----------------------------
-      # 4️⃣ Upload artifacts
+      # 5️⃣ Upload translated CSVs
       # -----------------------------
       - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
@@ -79,7 +83,7 @@ jobs:
             output/autohome/${{ inputs.series }}/*.csv
 
       # -----------------------------
-      # 5️⃣ Optional: Display summary
+      # 6️⃣ Print summary
       # -----------------------------
       - name: Print summary info
         run: |
