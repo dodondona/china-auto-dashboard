@@ -13,8 +13,9 @@ on:
         default: "false"
 
 jobs:
-  extract_config_csv:
+  extract_and_translate:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,12 +25,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (Playwright + BeautifulSoup)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4
+          pip install playwright beautifulsoup4 openai pandas
           python -m playwright install chromium
 
+      # -----------------------------
+      # 1️⃣ Autohome ページから構成表CSV生成
+      # -----------------------------
       - name: Run extractor (PC site)
         if: ${{ inputs.mobile == 'false' }}
         run: |
@@ -45,8 +49,25 @@ jobs:
             --outdir output/autohome \
             --mobile
 
+      # -----------------------------
+      # 2️⃣ LLM翻訳で日本語列を追加
+      # -----------------------------
+      - name: Translate CN→JA via OpenAI API
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini    # 品質寄り（安定）
+          CSV_IN: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
+          CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
+          GLOSS: tools/glossary_cn_ja.csv
+        run: |
+          python tools/translate_columns.py
+
+      # -----------------------------
+      # 3️⃣ 出力アーカイブ
+      # -----------------------------
       - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome_config_${{ inputs.series }}_csv
-          path: output/autohome/${{ inputs.series }}/*.csv
+          name: autohome_config_${{ inputs.series }}_translated
+          path: |
+            output/autohome/${{ inputs.series }}/*.csv
