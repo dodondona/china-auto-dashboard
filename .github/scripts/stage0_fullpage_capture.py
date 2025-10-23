@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 # .github/scripts/stage0_fullpage_capture.py
 #
-# Playwrightで対象URLを開き、無限スクロール/「加载更多」クリックを繰り返した後、
-# lazy-load画像のURLを可能な限り "http(s)" に昇格させ、レンダリング後HTML(.htm)を ./captures/ に保存します。
+# 無限スクロール→lazy画像URLを昇格→レンダリング後HTML(.htm)保存
+# 併せて img の src 種別の統計を captures/_meta.json に出力します（デバッグ用）
 
-import asyncio
-import os
-import re
+import asyncio, os, re, json
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 URLS_FILE = "urls.txt"
 OUT_DIR = "./captures"
-
 DEFAULT_URLS = [
     "https://www.autohome.com.cn/rank/1",
 ]
@@ -35,30 +32,37 @@ async def scroll_and_load(page):
         except Exception:
             pass
 
-async def promote_lazy_images(page):
-    # data-src, data-original, data-lazy-src, data-url, srcset, style(background-image)
-    js = r"""
+PROMOTE_JS = r"""
 (() => {
   const imgs = Array.from(document.querySelectorAll('img'));
+  function firstUrlFromSrcset(s) {
+    if (!s) return null;
+    const first = s.split(',')[0].trim().split(' ')[0];
+    return first && (first.startsWith('http://') || first.startsWith('https://')) ? first : null;
+  }
+  function urlFromStyle(s) {
+    if (!s) return null;
+    const m = s.match(/url\((['"]?)(.*?)\1\)/);
+    if (m && (m[2].startsWith('http://') || m[2].startsWith('https://'))) return m[2];
+    return null;
+  }
+
+  let counts = {http:0, data:0, blank:0, other:0};
   for (const img of imgs) {
+    // 昇格前の分類
+    const cur = img.getAttribute('src') || '';
+    if (cur.startsWith('http')) counts.http++;
+    else if (cur.startsWith('data:image')) counts.data++;
+    else if (cur === '') counts.blank++;
+    else counts.other++;
+
+    // lazy候補
     const cand = img.getAttribute('data-src')
       || img.getAttribute('data-original')
       || img.getAttribute('data-lazy-src')
       || img.getAttribute('data-url');
-
     const ss = img.getAttribute('srcset');
     const style = img.getAttribute('style') || (img.parentElement && img.parentElement.getAttribute('style')) || '';
-
-    function firstUrlFromSrcset(s) {
-      if (!s) return null;
-      const first = s.split(',')[0].trim().split(' ')[0];
-      return first && (first.startsWith('http://') || first.startsWith('https://')) ? first : null;
-    }
-    function urlFromStyle(s) {
-      const m = s && s.match(/url\((['"]?)(.*?)\1\)/);
-      if (m && (m[2].startsWith('http://') || m[2].startsWith('https://'))) return m[2];
-      return null;
-    }
 
     const urlFromSS = firstUrlFromSrcset(ss);
     const urlFromStyleAttr = urlFromStyle(style);
@@ -72,10 +76,24 @@ async def promote_lazy_images(page):
     }
     img.loading = 'eager';
   }
+  return counts;
 })();
 """
-    await page.evaluate(js)
-    await page.wait_for_timeout(1500)  # ネットワーク反映待ち
+
+COUNT_JS = r"""
+(() => {
+  const imgs = Array.from(document.querySelectorAll('img'));
+  let counts = {http:0, data:0, blank:0, other:0};
+  for (const img of imgs) {
+    const cur = img.getAttribute('src') || '';
+    if (cur.startsWith('http')) counts.http++;
+    else if (cur.startsWith('data:image')) counts.data++;
+    else if (cur === '') counts.blank++;
+    else counts.other++;
+  }
+  return counts;
+})();
+"""
 
 async def capture():
     urls = []
@@ -89,6 +107,7 @@ async def capture():
         urls = DEFAULT_URLS[:]
 
     os.makedirs(OUT_DIR, exist_ok=True)
+    meta = {"pages":[]}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-web-security"])
@@ -96,25 +115,38 @@ async def capture():
         page = await ctx.new_page()
 
         for url in urls:
-            print(f"==> {url}")
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(1200)
-
             await scroll_and_load(page)
-            await promote_lazy_images(page)  # ★ 画像URLを可能な限りHTTPに
+
+            before = await page.evaluate(COUNT_JS)
+            await page.wait_for_timeout(300)
+            promoted = await page.evaluate(PROMOTE_JS)
+            await page.wait_for_timeout(1500)
+            after = await page.evaluate(COUNT_JS)
 
             parsed = urlparse(url)
             base = (parsed.netloc + parsed.path).strip("/").replace("/", "_")
             name = sanitize_filename(base)
-
             html = await page.content()
             html_path = os.path.join(OUT_DIR, f"{name}.htm")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)
-            print(f"  saved {html_path}")
+
+            meta["pages"].append({
+                "url": url,
+                "file": html_path,
+                "img_counts_before": before,
+                "img_counts_after": after,
+                "promote_seen": promoted,
+            })
+            print(f"[saved] {html_path}  img(before)=>{before}  img(after)=>{after}")
 
         await ctx.close()
         await browser.close()
+
+    with open(os.path.join(OUT_DIR, "_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
 def main():
     asyncio.run(capture())
