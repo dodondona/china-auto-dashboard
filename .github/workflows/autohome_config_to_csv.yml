@@ -67,8 +67,8 @@ jobs:
           OPENAI_MODEL: gpt-4.1-mini
           CSV_IN:  output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
           CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
-          TRANSLATE_VALUES: "true"   # セル本文も翻訳
-          EXRATE_CNY_TO_JPY: "21.0"  # CNY→JPY 為替レート（例: 1元=21円）
+          TRANSLATE_VALUES: "true"
+          EXRATE_CNY_TO_JPY: "21.0"   # ← 例: 1元 = ¥21（自動換算）
         run: |
           python tools/translate_columns.py
 
