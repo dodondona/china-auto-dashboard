@@ -1,0 +1,62 @@
+name: autohome_pipeline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install pandas beautifulsoup4 lxml playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Prepare dirs
+        run: |
+          mkdir -p captures
+          mkdir -p csv
+          mkdir -p public/autohome_images
+
+      # ===== ここまでが共通の前準備 =====
+
+      # 1) ランキングページをスクロールして HTML 保存（あなたの既存 stage0 と同等）
+      - name: Capture ranking HTML (scroll)
+        run: |
+          python .github/scripts/stage0_fullpage_capture.py
+
+      # 2) 保存した HTML から CSV 生成（rank/name/units/delta/link/price/image）
+      - name: Parse rendered HTML to CSV
+        run: |
+          python .github/scripts/stage1_html_to_csv.py
+        # ↑ これが成功すれば csv/*.csv ができます
+        #   もし別のスクリプトで public/*.csv を作っている場合も次のステップで拾います
+
+      # 3) 各シリーズページの <title> からメーカー名を追記（manufacturer 列）
+      #    「csv/*.csv」と「public/*.csv」の両方を対象にします
+      - name: Add manufacturer column from <title>
+        run: |
+          set -eux
+          # csv/ にCSVがない環境でも public/*.csv を拾えるよう両方渡す
+          python .github/scripts/stage_add_manufacturer_from_title.py "csv/*.csv" "public/*.csv" || true
+
+      # 4) 成果物の収集
+      #    *_with_maker.csv が csv/ か public/ のどちらに出てもアップロード対象に含めます
+      - name: Upload artifacts (CSV with maker)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-csv-with-maker
+          path: |
+            csv/*_with_maker.csv
+            public/*_with_maker.csv
+            captures/*.htm
