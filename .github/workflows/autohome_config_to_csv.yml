@@ -28,12 +28,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 openai pandas
+          pip install "openai>=1.50.0" playwright beautifulsoup4 pandas
           python -m playwright install chromium
 
-      # -----------------------------
-      # 1️⃣ Autohome ページから構成表CSV生成
-      # -----------------------------
+      # 1) 抽出
       - name: Run extractor (PC site)
         if: ${{ inputs.mobile == 'false' }}
         run: |
@@ -49,22 +47,17 @@ jobs:
             --outdir output/autohome \
             --mobile
 
-      # -----------------------------
-      # 2️⃣ LLM翻訳で日本語列を追加
-      # -----------------------------
-      - name: Translate CN→JA via OpenAI API
+      # 2) 翻訳
+      - name: Translate CN→JA via OpenAI (Responses API + JSON schema)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4.1-mini    # 品質寄り（安定）
-          CSV_IN: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
+          OPENAI_MODEL: gpt-4.1-mini   # 品質寄りは gpt-4.1
+          CSV_IN:  output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
           CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
-          GLOSS: tools/glossary_cn_ja.csv
         run: |
           python tools/translate_columns.py
 
-      # -----------------------------
-      # 3️⃣ 出力アーカイブ
-      # -----------------------------
+      # 3) 出力
       - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
         with:
