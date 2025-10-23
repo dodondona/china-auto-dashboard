@@ -2,44 +2,39 @@ name: autohome_pipeline
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "15 1 2 * *"  # monthly at 01:15 UTC on the 2nd
 
 jobs:
-  autohome_pipeline:
+  run:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
+          pip install --upgrade pip
+          pip install pandas playwright beautifulsoup4 lxml
+          python -m playwright install --with-deps chromium
 
-      # ✅ Playwrightブラウザを事前インストール（今回のエラー対応）
-      - name: Install Playwright browsers
+      - name: Prepare dirs
         run: |
-          python -m playwright install chromium
+          mkdir -p public/autohome_images
+          mkdir -p csv
 
-      - name: Run Stage1 (ranking + image + CSV)
+      # ✅ スクリーンショットで「見た目の画像」を取得
+      - name: Capture rank images and CSV
+        env:
+          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"  # 例: https://dodondona.github.io/china-auto-dashboard
         run: |
           python .github/scripts/rank_capture_images_and_csv.py
 
-      # ✅ ここで追加：出力CSVを100位までに制限（ヘッダ+100行）
-      - name: Limit CSV to top 100 rows (in-place)
-        run: |
-          if [ -f public/autohome_ranking_with_image_urls.csv ]; then
-            awk 'NR==1 || NR<=101' public/autohome_ranking_with_image_urls.csv > public/.tmp_top100.csv
-            mv public/.tmp_top100.csv public/autohome_ranking_with_image_urls.csv
-          fi
-
+      # ✅ 各シリーズページの<title>からメーカー名を追加
       - name: Add manufacturer column from <title>
         run: |
           python .github/scripts/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
@@ -47,5 +42,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: autohome_ranking_with_maker
-          path: public/autohome_ranking_with_image_urls.csv
+          name: autohome-ranking-full
+          path: |
+            public/autohome_ranking_with_image_urls_with_maker.csv
+            public/autohome_images/*.png
