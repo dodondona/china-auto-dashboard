@@ -28,8 +28,9 @@ jobs:
         run: |
           mkdir -p captures
           mkdir -p csv
+          mkdir -p public/autohome_images
 
-      - name: Capture rendered HTML (no screenshot)
+      - name: Capture rendered HTML (promote lazy images; no screenshot)
         run: |
           python .github/scripts/stage0_fullpage_capture.py
 
@@ -37,10 +38,20 @@ jobs:
         run: |
           python .github/scripts/stage1_html_to_csv.py
 
+      # （任意）data:image を公開ファイル化して image_url を作る
+      # - name: Build public image URLs
+      #   env:
+      #     PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>/autohome_images"
+      #   run: |
+      #     python .github/scripts/stage2_images_to_public.py
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autohome-csv
           path: |
-            csv/
+            csv/*.csv
             captures/*.htm
+            captures/_meta.json
+            # public/autohome_images/*
+            # public/autohome_ranking_with_image_urls.csv
