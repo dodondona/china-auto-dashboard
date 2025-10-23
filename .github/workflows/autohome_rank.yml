@@ -1,0 +1,41 @@
+name: autohome_rank
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Prepare dirs
+        run: |
+          mkdir -p public/autohome_images
+
+      - name: Capture rank images and CSV (in order)
+        env:
+          # 例: https://<YOUR_PAGES_DOMAIN>/autohome_images
+          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"
+        run: |
+          python .github/scripts/rank_capture_images_and_csv.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-rank
+          path: |
+            public/autohome_ranking_with_image_urls.csv
+            public/autohome_images/*.png
