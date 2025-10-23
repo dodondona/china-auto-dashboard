@@ -15,8 +15,52 @@ CAP_DIR = Path("captures")
 OUT_DIR = Path("csv")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+KEEP_FULL_DATA_IMAGE = os.environ.get("KEEP_FULL_DATA_IMAGE", "0") == "1"
+
 def _txt(el):
     return el.get_text(" ", strip=True) if hasattr(el, "get_text") else ""
+
+def _pick_image_url(img_el) -> str | None:
+    """imgタグや周辺のlazy属性・styleから最良のURLを返す。無ければ data:image も可。"""
+    if not img_el:
+        return None
+
+    # 1) まず src が http(s)
+    src = img_el.get("src")
+    if src and src.startswith(("http://", "https://")):
+        return src
+
+    # 2) lazy系属性
+    for key in ("data-src", "data-original", "data-lazy-src", "data-url"):
+        v = img_el.get(key)
+        if v and v.startswith(("http://", "https://")):
+            return v
+
+    # 3) srcset から最初のURL
+    srcset = img_el.get("srcset")
+    if srcset:
+        # "url1 1x, url2 2x" → 最初のURL
+        first = srcset.split(",")[0].strip().split(" ")[0]
+        if first.startswith(("http://", "https://")):
+            return first
+
+    # 4) 親要素の style="background-image:url(...)" を拾う
+    style = img_el.get("style") or (img_el.parent.get("style") if img_el.parent else None)
+    if style:
+        m = re.search(r'url\((["\']?)(.*?)\1\)', style)
+        if m and m.group(2).startswith(("http://", "https://")):
+            return m.group(2)
+
+    # 5) ここまででURLがない場合、data:image を返す（既定では短縮）
+    if src and src.startswith("data:image/"):
+        return src if KEEP_FULL_DATA_IMAGE else (src[:120] + "...")
+    # data-original 等が data:image の場合
+    for key in ("data-src", "data-original", "data-lazy-src", "data-url"):
+        v = img_el.get(key)
+        if v and v.startswith("data:image/"):
+            return v if KEEP_FULL_DATA_IMAGE else (v[:120] + "...")
+
+    return None
 
 def parse_card(div):
     rec = {
@@ -56,10 +100,9 @@ def parse_card(div):
         if sid:
             rec["link"] = f"https://www.autohome.com.cn/{sid}"
 
-    # image（URLのみ保持。data:imageは後段でファイル化推奨）
+    # image（lazy対応＋data:image対応）
     img = div.find("img")
-    if img and img.get("src") and img["src"].startswith(("http://", "https://")):
-        rec["image"] = img["src"]
+    rec["image"] = _pick_image_url(img)
 
     # units（「车系销量」近傍から 4-6桁 or カンマ区切り数値を拾う）
     label = div.find(string=lambda s: isinstance(s, str) and "车系销量" in s)
