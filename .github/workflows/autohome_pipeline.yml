@@ -23,11 +23,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
 
+      # ✅ Playwrightブラウザを事前インストール（今回のエラー対応）
+      - name: Install Playwright browsers
+        run: |
+          python -m playwright install chromium
+
       - name: Run Stage1 (ranking + image + CSV)
         run: |
           python .github/scripts/rank_capture_images_and_csv.py
 
-      # ここで追加：出力CSVを100位までに制限（ヘッダ+100行）
+      # ✅ ここで追加：出力CSVを100位までに制限（ヘッダ+100行）
       - name: Limit CSV to top 100 rows (in-place)
         run: |
           if [ -f public/autohome_ranking_with_image_urls.csv ]; then
