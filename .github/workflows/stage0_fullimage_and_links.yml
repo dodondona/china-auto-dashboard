@@ -1,12 +1,12 @@
-name: stage0_fullimage_and_links
+name: stage0_fullpage_capture
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"  # monthly at 01:15 UTC on the 2nd
+    - cron: "15 1 2 * *"   # 毎月2日 01:15 UTC（北京09:15）
 
 jobs:
-  stage0_fullimage_and_links:
+  capture_fullpage:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,24 +24,34 @@ jobs:
           pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install --with-deps chromium
 
-      - name: Make captures dir
+      - name: Make dirs
         run: |
           mkdir -p captures
+          mkdir -p csv
+          mkdir -p public/autohome_images
 
-      - name: Capture rendered HTML & fullpage screenshot
+      - name: Capture rendered HTML (promote lazy images; no screenshot)
         run: |
           python .github/scripts/stage0_fullpage_capture.py
 
-      - name: Parse rendered HTML to CSV (no OCR)
+      - name: Parse rendered HTML to CSV
         run: |
-          mkdir -p csv
           python .github/scripts/stage1_html_to_csv.py
+
+      # 任意: data:image を公開ファイル化して image_url を作る
+      - name: Build public image URLs
+        env:
+          # 例: https://<USER>.github.io/<REPO>/autohome_images
+          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>/autohome_images"
+        run: |
+          python .github/scripts/stage2_images_to_public.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autohome-csv
           path: |
-            csv/
-            captures/*.png
+            csv/*.csv
             captures/*.htm
+            public/autohome_images/*
+            public/autohome_ranking_with_image_urls.csv
