@@ -1,41 +1,88 @@
-name: autohome_rank
+name: autohome_config_to_csv
 
 on:
   workflow_dispatch:
+    inputs:
+      series:
+        description: "Autohome series id (e.g., 6814)"
+        required: true
+        default: "7578"
+      mobile:
+        description: "Use mobile site"
+        required: false
+        default: "false"
 
 jobs:
-  run:
+  extract_and_translate:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      # -----------------------------
+      # 0️⃣ Repository checkout
+      # -----------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      # -----------------------------
+      # 1️⃣ Python environment
+      # -----------------------------
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install "openai>=1.3.7" playwright beautifulsoup4 pandas
+          python -m playwright install chromium
 
-      - name: Prepare dirs
+      # -----------------------------
+      # 2️⃣ Autohome Config Extraction
+      # -----------------------------
+      - name: Run extractor (PC site)
+        if: ${{ inputs.mobile == 'false' }}
         run: |
-          mkdir -p public/autohome_images
+          python tools/autohome_config_to_csv.py \
+            --series "${{ inputs.series }}" \
+            --outdir output/autohome
 
-      - name: Capture rank images and CSV (in order)
+      - name: Run extractor (Mobile site)
+        if: ${{ inputs.mobile == 'true' }}
+        run: |
+          python tools/autohome_config_to_csv.py \
+            --series "${{ inputs.series }}" \
+            --outdir output/autohome \
+            --mobile
+
+      # -----------------------------
+      # 3️⃣ CN→JA Translation (セクション＋項目＋セル本文)
+      # -----------------------------
+      - name: Translate CN→JA via OpenAI (full table)
         env:
-          # 例: https://<YOUR_PAGES_DOMAIN>/autohome_images
-          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          CSV_IN:  output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
+          CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
+          TRANSLATE_VALUES: "true"   # ← セル本文も翻訳（falseなら縦列のみ）
         run: |
-          python .github/scripts/rank_capture_images_and_csv.py
+          python tools/translate_columns.py
 
-      - name: Upload artifacts
+      # -----------------------------
+      # 4️⃣ Upload artifacts
+      # -----------------------------
+      - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-rank
+          name: autohome_config_${{ inputs.series }}_translated
           path: |
-            public/autohome_ranking_with_image_urls.csv
-            public/autohome_images/*.png
+            output/autohome/${{ inputs.series }}/*.csv
+
+      # -----------------------------
+      # 5️⃣ Optional: Display summary
+      # -----------------------------
+      - name: Print summary info
+        run: |
+          echo "✅ CSV extraction + translation completed for series ${{ inputs.series }}"
+          echo "Output files:"
+          ls -lh output/autohome/${{ inputs.series }}/
