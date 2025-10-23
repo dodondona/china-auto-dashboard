@@ -25,9 +25,9 @@ jobs:
 
       - name: Run Stage1 (ranking + image + CSV)
         run: |
-          python .github/scripts/stage1_ranklist_and_image.py
+          python .github/scripts/rank_capture_images_and_csv.py
 
-      # ✅ ここで追加：出力CSVを100位までに制限（余計な変更なし）
+      # ここで追加：出力CSVを100位までに制限（ヘッダ+100行）
       - name: Limit CSV to top 100 rows (in-place)
         run: |
           if [ -f public/autohome_ranking_with_image_urls.csv ]; then
