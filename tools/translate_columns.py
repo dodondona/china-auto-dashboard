@@ -1,3 +1,4 @@
+# tools/translate_columns.py
 from __future__ import annotations
 import os, json, time, re
 from pathlib import Path
@@ -9,64 +10,63 @@ DST = Path(os.environ.get("CSV_OUT", "output/autohome/7578/config_7578_ja.csv"))
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 API_KEY = os.environ.get("OPENAI_API_KEY")
 TRANSLATE_VALUES = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
+
+# 為替レート（CNY→JPY）: デフォルト 21.0
 EXRATE_CNY_TO_JPY = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
 
 BATCH_SIZE = 60
 RETRIES = 3
 
-# --- ノイズ除去 ---
-NOISE_WORDS_ANY = ["计算器", "询价", "询底价", "报价", "对比", "图片", "配置", "参数", "详情", "价格询问"]
-NOISE_PRICE_TAIL = ["询价", "计算器", "询底价", "报价"]
+# -------------------------------------------------------
+# ノイズ除去と固定訳
+# -------------------------------------------------------
+NOISE_PRICE_TAIL = ["询价", "计算器", "报价"]
+NOISE_ANY = ["对比", "参数", "图片", "配置", "详情"]
 
-def clean_any_noise(s: str) -> str:
+def clean_text(s: str) -> str:
     s = str(s).strip()
-    for w in NOISE_WORDS_ANY:
+    for w in NOISE_ANY + NOISE_PRICE_TAIL:
         s = s.replace(w, "")
-    return re.sub(r"\s+", " ", s).strip(" -　")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" -　")
 
-def clean_price_cell(s: str) -> str:
-    s = clean_any_noise(s)
-    for w in NOISE_PRICE_TAIL:
-        s = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", s)
-    return s.strip()
-
-# --- ブランド辞書（英語維持） ---
+# -------------------------------------------------------
+# 固定訳辞書
+# -------------------------------------------------------
 BRAND_MAP = {
-    "BYD": "BYD", "比亚迪": "BYD",
-    "NIO": "NIO", "蔚来": "NIO",
-    "XPeng": "XPeng", "小鹏": "XPeng",
-    "Geely": "Geely", "吉利": "Geely",
-    "Changan": "Changan", "长安": "Changan",
-    "Chery": "Chery", "奇瑞": "Chery",
-    "Li Auto": "Li Auto", "理想": "Li Auto",
-    "AITO": "AITO", "问界": "AITO",
-    "Wuling": "Wuling", "五菱": "Wuling",
-    "Ora": "Ora", "欧拉": "Ora",
-    "Zeekr": "Zeekr", "极氪": "Zeekr",
-    "Lynk & Co": "Lynk & Co", "领克": "Lynk & Co",
+    "BYD": "BYD",  # ← 翻訳しない
+    "比亚迪": "BYD",
+    "NIO": "蔚来",
+    "XPeng": "小鵬",
+    "Geely": "吉利",
+    "Changan": "長安",
+    "Chery": "奇瑞",
+    "Li Auto": "理想",
+    "AITO": "問界",
 }
 
-# --- 固定訳 ---
 FIX_JA_ITEMS = {
     "厂商指导价": "メーカー希望小売価格（元）",
-    "经销商参考价": "ディーラー販売価格（元）",
     "经销商报价": "ディーラー販売価格（元）",
+    "经销商参考价": "ディーラー販売価格（元）",
     "被动安全": "衝突安全",
-    "语音助手唤醒词": "音声アシスタント起動ワード",
-    "后排出风口": "後席送風口",
-    "后座出风口": "後席送風口",
 }
+
 FIX_JA_SECTIONS = {"被动安全": "衝突安全"}
 
-PRICE_ITEM_CN = {"厂商指导价", "经销商参考价", "经销商报价"}
+PRICE_ITEM_CN = {"厂商指导价", "经销商报价", "经销商参考价"}
 PRICE_ITEM_JA = {"メーカー希望小売価格（元）", "ディーラー販売価格（元）"}
 
-# --- 価格正規表現（改良版）---
-RE_WAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万(?:元)?")
+# -------------------------------------------------------
+# 円併記処理 ("11.98万中国元（約¥251,580）")
+# -------------------------------------------------------
+RE_WAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN = re.compile(r"(?P<num>[\d,]+)\s*元")
 
 def append_jpy(s: str, rate: float) -> str:
-    t = str(s)
+    t = str(s).strip()
+    if not t or t in {"-", "–", "—"}:
+        return t
     m1 = RE_WAN.search(t)
     m2 = RE_YUAN.search(t)
     cny = None
@@ -78,17 +78,16 @@ def append_jpy(s: str, rate: float) -> str:
         return t
     jpy = int(round(cny * rate))
     jpy_fmt = f"{jpy:,}"
-    # すでに日本円が併記されていればスキップ
-    if "¥" in t and "約" in t:
+    # 「中国元」がない場合は補う
+    if "元" not in t:
+        t = f"{t}中国元"
+    if "¥" in t:
         return t
-    # 「起」など語尾は括弧の外に残す
-    suffix = ""
-    if t.endswith("起"):
-        t = t[:-1]
-        suffix = "起"
-    return f"{t}中国元（約¥{jpy_fmt}）{suffix}"
+    return f"{t}（約¥{jpy_fmt}）"
 
-# --- LLM補助 ---
+# -------------------------------------------------------
+# OpenAI翻訳まわり
+# -------------------------------------------------------
 def uniq(seq):
     s, out = set(), []
     for x in seq:
@@ -101,19 +100,16 @@ def chunked(xs, n):
         yield xs[i:i+n]
 
 def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
-    mapp = {}
     try:
         data = json.loads(content)
         if isinstance(data, dict) and "translations" in data:
-            for d in data["translations"]:
-                cn = str(d.get("cn", "")).strip()
-                ja = str(d.get("ja", "")).strip()
-                if cn:
-                    mapp[cn] = ja or cn
-            return mapp
+            return {d["cn"]: d["ja"] for d in data["translations"] if "cn" in d and "ja" in d}
     except Exception:
         pass
-    return {t: t for t in terms}
+    for line in content.splitlines():
+        if "\t" in line:
+            cn, ja = line.split("\t", 1)
+            yield (cn.strip(), ja.strip())
 
 class Translator:
     def __init__(self, model: str, api_key: str):
@@ -121,47 +117,51 @@ class Translator:
         self.model = model
         self.system = (
             "あなたは自動車仕様表の専門翻訳者です。"
-            "中国語の項目やセクション名を自然な日本語に翻訳してください。"
-            "JSON形式で {\"translations\":[{\"cn\":\"原文\",\"ja\":\"訳文\"}]} で返してください。"
+            "入力は中国語の『セクション名/項目名/モデル名/セル値』の配列です。"
+            "自然で簡潔な日本語へ翻訳してください。"
+            "数値・単位は保持。JSONで {'translations':[{'cn':'原文','ja':'訳文'}]} で返すこと。"
         )
-    def translate_batch(self, terms: list[str]) -> dict[str, str]:
-        messages = [
+
+    def translate_batch(self, terms):
+        msg = [
             {"role": "system", "content": self.system},
             {"role": "user", "content": json.dumps({"terms": terms}, ensure_ascii=False)},
         ]
         resp = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=msg,
             temperature=0,
             response_format={"type": "json_object"},
         )
-        return parse_json_relaxed(resp.choices[0].message.content or "", terms)
+        c = resp.choices[0].message.content or ""
+        try:
+            data = json.loads(c)
+            if "translations" in data:
+                return {d["cn"]: d["ja"] for d in data["translations"]}
+        except Exception:
+            pass
+        return {t: t for t in terms}
 
-    def translate_unique(self, terms: list[str]) -> dict[str, str]:
+    def translate_unique(self, terms):
         out = {}
         for chunk in chunked(terms, BATCH_SIZE):
-            for _ in range(RETRIES):
-                try:
-                    part = self.translate_batch(chunk)
-                    out.update(part)
-                    break
-                except Exception as e:
-                    print("⚠️ retry:", e)
-                    time.sleep(1)
+            out.update(self.translate_batch(chunk))
         return out
 
-# --- メイン ---
+# -------------------------------------------------------
+# main
+# -------------------------------------------------------
 def main():
     df = pd.read_csv(SRC, encoding="utf-8-sig")
-    df = df.map(clean_any_noise)
+    df = df.map(clean_text)
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
     uniq_sec  = uniq(df["セクション"].dropna().astype(str))
     uniq_item = uniq(df["項目"].dropna().astype(str))
     tr = Translator(MODEL, API_KEY)
+
     sec_map  = tr.translate_unique(uniq_sec)
     item_map = tr.translate_unique(uniq_item)
-
     sec_map.update(FIX_JA_SECTIONS)
     item_map.update(FIX_JA_ITEMS)
 
@@ -169,11 +169,10 @@ def main():
     out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(s, s)))
     out.insert(3, "項目_ja", out["項目"].map(lambda s: item_map.get(s, s)))
 
-    # 価格セル変換
-    is_price = out["項目"].isin(PRICE_ITEM_CN) | out["項目_ja"].isin(PRICE_ITEM_JA)
+    # ---- 価格欄を日本円併記に変換 ----
+    is_price_row = out["項目"].isin(list(PRICE_ITEM_CN)) | out["項目_ja"].isin(list(PRICE_ITEM_JA))
     for col in out.columns[4:]:
-        out.loc[is_price, col] = out.loc[is_price, col].map(clean_price_cell)
-        out.loc[is_price, col] = out.loc[is_price, col].map(lambda s: append_jpy(s, EXRATE_CNY_TO_JPY))
+        out.loc[is_price_row, col] = out.loc[is_price_row, col].map(lambda s: append_jpy(clean_text(s), EXRATE_CNY_TO_JPY))
 
     DST.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(DST, index=False, encoding="utf-8-sig")
