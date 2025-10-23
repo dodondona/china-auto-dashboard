@@ -24,17 +24,20 @@ jobs:
           pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install --with-deps chromium
 
-      - name: Make captures dir
+      - name: Make dirs
         run: |
           mkdir -p captures
+          mkdir -p csv
 
-      - name: Capture rendered HTML & fullpage screenshot
+      - name: Capture rendered HTML (no screenshot)
         run: |
           python .github/scripts/stage0_fullpage_capture.py
 
-      - name: Parse rendered HTML to CSV (no OCR)
+      - name: Parse rendered HTML to CSV
+        env:
+          # data:image をそのままCSVへ入れたい場合は 1 に
+          # KEEP_FULL_DATA_IMAGE: "1"
         run: |
-          mkdir -p csv
           python .github/scripts/stage1_html_to_csv.py
 
       - name: Upload artifacts
@@ -43,5 +46,4 @@ jobs:
           name: autohome-csv
           path: |
             csv/
-            captures/*.png
             captures/*.htm
