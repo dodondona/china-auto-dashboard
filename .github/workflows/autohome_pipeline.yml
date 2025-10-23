@@ -19,44 +19,30 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install pandas beautifulsoup4 lxml playwright
+          pip install pandas playwright beautifulsoup4 lxml
           python -m playwright install --with-deps chromium
 
       - name: Prepare dirs
         run: |
-          mkdir -p captures
-          mkdir -p csv
           mkdir -p public/autohome_images
+          mkdir -p csv
 
-      # ===== ここまでが共通の前準備 =====
-
-      # 1) ランキングページをスクロールして HTML 保存（あなたの既存 stage0 と同等）
-      - name: Capture ranking HTML (scroll)
+      # ✅ スクリーンショットで「見た目の画像」を取得
+      - name: Capture rank images and CSV
+        env:
+          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"  # 例: https://dodondona.github.io/china-auto-dashboard
         run: |
-          python .github/scripts/stage0_fullpage_capture.py
+          python .github/scripts/rank_capture_images_and_csv.py
 
-      # 2) 保存した HTML から CSV 生成（rank/name/units/delta/link/price/image）
-      - name: Parse rendered HTML to CSV
-        run: |
-          python .github/scripts/stage1_html_to_csv.py
-        # ↑ これが成功すれば csv/*.csv ができます
-        #   もし別のスクリプトで public/*.csv を作っている場合も次のステップで拾います
-
-      # 3) 各シリーズページの <title> からメーカー名を追記（manufacturer 列）
-      #    「csv/*.csv」と「public/*.csv」の両方を対象にします
+      # ✅ 各シリーズページの<title>からメーカー名を追加
       - name: Add manufacturer column from <title>
         run: |
-          set -eux
-          # csv/ にCSVがない環境でも public/*.csv を拾えるよう両方渡す
-          python .github/scripts/stage_add_manufacturer_from_title.py "csv/*.csv" "public/*.csv" || true
+          python .github/scripts/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
 
-      # 4) 成果物の収集
-      #    *_with_maker.csv が csv/ か public/ のどちらに出てもアップロード対象に含めます
-      - name: Upload artifacts (CSV with maker)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-csv-with-maker
+          name: autohome-ranking-full
           path: |
-            csv/*_with_maker.csv
-            public/*_with_maker.csv
-            captures/*.htm
+            public/autohome_ranking_with_image_urls_with_maker.csv
+            public/autohome_images/*.png
