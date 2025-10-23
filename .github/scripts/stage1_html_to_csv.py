@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # .github/scripts/stage1_html_to_csv.py
 #
-# ./captures/*.htm を読み、Autohomeのレンダリング後HTMLから
-# rank / name / units / delta(±) / link / price / image を抽出して
-# ./csv/{name}.csv に出力します。
+# ./captures/*.htm → ./csv/{name}.csv
+# 抽出: rank / name / units / delta(±) / link / price / image
 
 import os
 import re
+from urllib.parse import urljoin
 from pathlib import Path
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -16,49 +16,86 @@ OUT_DIR = Path("csv")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 KEEP_FULL_DATA_IMAGE = os.environ.get("KEEP_FULL_DATA_IMAGE", "0") == "1"
+BASE = "https://www.autohome.com.cn"
 
 def _txt(el):
     return el.get_text(" ", strip=True) if hasattr(el, "get_text") else ""
 
-def _pick_image_url(img_el) -> str | None:
-    """imgタグや周辺のlazy属性・styleから最良のURLを返す。無ければ data:image も可。"""
-    if not img_el:
+def _first_url_from_srcset(val: str | None) -> str | None:
+    if not val:
         return None
+    part = val.split(",")[0].strip().split(" ")[0]
+    return part if part.startswith(("http://","https://")) else None
 
-    # 1) まず src が http(s)
-    src = img_el.get("src")
-    if src and src.startswith(("http://", "https://")):
-        return src
+def _url_from_style(style: str | None) -> str | None:
+    if not style:
+        return None
+    m = re.search(r'url\((["\']?)(.*?)\1\)', style)
+    if m and m.group(2).startswith(("http://","https://")):
+        return m.group(2)
+    return None
 
-    # 2) lazy系属性
-    for key in ("data-src", "data-original", "data-lazy-src", "data-url"):
-        v = img_el.get(key)
-        if v and v.startswith(("http://", "https://")):
-            return v
+def _pick_image_url(div) -> str | None:
+    # 1) picture>source[srcset]
+    pic = div.find("picture")
+    if pic:
+        src_el = pic.find("source", attrs={"srcset": True})
+        url = _first_url_from_srcset(src_el.get("srcset")) if src_el else None
+        if url:
+            return url
 
-    # 3) srcset から最初のURL
-    srcset = img_el.get("srcset")
-    if srcset:
-        # "url1 1x, url2 2x" → 最初のURL
-        first = srcset.split(",")[0].strip().split(" ")[0]
-        if first.startswith(("http://", "https://")):
-            return first
+    # 2) <img> パターン（src / data-* / srcset / style）
+    img = div.find("img")
+    if img:
+        src = img.get("src")
+        if src and src.startswith(("http://","https://")):
+            return src
 
-    # 4) 親要素の style="background-image:url(...)" を拾う
-    style = img_el.get("style") or (img_el.parent.get("style") if img_el.parent else None)
-    if style:
-        m = re.search(r'url\((["\']?)(.*?)\1\)', style)
-        if m and m.group(2).startswith(("http://", "https://")):
-            return m.group(2)
+        for key in ("data-src","data-original","data-lazy-src","data-url"):
+            v = img.get(key)
+            if v and v.startswith(("http://","https://")):
+                return v
 
-    # 5) ここまででURLがない場合、data:image を返す（既定では短縮）
-    if src and src.startswith("data:image/"):
-        return src if KEEP_FULL_DATA_IMAGE else (src[:120] + "...")
-    # data-original 等が data:image の場合
-    for key in ("data-src", "data-original", "data-lazy-src", "data-url"):
-        v = img_el.get(key)
-        if v and v.startswith("data:image/"):
-            return v if KEEP_FULL_DATA_IMAGE else (v[:120] + "...")
+        url = _first_url_from_srcset(img.get("srcset"))
+        if url:
+            return url
+
+        s = img.get("style") or (img.parent.get("style") if img.parent else None)
+        url = _url_from_style(s)
+        if url:
+            return url
+
+        # data:image は必要なら短縮してCSVへ
+        if src and src.startswith("data:image/"):
+            return src if KEEP_FULL_DATA_IMAGE else (src[:120] + "...")
+        for key in ("data-src","data-original","data-lazy-src","data-url"):
+            v = img.get(key)
+            if v and v.startswith("data:image/"):
+                return v if KEEP_FULL_DATA_IMAGE else (v[:120] + "...")
+
+    return None
+
+def _extract_link(div) -> str | None:
+    # 優先：button[data-series-id]
+    btn = div.find("button", attrs={"data-series-id": True})
+    if btn and btn.get("data-series-id"):
+        return f"{BASE}/{btn['data-series-id']}"
+
+    # Fallback: <a href="/12345"> or absolute
+    a = div.find("a", href=True)
+    if a:
+        href = a["href"].strip()
+        # /12345 → 絶対化
+        if re.fullmatch(r"/\d{3,6}/?", href):
+            return urljoin(BASE, href)
+        # https://www.autohome.com.cn/12345
+        if re.match(r"^https?://www\.autohome\.com\.cn/\d{3,6}/?$", href):
+            return href
+
+    # さらに、data-series-id が別要素にあるケース
+    any_sid = div.find(attrs={"data-series-id": True})
+    if any_sid and any_sid.get("data-series-id"):
+        return f"{BASE}/{any_sid['data-series-id']}"
 
     return None
 
@@ -73,19 +110,17 @@ def parse_card(div):
         "image": None,
     }
 
-    # rank
     if div.has_attr("data-rank-num"):
         try:
             rec["rank"] = int(div["data-rank-num"])
         except Exception:
             pass
 
-    # name
     name_tag = div.select_one(".tw-text-nowrap.tw-text-lg") or div.find(re.compile(r'^h[1-4]$'))
     if name_tag:
         rec["name"] = name_tag.get_text(strip=True)
 
-    # price (例: 7.99-17.49万)
+    # price (7.99-17.49万)
     for d in div.find_all("div"):
         t = _txt(d)
         m = re.search(r"\d+(?:\.\d+)?-\d+(?:\.\d+)?万", t)
@@ -93,18 +128,10 @@ def parse_card(div):
             rec["price"] = m.group(0)
             break
 
-    # link（series_id -> https://www.autohome.com.cn/<id>）
-    btn = div.find("button", attrs={"data-series-id": True})
-    if btn:
-        sid = btn.get("data-series-id")
-        if sid:
-            rec["link"] = f"https://www.autohome.com.cn/{sid}"
+    rec["link"]  = _extract_link(div)
+    rec["image"] = _pick_image_url(div)
 
-    # image（lazy対応＋data:image対応）
-    img = div.find("img")
-    rec["image"] = _pick_image_url(img)
-
-    # units（「车系销量」近傍から 4-6桁 or カンマ区切り数値を拾う）
+    # units
     label = div.find(string=lambda s: isinstance(s, str) and "车系销量" in s)
     if label:
         cur = label.parent
@@ -115,15 +142,13 @@ def parse_card(div):
                     rec["units"] = int(m.group(1).replace(",", ""))
                     break
         if rec["units"] is None:
-            # フォールバック：カード全体の末尾近くの数字を拾う
             nums = re.findall(r'(\d{1,3}(?:,\d{3})+|\d{4,6})', _txt(div))
             if nums:
                 rec["units"] = int(nums[-1].replace(",", ""))
 
-    # delta（SVGの色で方向判定、隣の数字で幅）
+    # delta ±
     svg = div.find("svg")
     if svg:
-        # 幅の数値
         num = None
         s = svg.find_next(string=True)
         if isinstance(s, str):
@@ -133,13 +158,12 @@ def parse_card(div):
             m = re.search(r"\d+", _txt(svg.parent))
             if m: num = int(m.group(0))
 
-        # fill色で方向推定
         colors = set((p.get("fill", "") or "").lower() for p in svg.find_all("path"))
         sign = None
         if "#f60" in colors or "#ff6600" in colors:
-            sign = +1   # オレンジ＝上昇
+            sign = +1
         elif "#1ccd99" in colors or "#00cc99" in colors or "#1ccd9a" in colors:
-            sign = -1   # グリーン＝下降
+            sign = -1
 
         if num is not None:
             rec["delta_vs_last_month"] = f"{'+' if sign==1 else '-' if sign==-1 else ''}{num}"
