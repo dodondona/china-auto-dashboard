@@ -34,12 +34,12 @@ jobs:
           pip install playwright pandas beautifulsoup4 lxml requests
           python -m playwright install chromium
 
-      # ランキング＋画像URL生成（元の動作そのまま）
+      # ▼ ランキング＋画像URL生成（元の処理そのまま）
       - name: Build ranking + image URLs CSV (top100)
         run: |
           python tools/rank_capture_images_and_csv.py
 
-      # 画像もartifactとして保存（public/images/）
+      # ▼ 画像をartifact化（public/images/）
       - name: Upload artifact (ranking images)
         uses: actions/upload-artifact@v4
         with:
@@ -47,6 +47,7 @@ jobs:
           path: public/images/**
           if-no-files-found: ignore
 
+      # ▼ CSVをartifact化
       - name: Upload artifact (ranking CSVs)
         uses: actions/upload-artifact@v4
         with:
@@ -55,7 +56,7 @@ jobs:
             public/*.csv
           if-no-files-found: error
 
-      # ランキングCSVから series_id 抽出 → configURL 作成
+      # ▼ ランキングCSVから series_id 抽出 → configURL 作成
       - name: Build spec links from ranking (top100)
         run: |
           set -e
@@ -79,10 +80,10 @@ jobs:
             spec_links.csv
           if-no-files-found: error
 
-      # pipeline完了後、自動で autohome_config_to_csv.yml を発火
+      # ▼ pipeline完了後、自動で autohome_config_to_csv.yml を発火
       - name: Trigger config_to_csv workflow
         if: success()
-        uses: peter-evans/workflow-dispatch@v3
+        uses: peter-evans/workflow-dispatch@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
