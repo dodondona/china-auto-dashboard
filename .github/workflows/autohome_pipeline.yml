@@ -3,7 +3,7 @@ name: autohome_pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"  # 毎月2日のUTC 01:15
+    - cron: "15 1 2 * *"
 
 jobs:
   autohome_pipeline:
@@ -19,7 +19,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # CJKフォント（既存スクリプトへの影響なし）
       - name: Install CJK fonts
         run: |
           sudo apt-get update
@@ -32,14 +31,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install playwright pandas beautifulsoup4 lxml requests
-          fi
+          pip install playwright pandas beautifulsoup4 lxml requests
           python -m playwright install chromium
 
-      # ▼ 既存：ランキングCSV生成（あなたの既存スクリプトをそのまま実行）
       - name: Build ranking + image URLs CSV (top100)
         run: |
           python tools/rank_capture_images_and_csv.py
@@ -52,24 +46,19 @@ jobs:
             public/*.csv
           if-no-files-found: error
 
-      # ▼ 連結その1：ランキングCSVから series_id 抽出 → config URL 作成（ヒア構文なし）
+      # ▼ series_id 抽出＋config URL生成（ヒア構文も python -c も使わない）
       - name: Build spec links from ranking (top100)
         run: |
-          python -c 'import csv,re,pathlib,sys;\
-p=pathlib.Path("public/autohome_ranking_with_image_urls.csv");\
-rows=list(csv.DictReader(p.open(encoding="utf-8-sig")));\
-ids=[];\
-open("spec_links.csv","w",encoding="utf-8").write("series_id,config_url\n");\
-import io;\
-w=open("spec_links.csv","a",encoding="utf-8");\
-[ (lambda href: ( \
-    (lambda m: ( \
-      (lambda sid: (ids.append(sid), w.write(f"{sid},https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437\\n")) ) (m.group(1)) \
-    ) if m else None) (re.search(r"/(\\d{3,6})/?$", (href or "").strip())) \
-  ))(r.get("link","")) for r in rows[:100] ];\
-w.close();\
-pathlib.Path("spec_series_ids.txt").write_text("\\n".join(ids),encoding="utf-8");\
-sys.exit(1) if not ids else print(f"Extracted {len(ids)} series ids", file=sys.stderr)'
+          set -e
+          echo "series_id,config_url" > spec_links.csv
+          head -n 200 public/autohome_ranking_with_image_urls.csv | \
+            grep -oE "/[0-9]{3,6}" | \
+            sed 's#/##' | \
+            head -n 100 | \
+            while read sid; do
+              echo "${sid},https://www.autohome.com.cn/config/series/${sid}.html#pvareaid=3454437" >> spec_links.csv
+            done
+          awk -F, 'NR>1{print $1}' spec_links.csv > spec_series_ids.txt
           test -s spec_series_ids.txt
 
       - name: Upload artifact (spec series ids)
