@@ -2,7 +2,7 @@ name: after_pipeline_build_speclinks
 
 on:
   workflow_run:
-    workflows: ["autohome_pipeline"]  # ← .github/workflows/autohome_pipeline.yml の name と一致
+    workflows: ["autohome_pipeline"]  # ← 前段WFの name と完全一致させる
     types: [completed]
 
 permissions:
@@ -17,48 +17,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 前段 autohome_pipeline の CSV アーティファクトを取得
-      - name: Download artifacts from pipeline run
+      # ✅ 前段 run の「すべての」アーティファクトをダウンロード（name を指定しない）
+      - name: Download ALL artifacts from pipeline run
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
-          name: autohome-ranking-csvs
           path: artifacts/pipeline
 
-      - name: Show downloaded CSVs
+      - name: Show downloaded files
         run: |
           set -eux
           ls -lahR artifacts/pipeline || true
-          find artifacts/pipeline -type f -name '*.csv' -maxdepth 2 -print || true
+          # 何が来ても CSV を拾えるように
+          find artifacts/pipeline -type f -name '*.csv' -print || true
 
-      # 実データから spec_links.csv を生成（列名ゆれに耐性）
-      - name: Build spec_links.csv from pipeline CSVs
+      # ✅ 実データのランキングCSVを探して spec_links.csv を生成（列名ゆれに耐性）
+      - name: Build spec_links.csv from downloaded CSVs
         shell: python
         run: |
           import csv, re
           from pathlib import Path
 
-          in_dir = Path("artifacts/pipeline")
-          # 優先順で探す（どれか1つがあるはず）
-          candidates = [
-            "public/autohome_ranking_with_image_urls.csv",
-            "public/autohome_ranking_with_image_urls_with_maker.csv",
+          root = Path("artifacts/pipeline")
+          # 候補の優先順（どれかが存在する想定）
+          preferred = [
             "public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv",
+            "public/autohome_ranking_with_image_urls_with_maker.csv",
+            "public/autohome_ranking_with_image_urls.csv",
           ]
+
           csv_path = None
-          for rel in candidates:
-            p = in_dir / rel
+          for rel in preferred:
+            p = root / rel
             if p.exists():
               csv_path = p
               break
           if csv_path is None:
-            # フォールバック：最初のCSV
-            all_csvs = list(in_dir.rglob("*.csv"))
+            # フォールバック：DLした中の最初のCSV
+            all_csvs = sorted(root.rglob("*.csv"))
             if all_csvs:
               csv_path = all_csvs[0]
+
           if csv_path is None:
-            raise SystemExit("ERROR: No CSV found in artifacts/pipeline")
+            raise SystemExit("ERROR: No CSV found under artifacts/pipeline")
+
+          print(f"USING: {csv_path}")
 
           rows = []
           with csv_path.open("r", encoding="utf-8") as f:
@@ -71,10 +75,12 @@ jobs:
               m_rk = re.search(r"\d+", rk)
               rank = int(m_rk.group()) if m_rk else i
 
-              # series_url / series_id
-              series_url = (r.get("series_url") or r.get("url") or r.get("seriesUrl") or r.get("detail_url") or "").strip()
+              # series_id
               sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or "").strip()
-              if (not sid) and series_url:
+
+              # URL からの補完（series/1234 を拾う）
+              series_url = (r.get("series_url") or r.get("url") or r.get("seriesUrl") or r.get("detail_url") or "").strip()
+              if not sid and series_url:
                 m_sid = re.search(r"/series/(\\d+)", series_url)
                 if m_sid:
                   sid = m_sid.group(1)
@@ -87,13 +93,15 @@ jobs:
               rows.append({"rank": rank, "series_id": sid, "spec_url": spec_url})
 
           rows.sort(key=lambda x: x["rank"])
+
           out = Path("public")
           out.mkdir(parents=True, exist_ok=True)
-          with (out / "spec_links.csv").open("w", newline="", encoding="utf-8") as g:
+          out_csv = out / "spec_links.csv"
+          with out_csv.open("w", newline="", encoding="utf-8") as g:
             w = csv.DictWriter(g, fieldnames=["rank","series_id","spec_url"])
             w.writeheader()
             w.writerows(rows)
-          print(f"WROTE {len(rows)} rows to public/spec_links.csv")
+          print(f"WROTE {len(rows)} rows to {out_csv}")
 
       - name: Upload spec-link artifact
         uses: actions/upload-artifact@v4
