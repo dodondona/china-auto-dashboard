@@ -2,12 +2,12 @@ name: after_speclinks_trigger_autohome
 
 on:
   workflow_run:
-    workflows: ["after_pipeline_build_speclinks"]  # ← あなたが作った「spec links作成」WFの name と一致させる
+    workflows: ["after_pipeline_build_speclinks"]  # ← あなたの「spec links生成WF」の name と一致させる
     types: [completed]
 
 permissions:
   contents: read
-  actions: write  # gh workflow run に必要
+  actions: write
 
 jobs:
   trigger-autohome:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # （任意）デバッグ用に直前WFのartifactを確認するだけ。実体の引き渡しは run-id を渡して受け側がDLする。
+      # （任意確認）直前WFのartifactがあるかだけ覗く
       - name: (optional) Peek spec_links artifact
         uses: actions/download-artifact@v4
         with:
@@ -31,15 +31,13 @@ jobs:
           ls -lah artifacts/spec_links || true
           head -n 5 artifacts/spec_links/spec_links.csv || true
 
-      # ★ 重要 ★
-      # autohome_config_to_csv.yml を workflow_dispatch で起動し、
-      # 「spec links を作った直前WFの run-id」を `spec_run_id` として渡す。
-      - name: Trigger autohome_config_to_csv workflow with run-id
+      # ★ 新WF（下の②で追加）を workflow_dispatch で起動し、
+      #    「spec linksを作った直前WFの run-id」を spec_run_id として渡す
+      - name: Trigger autohome_from_speclinks workflow with run-id
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
-          # autohome_config_to_csv.yml 側に `on: workflow_dispatch: inputs: spec_run_id` を追加しておく前提
-          gh workflow run "autohome_config_to_csv.yml" \
+          gh workflow run "autohome_from_speclinks.yml" \
             --ref "${GITHUB_REF_NAME:-${{ github.ref_name }}}" \
             -f spec_run_id=${{ github.event.workflow_run.id }}
