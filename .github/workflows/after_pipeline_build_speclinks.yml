@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ 前段 run の「すべての」アーティファクトをダウンロード（name を指定しない）
+      # ★ 前段 run の「全アーティファクト」をDL（name を指定しない）
       - name: Download ALL artifacts from pipeline run
         uses: actions/download-artifact@v4
         with:
@@ -29,10 +29,9 @@ jobs:
         run: |
           set -eux
           ls -lahR artifacts/pipeline || true
-          # 何が来ても CSV を拾えるように
           find artifacts/pipeline -type f -name '*.csv' -print || true
 
-      # ✅ 実データのランキングCSVを探して spec_links.csv を生成（列名ゆれに耐性）
+      # 実データのランキングCSVを探して spec_links.csv を生成（列名ゆれに耐性）
       - name: Build spec_links.csv from downloaded CSVs
         shell: python
         run: |
@@ -40,7 +39,6 @@ jobs:
           from pathlib import Path
 
           root = Path("artifacts/pipeline")
-          # 候補の優先順（どれかが存在する想定）
           preferred = [
             "public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv",
             "public/autohome_ranking_with_image_urls_with_maker.csv",
@@ -54,11 +52,9 @@ jobs:
               csv_path = p
               break
           if csv_path is None:
-            # フォールバック：DLした中の最初のCSV
             all_csvs = sorted(root.rglob("*.csv"))
             if all_csvs:
               csv_path = all_csvs[0]
-
           if csv_path is None:
             raise SystemExit("ERROR: No CSV found under artifacts/pipeline")
 
@@ -68,25 +64,17 @@ jobs:
           with csv_path.open("r", encoding="utf-8") as f:
             rdr = csv.DictReader(f)
             for i, r in enumerate(rdr, start=1):
-              # rank
-              rk = (r.get("rank") or r.get("順位") or r.get("ranking") or "").strip()
-              if not rk:
-                rk = str(i)
+              rk = (r.get("rank") or r.get("順位") or r.get("ranking") or "").strip() or str(i)
               m_rk = re.search(r"\d+", rk)
               rank = int(m_rk.group()) if m_rk else i
 
-              # series_id
               sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or "").strip()
-
-              # URL からの補完（series/1234 を拾う）
               series_url = (r.get("series_url") or r.get("url") or r.get("seriesUrl") or r.get("detail_url") or "").strip()
               if not sid and series_url:
                 m_sid = re.search(r"/series/(\\d+)", series_url)
                 if m_sid:
                   sid = m_sid.group(1)
-
               if not sid:
-                # 取れなければスキップ
                 continue
 
               spec_url = f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"
