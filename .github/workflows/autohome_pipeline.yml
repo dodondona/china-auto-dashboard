@@ -30,7 +30,16 @@ jobs:
           python tools/rank_capture_images_and_csv.py
           # 2) タイトルからメーカー名を付与（入力: ↑のCSV、出力: public/autohome_ranking_with_image_urls_with_maker.csv）
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          # 3) メーカー名を日本語へ翻訳（ここが Usage エラーの箇所：入力CSVを明示する）
+          # 3) メーカー名を日本語へ翻訳（※入力CSVを明示）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-          # 4) その他のカラム翻訳など（従来どおり引数なしで実行）
+          # 4) 別途カラム翻訳など（必要なら既存仕様どおり実行）
           python tools/translate_columns.py
+
+      - name: Upload artifact (ranking csvs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-ranking-csv
+          path: |
+            public/autohome_ranking_with_image_urls.csv
+            public/autohome_ranking_with_image_urls_with_maker.csv
+          if-no-files-found: warn
