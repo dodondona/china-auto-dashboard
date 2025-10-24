@@ -27,4 +27,4 @@ jobs:
 
       - name: Run autohome_config_to_csv.py
         run: |
-          python tools/autohome_config_to_csv.py --series "https://www.autohome.com.cn/config/series/7806.html"
+          python tools/autohome_config_to_csv.py --series 7806
