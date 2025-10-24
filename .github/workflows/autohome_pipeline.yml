@@ -3,7 +3,7 @@ name: autohome_pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 2 * *"
+    - cron: "15 1 2 * *"  # 毎月2日のUTC 01:15
 
 jobs:
   autohome_pipeline:
@@ -34,9 +34,18 @@ jobs:
           pip install playwright pandas beautifulsoup4 lxml requests
           python -m playwright install chromium
 
+      # ランキング＋画像URL生成（元の動作そのまま）
       - name: Build ranking + image URLs CSV (top100)
         run: |
           python tools/rank_capture_images_and_csv.py
+
+      # 画像もartifactとして保存（public/images/）
+      - name: Upload artifact (ranking images)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-ranking-images
+          path: public/images/**
+          if-no-files-found: ignore
 
       - name: Upload artifact (ranking CSVs)
         uses: actions/upload-artifact@v4
@@ -46,7 +55,7 @@ jobs:
             public/*.csv
           if-no-files-found: error
 
-      # ▼ series_id 抽出＋config URL生成（ヒア構文も python -c も使わない）
+      # ランキングCSVから series_id 抽出 → configURL 作成
       - name: Build spec links from ranking (top100)
         run: |
           set -e
@@ -69,3 +78,12 @@ jobs:
             spec_series_ids.txt
             spec_links.csv
           if-no-files-found: error
+
+      # pipeline完了後、自動で autohome_config_to_csv.yml を発火
+      - name: Trigger config_to_csv workflow
+        if: success()
+        uses: peter-evans/workflow-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          workflow: autohome_config_to_csv.yml
