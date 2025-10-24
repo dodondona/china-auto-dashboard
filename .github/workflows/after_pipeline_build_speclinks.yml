@@ -2,7 +2,7 @@ name: after_pipeline_build_speclinks
 
 on:
   workflow_run:
-    workflows: ["pipeline"]  # ← ここは既存 pipeline.yml の `name:` と一致させてください
+    workflows: ["autohome_pipeline"]  # ← ここは既存 pipeline.yml の `name:` と一致させてください
     types: [completed]
 
 permissions:
