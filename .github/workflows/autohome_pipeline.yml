@@ -8,6 +8,7 @@ on:
 jobs:
   build_autohome_pipeline:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,11 +24,47 @@ jobs:
           pip install -r requirements.txt || true
           pip install playwright
           python -m playwright install chromium
+          python -m playwright install-deps
 
-      - name: Build ranking (Top100)
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
+          fc-cache -f -v
+
+      - name: Run stage1 (capture ranking + images)
         run: |
           set -eux
           python tools/rank_capture_images_and_csv.py
+
+      - name: Preview ranking CSV
+        run: |
+          if [ -s public/autohome_ranking_with_image_urls.csv ]; then
+            head -n 5 public/autohome_ranking_with_image_urls.csv
+            wc -l public/autohome_ranking_with_image_urls.csv
+          else
+            echo "ranking CSV missing or empty"
+            exit 1
+          fi
+
+      - name: Check captured images
+        run: |
+          shopt -s nullglob
+          imgs=(public/autohome_images/*.png)
+          echo "Captured ${#imgs[@]} images"
+          ls -lh public/autohome_images/*.png | head || true
+
+      - name: Run stage2 (merge image CSVs only if csv/ exists)
+        run: |
+          set -eux
+          if ls csv/*.csv 1>/dev/null 2>&1; then
+            python tools/stage2_images_to_public.py public/autohome_ranking_with_image_urls.csv
+          else
+            echo "Skip stage2: csv/ folder empty, avoid overwriting"
+          fi
 
       - name: Upload artifact (ranking csv)
         if: always()
@@ -46,22 +83,48 @@ jobs:
           OUT="public/spec_links.csv"
           test -s "$SRC" || { echo "missing $SRC"; exit 1; }
 
-          echo 'import csv, re'            > build_spec_links.py
-          echo 'pat=re.compile(r"https?://www\\.autohome\\.com\\.cn/(\\d+)")' >> build_spec_links.py
-          echo 'with open("public/autohome_ranking_with_image_urls.csv",encoding="utf-8") as f, open("public/spec_links.csv","w",encoding="utf-8",newline="") as g:' >> build_spec_links.py
-          echo '    r=csv.DictReader(f)'  >> build_spec_links.py
-          echo '    w=csv.writer(g)'      >> build_spec_links.py
-          echo '    w.writerow(["series_id","spec_url"])' >> build_spec_links.py
-          echo '    for row in r:'        >> build_spec_links.py
-          echo '        link=(row.get("link","") or "").strip()' >> build_spec_links.py
-          echo '        m=pat.match(link)' >> build_spec_links.py
-          echo '        if not m: continue' >> build_spec_links.py
-          echo '        sid=m.group(1)'   >> build_spec_links.py
-          echo '        w.writerow([sid,f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])' >> build_spec_links.py
+          cat > build_spec_links.py <<'PY'
+import csv, re
+src = "public/autohome_ranking_with_image_urls.csv"
+out = "public/spec_links.csv"
+pat = re.compile(r"https?://(?:\w+\.)?autohome\.com\.cn/(\d+)(?:/|\?|$)")
+CANDIDATES = ["link","series_url","series_page","url","series","page"]
+with open(src, encoding="utf-8") as f, open(out, "w", encoding="utf-8", newline="") as g:
+    r = csv.DictReader(f)
+    w = csv.writer(g)
+    w.writerow(["series_id","spec_url"])
+    rows = 0
+    hits = 0
+    for row in r:
+        rows += 1
+        val = ""
+        for k in CANDIDATES:
+            if k in row and row[k]:
+                val = row[k].strip()
+                if val:
+                    break
+        if not val:
+            for v in row.values():
+                s = (v or "").strip()
+                if "autohome.com.cn" in s:
+                    val = s
+                    break
+        m = pat.search(val)
+        if not m:
+            continue
+        sid = m.group(1)
+        hits += 1
+        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
+print(f"rows={rows} hits={hits}")
+PY
 
           python build_spec_links.py
           rm -f build_spec_links.py
-          ls -lh public/spec_links.csv
+          if [ ! -s "$OUT" ] || [ "$(wc -l < "$OUT")" -le 1 ]; then
+            echo "spec_links.csv is empty"
+            exit 1
+          fi
+          head -n 5 "$OUT"
 
       - name: Upload artifact (spec links)
         if: always()
