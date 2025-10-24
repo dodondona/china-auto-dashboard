@@ -35,7 +35,7 @@ jobs:
           # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
-      # 最終のランキングCSVをアーティファクト化
+      # 最終のランキングCSVをアーティファクト化（従来名を維持）
       - name: Upload artifact (ranking csv)
         uses: actions/upload-artifact@v4
         with:
