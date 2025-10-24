@@ -27,6 +27,6 @@ jobs:
       - name: Run stage scripts
         run: |
           python tools/rank_capture_images_and_csv.py
-          python tools/stage_add_manufacturer_from_title.py
+          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
           python tools/stage_translate_maker_to_ja.py
           python tools/translate_columns.py
