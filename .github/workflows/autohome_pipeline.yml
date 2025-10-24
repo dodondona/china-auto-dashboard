@@ -26,7 +26,11 @@ jobs:
 
       - name: Run stage scripts
         run: |
+          # 1) ランキング + 画像URL抽出（出力: public/autohome_ranking_with_image_urls.csv）
           python tools/rank_capture_images_and_csv.py
+          # 2) タイトルからメーカー名を付与（入力: ↑のCSV、出力: public/autohome_ranking_with_image_urls_with_maker.csv）
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          python tools/stage_translate_maker_to_ja.py
+          # 3) メーカー名を日本語へ翻訳（ここが Usage エラーの箇所：入力CSVを明示する）
+          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+          # 4) その他のカラム翻訳など（従来どおり引数なしで実行）
           python tools/translate_columns.py
