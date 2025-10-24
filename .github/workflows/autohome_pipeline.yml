@@ -24,7 +24,7 @@ jobs:
           pip install playwright openai pandas beautifulsoup4 requests
           python -m playwright install chromium
 
-      - name: Run stage scripts
+      - name: Run stage scripts (ranking)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -32,7 +32,7 @@ jobs:
           python tools/rank_capture_images_and_csv.py
           # 2) タイトルからメーカー名を付与（出力: public/autohome_ranking_with_image_urls_with_maker.csv）
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          # 3) メーカー名を日本語へ翻訳（入力CSVを明示）
+          # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
       - name: Upload artifact (ranking csvs)
@@ -42,27 +42,31 @@ jobs:
           path: |
             public/autohome_ranking_with_image_urls.csv
             public/autohome_ranking_with_image_urls_with_maker.csv
+            public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
 
-      # ▼ ここから “config_* がある時だけ” 実行
-      - name: Check existence of default config csv (7578)
-        id: check_config_7578
+      # ▼ ここから “config_* がある時だけ” 実行・アップロード
+      - name: Check if any config csv exists
+        id: check_config_any
         run: |
-          if [ -f "output/autohome/7578/config_7578.csv" ]; then
+          if ls output/autohome/*/config_*.csv >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Translate columns for config (optional)
-        if: ${{ steps.check_config_7578.outputs.exists == 'true' }}
+      - name: Optionally translate latest config csv (if any)
+        if: ${{ steps.check_config_any.outputs.exists == 'true' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # translate_columns.py はデフォルトで 7578 を読む実装のため、引数なしで実行
-          python tools/translate_columns.py
+          LATEST="$(ls -t output/autohome/*/config_*.csv | head -n 1)"
+          OUT="${LATEST%.csv}.ja.csv"
+          echo "Found config CSV: $LATEST"
+          python tools/translate_columns.py "$LATEST" "$OUT"
 
       - name: Upload artifact (config csvs, if any)
+        if: ${{ steps.check_config_any.outputs.exists == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: autohome-config-csv
