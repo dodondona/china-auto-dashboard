@@ -34,43 +34,27 @@ jobs:
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
           # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+          # 4) （復活）画像を実ファイルとして保存するステージ
+          #    以前 .github/scripts/stage2_images_to_public.py だったものを tools に移しただけ
+          python tools/stage2_images_to_public.py public/autohome_ranking_with_image_urls.csv
 
-      - name: Upload artifact (ranking csvs)
+      # あなたの要望どおり、CSVは最終JA版のみをアップロード
+      - name: Upload artifact (ranking final csv only)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-ranking-csv
           path: |
-            public/autohome_ranking_with_image_urls.csv
-            public/autohome_ranking_with_image_urls_with_maker.csv
             public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
 
-      # ▼ ここから “config_* がある時だけ” 実行・アップロード
-      - name: Check if any config csv exists
-        id: check_config_any
-        run: |
-          if ls output/autohome/*/config_*.csv >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Optionally translate latest config csv (if any)
-        if: ${{ steps.check_config_any.outputs.exists == 'true' }}
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          LATEST="$(ls -t output/autohome/*/config_*.csv | head -n 1)"
-          OUT="${LATEST%.csv}.ja.csv"
-          echo "Found config CSV: $LATEST"
-          python tools/translate_columns.py "$LATEST" "$OUT"
-
-      - name: Upload artifact (config csvs, if any)
-        if: ${{ steps.check_config_any.outputs.exists == 'true' }}
+      # 画像は別アーティファクトで。保存先は stage2 スクリプト既定の出力パスに合わせています。
+      # （典型的には public/images/** または public/autohome_images/** など。既定出力に追従できるよう広めに指定）
+      - name: Upload artifact (ranking images)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-config-csv
+          name: autohome-ranking-images
           path: |
-            output/autohome/*/config_*.csv
-            output/autohome/*/config_*.ja.csv
+            public/**/*.jpg
+            public/**/*.jpeg
+            public/**/*.png
           if-no-files-found: warn
