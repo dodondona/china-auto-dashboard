@@ -2,44 +2,60 @@ name: autohome_config_to_csv
 
 on:
   workflow_dispatch:
-    inputs:
-      spec_run_id:
-        description: "Run ID for spec_links (ignored in this workflow)"
-        required: false
-        type: string
-
-permissions:
-  contents: read
-  actions: read
+  schedule:
+    - cron: "25 1 2 * *"  # 毎月2日 01:25 UTC（＝北京時間9:25）
 
 jobs:
-  sample:
-    # 連結起動（spec_run_id あり）のときは動かない
-    if: ${{ github.event.inputs.spec_run_id == '' }}
+  autohome_config_to_csv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install minimal deps
+
+      - name: Install dependencies (Playwright + OpenAI)
         run: |
-          set -eux
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 lxml pandas playwright
+          pip install playwright openai
           python -m playwright install chromium
-      - name: Run sample (demo only)
+
+      - name: Prepare output directory
+        run: mkdir -p public/config_csv
+
+      - name: Run autohome_config_to_csv per link
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -eux
-          mkdir -p public
-          python tools/autohome_config_to_csv.py "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437" || true
-          if [ -f "public/autohome_config.csv" ]; then
-            mv public/autohome_config.csv public/000_demo.csv
-          else
-            echo "key,value" > public/000_demo.csv
-            echo "note,no_output_detected" >> public/000_demo.csv
+          # spec_links.jsonl は from-spec-links ステップで生成済み
+          if [ ! -s spec_links.jsonl ]; then
+            echo "Error: spec_links.jsonl not found or empty."
+            exit 1
           fi
-      - uses: actions/upload-artifact@v4
+          
+          cat spec_links.jsonl | jq -c '.[]' | while read -r line; do
+            rank=$(echo "$line" | jq -r .rank)
+            series_id=$(echo "$line" | jq -r .series_id)
+            spec_url=$(echo "$line" | jq -r .spec_url)
+
+            printf -v rank3 "%03d" "$rank"
+            base="${rank3}_${series_id}"
+            outfile="public/config_csv/${base}.csv"
+
+            echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
+            python tools/autohome_config_to_csv.py --series "${series_id}"
+            echo "::endgroup::"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: config_csv_sample
-          path: public/000_demo.csv
+          name: autohome-config-csvs
+          path: public/config_csv
+          if-no-files-found: error
