@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   from-spec-links:
@@ -23,14 +24,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install minimal deps
+      - name: Install deps (minimal)
         run: |
           set -eux
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 playwright lxml pandas
+          pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install chromium
 
-      - name: Download spec_links artifact (from previous run)
+      - name: Download spec_links artifact
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -41,60 +42,75 @@ jobs:
       - name: Show spec_links head
         run: |
           set -eux
+          test -f artifacts/spec_links/spec_links.csv
           head -n 20 artifacts/spec_links/spec_links.csv || true
 
-      - name: Build JSON lines from spec_links (rank, series_id, spec_url)
-        id: jlines
-        shell: bash
+      - name: Normalize spec_links to JSONL (safe)
         run: |
-          set -euo pipefail
-          python - << 'PY'
-import csv, json
-from pathlib import Path
+          set -eux
+          cat > normalize_spec_links.py << 'PY'
+          import csv, json, re
+          from pathlib import Path
 
-p = Path("artifacts/spec_links/spec_links.csv")
-rows = []
-with p.open("r", encoding="utf-8") as f:
-    rdr = csv.DictReader(f)
-    for i, r in enumerate(rdr, start=1):
-        sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
-        surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
-        rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
-        if not rk:
-            rk = str(i)
-        if not surl:
-            continue
-        rows.append({"rank": int(rk), "series_id": sid, "spec_url": surl})
+          p = Path("artifacts/spec_links/spec_links.csv")
+          rows = []
+          with p.open("r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f)
+            for i, r in enumerate(rdr, start=1):
+              sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
+              surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
+              rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
+              if not rk:
+                rk = str(i)
+              if not surl:
+                continue
+              m = re.search(r'\d+', rk)
+              rank_int = int(m.group()) if m else i
+              rows.append({"rank": rank_int, "series_id": sid, "spec_url": surl})
 
-rows.sort(key=lambda x: x["rank"])
-out = Path("spec_links.jsonl")
-with out.open("w", encoding="utf-8") as g:
-    for obj in rows:
-        g.write(json.dumps(obj, ensure_ascii=False) + "\n")
-print(f"WROTE {len(rows)} lines to {out}")
-PY
+          rows.sort(key=lambda x: x["rank"])
+          out = Path("spec_links.jsonl")
+          with out.open("w", encoding="utf-8") as g:
+            for obj in rows:
+              g.write(json.dumps(obj, ensure_ascii=False) + "\n")
+          print(f"WROTE {len(rows)} lines to {out}")
+          PY
+          python normalize_spec_links.py
 
-      - name: Run autohome_config_to_csv.py for each link (ranked) and save as 3-digit files
-        shell: bash
+      - name: Run autohome_config_to_csv per link (ranked)
         run: |
-          set -euo pipefail
-          out_dir="public/config_csv"
-          mkdir -p "${out_dir}"
+          set -eux
+          mkdir -p public/config_csv
 
           while IFS= read -r line; do
             [ -z "$line" ] && continue
-            rank=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["rank"])')
-            series_id=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["series_id"])')
-            spec_url=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["spec_url"])')
+            echo "$line" > one.json
+
+            rank=$(python - << 'PY'
+          import json; print(json.load(open("one.json","r",encoding="utf-8"))["rank"])
+          PY
+            )
+
+            series_id=$(python - << 'PY'
+          import json; print(json.load(open("one.json","r",encoding="utf-8"))["series_id"])
+          PY
+            )
+
+            spec_url=$(python - << 'PY'
+          import json; print(json.load(open("one.json","r",encoding="utf-8"))["spec_url"])
+          PY
+            )
+
             printf -v rank3 "%03d" "$rank"
             base="${rank3}"
-            [ -n "$series_id" ] && base="${rank3}_${series_id}"
-            outfile="${out_dir}/${base}.csv"
+            if [ -n "$series_id" ]; then base="${rank3}_${series_id}"; fi
+            outfile="public/config_csv/${base}.csv"
 
             echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
-            # ▼▼▼ 既存スクリプトの呼び方に合わせて必要なら1行だけ調整 ▼▼▼
+            # 既存の実スクリプト呼び出しはこの1行だけ合わせてください
             python tools/autohome_config_to_csv.py "${spec_url}"
-            # ▲▲▲
+
+            # 出力の拾い方（固定名なら調整可）
             latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
             if [ -n "${latest}" ]; then
               cp -f "${latest}" "${outfile}"
@@ -107,7 +123,7 @@ PY
             echo "::endgroup::"
           done < spec_links.jsonl
 
-      - name: Upload all ranked config CSVs
+      - name: Upload ranked config CSVs
         uses: actions/upload-artifact@v4
         with:
           name: config_csv_ranked
