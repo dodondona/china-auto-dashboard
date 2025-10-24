@@ -3,8 +3,8 @@
 #
 # Autohomeランキングを開き、100位までの
 #  - rank / name / units / delta_vs_last_month / link / price / image_url
-# を収集。画像はカード内の見た目をそのまま要素スクショで保存。
-# 先月比(delta)は、カード内テキストの「↑/↓」「上升/下降」+ 数値から抽出（HTML由来）。
+# を収集。画像はカード内の見た目をそのまま要素スクリーンショットで保存。
+# delta（先月比）は、HTML内の <svg> viewBox / path 形状から ↑/↓ を判定し数値に符号付け。
 
 import asyncio
 import os
@@ -41,7 +41,6 @@ async def scroll_to_100(page):
         if loaded >= 100:
             print("✅ 100 items loaded.")
             break
-        # 「加载更多」などがあればクリック
         try:
             btn = page.locator("text=/加载更多|下一页|更多/")
             if await btn.first.is_visible():
@@ -98,73 +97,36 @@ async def extract_card_record(card):
         except Exception:
             units = None
 
-    # delta（先月比）— HTMLテキストからの安定抽出（↑/↓/上升/下降 + 数字）
+    # delta（先月比）— SVGの形状(viewBox/path)から↑/↓を判定＋数字抽出
     delta = None
     try:
         delta = await card.evaluate(r"""
         (root)=>{
-          // 1) 要素ツリーから「↑/↓/上升/下降」を含むテキスト片を抽出
-          const texts = [];
-          const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-          while (tw.nextNode()) {
-            const t = (tw.currentNode.textContent || "").trim();
-            if (!t) continue;
-            if (/[↑↓]/.test(t) || /上升|下降/.test(t)) {
-              texts.push(t);
+          let sign = '';
+          const svgs = [...root.querySelectorAll('svg[viewBox]')];
+          for (const svg of svgs) {
+            const vb = (svg.getAttribute('viewBox') || '').trim();
+            // 上昇：縦長（8.58 x 14.3）／下降：横長（14.3 x 8.58）
+            if (/8\.58\s+14\.3/.test(vb)) sign = 'up';
+            if (/14\.3\s+8\.58/.test(vb)) sign = 'down';
+            const path = svg.querySelector('path');
+            if (path) {
+              const d = (path.getAttribute('d') || '').toLowerCase();
+              // ↑パス（上向き矢印）はM0系統の上向きベクトル
+              if (/m0.*l4.*l8/i.test(d) || /0\s*0\s*8\.58\s*14\.3/.test(d)) sign = 'up';
+              // ↓パス（下向き矢印）はM8系統の下向きベクトル
+              if (/m8.*l4.*l0/i.test(d) || /0\s*0\s*14\.3\s*8\.58/.test(d)) sign = 'down';
             }
           }
-          // 正規化（全角スペースなど）
-          const norm = s => s.replace(/\s+/g, '');
 
-          // 2) パターン優先順でマッチ
-          //   a) 矢印付き: "↑12" / "↓3"
-          for (const raw of texts) {
-            const t = norm(raw);
-            let m = t.match(/↑\s*(\d+)/);
-            if (m) return '+' + m[1];
-            m = t.match(/↓\s*(\d+)/);
-            if (m) return '-' + m[1];
-          }
-          //   b) 文字: "上升12" / "下降5"
-          for (const raw of texts) {
-            const t = norm(raw);
-            let m = t.match(/上升\s*(\d+)/);
-            if (m) return '+' + m[1];
-            m = t.match(/下降\s*(\d+)/);
-            if (m) return '-' + m[1];
-          }
-
-          // 3) それでも取れない場合、矢印アイコンの存在で符号だけ決め、近傍の数字（2桁以内）を拾う
-          const hasUp = !!root.querySelector('svg use[href*="icon-up"]');
-          const hasDown = !!root.querySelector('svg use[href*="icon-down"]');
-
-          // 数字候補（最大2桁想定、誤検出抑止）
-          const nums = [];
-          const tw2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-          while (tw2.nextNode()) {
-            const t = (tw2.currentNode.textContent || "").trim();
-            if (!t) continue;
-            const mAll = t.match(/\b(\d{1,2})\b/g); // 1～2桁だけ
-            if (mAll) {
-              for (const n of mAll) nums.push({num:n, el: tw2.currentNode.parentElement});
-            }
-          }
-          if ((hasUp || hasDown) && nums.length) {
-            // svgに近いテキスト優先
-            const svg = root.querySelector('svg');
-            let chosen = nums[0];
-            if (svg) {
-              let best = 1e9;
-              for (const n of nums) {
-                let d=0, a=n.el;
-                while(a && a!==root){ d++; a=a.parentElement; }
-                if (d < best) { best=d; chosen=n; }
-              }
-            }
-            const sign = hasUp ? '+' : (hasDown ? '-' : '');
-            return sign + chosen.num;
-          }
-          return null;
+          // 数字部分をテキストから拾う（上限2桁）
+          const txt = root.innerText.replace(/\s+/g,'');
+          const m = txt.match(/(\d{1,2})(?:位)?$/);
+          const num = m ? m[1] : (txt.match(/(\d{1,2})/)||[])[1];
+          if (!num) return null;
+          if (sign==='up') return '+' + num;
+          if (sign==='down') return '-' + num;
+          return num;
         }
         """)
     except Exception:
