@@ -1,0 +1,64 @@
+name: autohome_pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 1 2 * *'
+
+jobs:
+  autohome_pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             fonts-noto-cjk fonts-noto-cjk-extra             fonts-wqy-zenhei fonts-wqy-microhei             fonts-noto-color-emoji
+          fc-cache -f -v
+
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install chromium
+
+      # === Keep your existing steps here that generate ranking CSVs/images ===
+
+      - name: Build series_list.csv (top 100)
+        run: |
+          python - <<'PY'
+          import re,csv,glob,sys,os
+          os.makedirs('public', exist_ok=True)
+          ids=set()
+          for path in glob.glob('public/*.csv'):
+              with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                  for line in f:
+                      for m in re.finditer(r'https?://www\.autohome\.com\.cn/(\d+)', line):
+                          ids.add(m.group(1))
+          if not ids:
+              print('No series IDs found in public/*.csv', file=sys.stderr)
+          ids = sorted(ids, key=lambda x:int(x))[:100]
+          with open('public/series_list.csv','w', newline='', encoding='utf-8') as f:
+              w=csv.writer(f)
+              w.writerow(['series_id','series_url','config_url'])
+              for sid in ids:
+                  series_url=f'https://www.autohome.com.cn/{sid}'
+                  config_url=f'https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437'
+                  w.writerow([sid, series_url, config_url])
+          print(f'Wrote {len(ids)} rows to public/series_list.csv')
+          PY
+
+      - name: Upload artifact (series list for config)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-series-list
+          path: public/series_list.csv
+          if-no-files-found: error
