@@ -32,7 +32,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests || true
 
-      # 条件式は使わず常に試す。無ければ失敗しても続行。
       - name: Download artifact (autohome-series-list) if available
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -51,8 +50,7 @@ jobs:
             import re,csv,os,sys
             try:
                 import requests
-            except Exception as e:
-                print("installing requests...", file=sys.stderr)
+            except Exception:
                 import subprocess; subprocess.check_call([sys.executable,"-m","pip","install","requests"])
                 import requests
             os.makedirs("public", exist_ok=True)
