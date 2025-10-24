@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       spec_run_id:
-        description: "Run ID that produced the spec_links artifact (from after_pipeline_build_speclinks)"
+        description: "Run ID for spec_links (ignored in this workflow)"
         required: false
         type: string
 
@@ -13,46 +13,33 @@ permissions:
   actions: read
 
 jobs:
-  # サンプルは「spec_run_id が空のときのみ」動作
-  sample-demo:
+  sample:
+    # 連結起動（spec_run_id あり）のときは動かない
     if: ${{ github.event.inputs.spec_run_id == '' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install deps (minimal)
+      - name: Install minimal deps
         run: |
           set -eux
           python -m pip install --upgrade pip
           pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install chromium
-
       - name: Run sample (demo only)
         run: |
           set -eux
           mkdir -p public
-          python tools/autohome_config_to_csv.py "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437"
+          python tools/autohome_config_to_csv.py "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437" || true
           if [ -f "public/autohome_config.csv" ]; then
             mv public/autohome_config.csv public/000_demo.csv
+          else
+            echo "key,value" > public/000_demo.csv
+            echo "note,no_output_detected" >> public/000_demo.csv
           fi
-
-      - name: Upload sample artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: config_csv_sample
-          path: public/*.csv
-
-  # 実データ本番は「spec_run_id があるとき」のみ
-  from-spec-links:
-    if: ${{ github.event.inputs.spec_run_id != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Stop here (use autohome_from_speclinks.yml instead)
-        run: |
-          echo "This workflow keeps samples only. Real data is executed by autohome_from_speclinks.yml."
+          path: public/000_demo.csv
