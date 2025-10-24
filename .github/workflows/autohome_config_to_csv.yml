@@ -1,7 +1,6 @@
 name: autohome_config_to_csv
 
 on:
-  # 既存のトリガーは壊さずに維持したい方は、ここに追加で並べてOK（push/scheduleなど）。
   workflow_dispatch:
     inputs:
       spec_run_id:
@@ -11,12 +10,10 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  # ------------------------------------------------------------
-  # A) サンプル（デモ）ジョブ：spec_run_id が無いときだけ実行
-  #    → 既存の「サンプル」を残しても、この if により本番フローでは実行されません
-  # ------------------------------------------------------------
+  # サンプルは「spec_run_id が空のときのみ」動作
   sample-demo:
     if: ${{ github.event.inputs.spec_run_id == '' }}
     runs-on: ubuntu-latest
@@ -24,7 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # （必要最小限の依存。既存requirementsがあるなら置き換えてOK）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -37,14 +33,11 @@ jobs:
           pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install chromium
 
-      # ▼ ここは従来のサンプル実行（残したい場合のみ）
       - name: Run sample (demo only)
         run: |
           set -eux
           mkdir -p public
-          # 例）サンプルURLで1件だけ走らせる（あくまで demo）
           python tools/autohome_config_to_csv.py "https://www.autohome.com.cn/config/series/7806.html#pvareaid=3454437"
-          # 出力が固定/別パスの場合は mv/cp してください
           if [ -f "public/autohome_config.csv" ]; then
             mv public/autohome_config.csv public/000_demo.csv
           fi
@@ -55,121 +48,11 @@ jobs:
           name: config_csv_sample
           path: public/*.csv
 
-  # ------------------------------------------------------------
-  # B) 実データ本番ジョブ：spec_run_id が指定されたときだけ実行
-  #    → spec_links.csv を読み、ランキング順に 001_*.csv を量産
-  # ------------------------------------------------------------
+  # 実データ本番は「spec_run_id があるとき」のみ
   from-spec-links:
     if: ${{ github.event.inputs.spec_run_id != '' }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps (minimal)
+      - name: Stop here (use autohome_from_speclinks.yml instead)
         run: |
-          set -eux
-          python -m pip install --upgrade pip
-          pip install beautifulsoup4 lxml pandas playwright
-          python -m playwright install chromium
-
-      # ★ ここが肝：直前WF（spec links 生成）の run-id から artifact を取得
-      - name: Download spec_links artifact
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.inputs.spec_run_id }}
-          name: spec_links
-          path: artifacts/spec_links
-
-      - name: Show spec_links head
-        run: |
-          set -eux
-          test -f artifacts/spec_links/spec_links.csv
-          head -n 20 artifacts/spec_links/spec_links.csv || true
-
-      # spec_links.csv を（rank, series_id, spec_url）に正規化し JSONL に
-      - name: Normalize spec_links to JSONL
-        run: |
-          set -euo pipefail
-          python - << 'PY'
-import csv, json
-from pathlib import Path
-
-p = Path("artifacts/spec_links/spec_links.csv")
-rows = []
-with p.open("r", encoding="utf-8") as f:
-    rdr = csv.DictReader(f)
-    for i, r in enumerate(rdr, start=1):
-        sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
-        surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
-        rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
-        if not rk:
-            rk = str(i)
-        if not surl:
-            continue
-        try:
-            rank_int = int(rk)
-        except:
-            # "1位" などが来ても落ちないように数字だけ抽出
-            import re
-            m = re.search(r'\d+', rk)
-            rank_int = int(m.group()) if m else i
-        rows.append({"rank": rank_int, "series_id": sid, "spec_url": surl})
-
-rows.sort(key=lambda x: x["rank"])
-out = Path("spec_links.jsonl")
-with out.open("w", encoding="utf-8") as g:
-    for obj in rows:
-        g.write(json.dumps(obj, ensure_ascii=False) + "\n")
-print(f"WROTE {len(rows)} lines to {out}")
-PY
-
-      # 1件ずつ既存スクリプトを実行して 3桁ゼロ埋めで保存
-      - name: Run autohome_config_to_csv per link (ranked)
-        shell: bash
-        run: |
-          set -euo pipefail
-          out_dir="public/config_csv"
-          mkdir -p "${out_dir}"
-
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            rank=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["rank"])')
-            series_id=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["series_id"])')
-            spec_url=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["spec_url"])')
-
-            printf -v rank3 "%03d" "$rank"
-            base="${rank3}"
-            [ -n "$series_id" ] && base="${rank3}_${series_id}"
-            outfile="${out_dir}/${base}.csv"
-
-            echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
-            # ▼▼▼ 既存のスクリプト呼び出しは“この1行だけ”合わせてください ▼▼▼
-            python tools/autohome_config_to_csv.py "${spec_url}"
-            # ▲▲▲ 必要なら --series "${series_id}" 等を追加 ▲▲▲
-
-            # 出力の拾い方：あなたのスクリプトの実出力に合わせてここだけ微調整OK
-            latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
-            if [ -n "${latest}" ]; then
-              cp -f "${latest}" "${outfile}"
-            elif [ -f "public/autohome_config.csv" ]; then
-              cp -f "public/autohome_config.csv" "${outfile}"
-            else
-              echo "key,value" > "${outfile}"
-              echo "error,no_output_detected" >> "${outfile}"
-            fi
-            echo "::endgroup::"
-          done < spec_links.jsonl
-
-      - name: Upload ranked config CSVs
-        uses: actions/upload-artifact@v4
-        with:
-          name: config_csv_ranked
-          path: public/config_csv/*.csv
+          echo "This workflow keeps samples only. Real data is executed by autohome_from_speclinks.yml."
