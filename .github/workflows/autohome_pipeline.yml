@@ -1,4 +1,4 @@
-name: autohome_rank
+name: autohome_pipeline
 
 on:
   workflow_dispatch:
@@ -6,6 +6,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,27 +16,42 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install playwright
+          pip install pandas playwright beautifulsoup4 lxml requests
           python -m playwright install --with-deps chromium
 
-      - name: Prepare dirs
+      - name: Prepare directories
         run: |
           mkdir -p public/autohome_images
+          mkdir -p csv
 
-      - name: Capture rank images and CSV (in order)
+      # 1️⃣ ランキング画像・CSVを100位まで収集
+      - name: Capture rank images and CSV (100)
         env:
-          # 例: https://<YOUR_PAGES_DOMAIN>/autohome_images
           PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"
         run: |
           python .github/scripts/rank_capture_images_and_csv.py
 
-      - name: Upload artifacts
+      # 2️⃣ 各シリーズページから<title>を取得 → メーカー名を追加
+      - name: Add manufacturer column from <title>
+        run: |
+          python .github/scripts/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
+
+      # 3️⃣ メーカー名を日本語化（辞書＋LLM併用）
+      - name: Translate CN→JA via OpenAI (manufacturer column)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+        run: |
+          python .github/scripts/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+
+      # 4️⃣ 成果物をアップロード
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-rank
+          name: autohome-ranking-full
           path: |
-            public/autohome_ranking_with_image_urls.csv
+            public/*_with_maker_ja.csv
             public/autohome_images/*.png
