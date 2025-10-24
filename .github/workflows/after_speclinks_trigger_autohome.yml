@@ -1,43 +1,31 @@
 name: after_speclinks_trigger_autohome
 
 on:
-  workflow_run:
-    workflows: ["after_pipeline_build_speclinks"]  # ← あなたの「spec links生成WF」の name と一致させる
-    types: [completed]
+  workflow_dispatch:
 
 permissions:
+  actions: write   # 他の workflow をトリガーするために必要
   contents: read
-  actions: write
 
 jobs:
   trigger-autohome:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # （任意確認）直前WFのartifactがあるかだけ覗く
+      # （任意）アーティファクト確認
       - name: (optional) Peek spec_links artifact
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
-          name: spec_links
-          path: artifacts/spec_links
-      - name: (optional) Show head
-        run: |
-          set -eux
-          ls -lah artifacts/spec_links || true
-          head -n 5 artifacts/spec_links/spec_links.csv || true
+        run: echo "Peek artifact step (optional)"
 
-      # ★ 新WF（下の②で追加）を workflow_dispatch で起動し、
-      #    「spec linksを作った直前WFの run-id」を spec_run_id として渡す
-      - name: Trigger autohome_from_speclinks workflow with run-id
+      # （任意）HEADログ確認
+      - name: (optional) Show head
+        run: git log -1 --oneline
+
+      - name: Trigger autohome_from_speclinks workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
-          gh workflow run "autohome_from_speclinks.yml" \
-            --ref "${GITHUB_REF_NAME:-${{ github.ref_name }}}" \
-            -f spec_run_id=${{ github.event.workflow_run.id }}
+          # ✅ spec_run_id は autohome_from_speclinks.yml 側で定義されていないため削除
+          gh workflow run autohome_from_speclinks.yml --ref main
