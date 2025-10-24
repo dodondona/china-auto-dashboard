@@ -1,241 +1,195 @@
 # -*- coding: utf-8 -*-
-"""
-Autohome ランキングを取得し、確実に image_url を埋める版
-- スクロール完了後に待機を入れて lazy-load 解決
-- 画像URLは data-src/data-original/srcset/src の優先順で抽出
-- それでも空なら詳細ページ(シリーズURL)の og:image をフォールバック取得
-- 出力: public/autohome_ranking_with_image_urls.csv
+# 改良版: Lazy-load完了まで確実に全カードを読み込む
+# 構造・出力互換: public/autohome_images/*.png + public/autohome_ranking_with_image_urls.csv
 
-依存:
-  pip install playwright pandas
-  python -m playwright install chromium
-"""
-
-import asyncio
-import re
-import time
+import asyncio, os, re, csv, time
 from pathlib import Path
-
-import pandas as pd
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
-RANK_URL = "https://www.autohome.com.cn/rank/1"
-TARGET_COUNT = 100  # 100位まで
-OUT_CSV = Path("public/autohome_ranking_with_image_urls.csv")
+RANK_URLS = [
+    "https://www.autohome.com.cn/rank/1",
+]
 
-# ---- ユーティリティ ----
+PUBLIC_DIR = Path("public")
+IMG_DIR = PUBLIC_DIR / "autohome_images"
+CSV_PATH = PUBLIC_DIR / "autohome_ranking_with_image_urls.csv"
+BASE = "https://www.autohome.com.cn"
+PUBLIC_PREFIX = os.environ.get("PUBLIC_PREFIX", "").rstrip("/")
 
-def parse_srcset(srcset: str) -> str:
-    """srcset から最大解像度の URL を返す"""
-    if not srcset:
-        return ""
-    # "url1 1x, url2 2x" or "url1 320w, url2 640w"
-    cand = []
-    for part in srcset.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        m = re.match(r"(\S+)\s+(\d+)(w|x)", part)
-        if m:
-            url = m.group(1)
-            val = int(m.group(2))
-            cand.append((val, url))
-        else:
-            # 単独URLだけのケース
-            if part.startswith("http"):
-                cand.append((1, part.split()[0]))
-    if not cand:
-        return ""
-    cand.sort(key=lambda x: x[0], reverse=True)
-    return cand[0][1]
+def sanitize_filename(s: str) -> str:
+    s = re.sub(r"[^\w\-]+", "_", s.strip())
+    return s[:80].strip("_") or "car"
 
-async def get_og_image_from_detail(ctx, url: str) -> str:
-    """詳細ページから og:image を拾うフォールバック"""
-    try:
-        # request 経由で HTML を取ってパース（描画しないので速い）
-        r = await ctx.request.get(url, timeout=30000, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-            "Referer": "https://www.autohome.com.cn/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        if r.ok:
-            html = await r.text()
-            m = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html, re.I)
-            if m:
-                og = m.group(1)
-                if og.startswith("http"):
-                    return og
-    except Exception:
-        pass
-    return ""
-
-async def scroll_to_load(page, want_count=TARGET_COUNT):
-    """100位まで読み込まれるまでスクロール。毎回待機を入れて lazy-load を解消"""
+async def scroll_and_load(page, target=100):
+    """下までスクロール＋加载更多＋Lazy-load完了待ち"""
     seen = 0
-    last_inc = time.time()
-    while True:
-        # 下までスクロール
-        await page.evaluate("""
-            () => { window.scrollTo(0, document.body.scrollHeight); }
-        """)
-        # ネットワークとレンダリング待ち
-        await page.wait_for_load_state("domcontentloaded")
-        # 画像の lazy 解決時間を与える
-        await page.wait_for_timeout(1200)
+    last_update = time.time()
+    for _ in range(60):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1000)
 
-        # 現在の件数を page 側で数える（アイテムのセレクタは緩めに）
-        count = await page.evaluate("""
-            () => {
-              const cards = document.querySelectorAll('[data-rank-item], .athm-rank__item, li, .tw-flex, .tw-card');
-              // 車シリーズページへのリンクっぽい a を数える
-              let n = 0;
-              cards.forEach(c => {
-                const a = c.querySelector('a[href^="https://www.autohome.com.cn/"]');
-                if (a && /https:\/\/www\.autohome\.com\.cn\/\d+\/?$/.test(a.href)) n++;
-              });
-              return n;
-            }
-        """)
+        # 件数をチェック
+        count = await page.locator("div[data-rank-num]").count()
         if count > seen:
             seen = count
-            last_inc = time.time()
+            last_update = time.time()
 
-        if seen >= want_count:
+        # “加载更多”ボタン対応
+        try:
+            btn = page.locator("text=/加载更多|下一页|更多/")
+            if await btn.first.is_visible():
+                await btn.first.click()
+                await page.wait_for_timeout(1500)
+        except Exception:
+            pass
+
+        # 100件以上 or 進展なし5秒で抜ける
+        if seen >= target:
+            break
+        if time.time() - last_update > 5:
             break
 
-        # 一定時間増えなければ終了（安全弁）
-        if time.time() - last_inc > 5:
-            break
+    # 最後にLazy-load画像を確実に読み込ませる
+    await page.wait_for_timeout(2000)
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(1000)
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await page.wait_for_timeout(2000)
 
-async def extract_rows(page, ctx):
-    """ランキング行を抽出。画像URLは優先順＋詳細ページフォールバックで埋める"""
-    rows = await page.evaluate("""
-        () => {
-          // 緩めに全アイテムを拾い、必要情報が揃うものに絞る
-          const nodes = Array.from(document.querySelectorAll('[data-rank-item], .athm-rank__item, li, .tw-flex, .tw-card'));
-          const arr = [];
-          let rankCounter = 0;
-          for (const n of nodes) {
-            const a = n.querySelector('a[href^="https://www.autohome.com.cn/"]');
-            if (!a) continue;
-            const href = a.href;
-            if (!/^https:\/\/www\.autohome\.com\.cn\/\d+\/?$/.test(href)) continue;
+async def extract_card_record(card):
+    rank = await card.get_attribute("data-rank-num")
+    try:
+        rank_num = int(rank) if rank else None
+    except:
+        rank_num = None
 
-            // rank（見出しや数字を拾う。なければカウンタ）
-            let rankTxt = "";
-            const rankEl = n.querySelector('.rank, .tw-rank, [data-rank], .athm-rank__num, .tw-text-\\[\\#FF5500\\]');
-            if (rankEl) rankTxt = rankEl.textContent.trim();
-            if (!rankTxt) {
-              rankCounter += 1;
-              rankTxt = String(rankCounter);
-            }
-
-            // name / title（車名）
-            let title = "";
-            const nameEl = n.querySelector('h3, h4, .name, .tw-text-base, .tw-font-semibold, .athm-rank__title');
-            if (nameEl) title = nameEl.textContent.trim();
-
-            // 画像タグ
-            const img = n.querySelector('img');
-            let src = "", dataSrc = "", dataOriginal = "", srcset = "", dataSrcset = "";
-            if (img) {
-              src = img.getAttribute('src') || "";
-              dataSrc = img.getAttribute('data-src') || "";
-              dataOriginal = img.getAttribute('data-original') || "";
-              srcset = img.getAttribute('srcset') || "";
-              dataSrcset = img.getAttribute('data-srcset') || "";
-            }
-
-            arr.push({
-              rank: rankTxt,
-              name: title,
-              url: href,
-              img_src: src,
-              img_data_src: dataSrc,
-              img_data_original: dataOriginal,
-              img_srcset: srcset,
-              img_data_srcset: dataSrcset,
-            });
-          }
-          return arr;
-        }
-    """)
-
-    records = []
-    for r in rows:
-        # 画像URLの優先順位
-        cand = [
-            r.get("img_data_src") or "",
-            r.get("img_data_original") or "",
-        ]
-        # srcset 系を解析して最大解像度を拾うため、ここではダミー・実処理はPython側
-        cand.append(r.get("img_data_srcset") or "")
-        cand.append(r.get("img_srcset") or "")
-        cand.append(r.get("img_src") or "")
-
-        # srcset を展開
-        final = ""
-        for c in cand:
-            if not c:
-                continue
-            if " " in c and ("," in c or c.strip().endswith(("w","x"))):
-                # srcset 風味
-                parsed = parse_srcset(c)
-                if parsed:
-                    final = parsed
-                    break
-            else:
-                final = c
+    # name
+    name = None
+    name_el = card.locator(".tw-text-nowrap.tw-text-lg").first
+    if await name_el.count():
+        name = (await name_el.inner_text()).strip()
+    else:
+        for tag in ["h1","h2","h3","h4"]:
+            t = card.locator(tag)
+            if await t.count():
+                name = (await t.first.inner_text()).strip()
                 break
 
-        # data:image（Base64プレースホルダ）や空はフォールバック
-        if (not final) or final.startswith("data:image"):
-            og = await get_og_image_from_detail(ctx, r["url"])
-            if og:
-                final = og
+    # price
+    price = None
+    text = (await card.inner_text()).replace("\n"," ")
+    m = re.search(r"\d+(?:\.\d+)?-\d+(?:\.\d+)?万", text)
+    if m:
+        price = m.group(0)
 
-        records.append({
-            "rank": r.get("rank"),
-            "name": r.get("name"),
-            "url": r.get("url"),
-            "image_url": final,
-        })
-    return records
+    # link
+    link = None
+    btn = card.locator("button[data-series-id]").first
+    if await btn.count():
+        sid = await btn.get_attribute("data-series-id")
+        if sid:
+            link = f"{BASE}/{sid}"
+    if not link:
+        a = card.locator("a[href]").first
+        if await a.count():
+            href = (await a.get_attribute("href")) or ""
+            href = href.strip()
+            if re.fullmatch(r"/\d{3,6}/?", href):
+                link = BASE + href
+            elif re.match(r"^https?://www\.autohome\.com\.cn/\d{3,6}/?$", href):
+                link = href
+
+    # units
+    units = None
+    m2 = re.findall(r'(\d{1,3}(?:,\d{3})+|\d{4,6})', text)
+    if m2:
+        try:
+            units = int(m2[-1].replace(",", ""))
+        except:
+            units = None
+
+    # delta
+    delta = None
+    svg = card.locator("svg").first
+    if await svg.count():
+        neighbor_text = await (await svg.element_handle()).evaluate("(el)=>el.parentElement && el.parentElement.innerText || ''")
+        m3 = re.search(r"\d+", neighbor_text or "")
+        if m3:
+            num = m3.group(0)
+            svg_html = await svg.inner_html()
+            colors = set(re.findall(r'fill="(#?[0-9a-fA-F]{3,6})"', svg_html))
+            sign = ""
+            if any(c.lower() in {"#f60","#ff6600"} for c in colors):
+                sign = "+"
+            elif any(c.lower() in {"#1ccd99","#00cc99","#1ccd9a"} for c in colors):
+                sign = "-"
+            delta = f"{sign}{num}" if num else None
+
+    return {"rank": rank_num, "name": name, "price": price, "link": link, "units": units, "delta_vs_last_month": delta}
+
+async def screenshot_card_image(card, rank, name):
+    img = card.locator("img").first
+    handle = None
+    if await img.count():
+        handle = await img.element_handle()
+    else:
+        candidate = card.locator("div:has(img)").first
+        if await candidate.count():
+            handle = await candidate.element_handle()
+        else:
+            handle = await card.element_handle()
+
+    fname = f"{rank:03d}_{sanitize_filename(name or 'car')}.png"
+    path = IMG_DIR / fname
+    # 画像描画を少し待ってから撮る
+    await card.wait_for_timeout(1000)
+    await handle.screenshot(path=path, type="png")
+    return fname
 
 async def main():
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    IMG_DIR.mkdir(parents=True, exist_ok=True)
+    PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        )
+        ctx = await browser.new_context()
         page = await ctx.new_page()
 
-        print(f"🌐 Visiting: {RANK_URL}")
-        await page.goto(RANK_URL, wait_until="domcontentloaded", timeout=60000)
+        all_rows = []
+        for url in RANK_URLS:
+            print(f"🌐 Visiting: {url}")
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            print("🔄 Scrolling and loading...")
+            await scroll_and_load(page)
 
-        # 100位まで読み込み（lazy-load待ちを含む）
-        print(f"🔄 Scrolling until {TARGET_COUNT}th rank loaded...")
-        await scroll_to_load(page, want_count=TARGET_COUNT)
+            cards = page.locator("div[data-rank-num]")
+            count = await cards.count()
+            print(f"  loaded cards: {count}")
+            rows = []
+            for i in range(count):
+                card = cards.nth(i)
+                rec = await extract_card_record(card)
+                if rec["rank"] is None:
+                    continue
+                fname = await screenshot_card_image(card, rec["rank"], rec["name"])
+                rec["image_url"] = f"{PUBLIC_PREFIX}/autohome_images/{fname}" if PUBLIC_PREFIX else f"/autohome_images/{fname}"
+                rows.append(rec)
 
-        rows = await extract_rows(page, ctx)
-        # 万一 100 未満なら、その時点で終了
-        if not rows:
-            print("❌ No rows extracted.")
-            await browser.close()
-            return
+            rows.sort(key=lambda r: (r["rank"] if r["rank"] is not None else 10**9))
+            all_rows.extend(rows)
 
-        # DataFrame にして保存
-        df = pd.DataFrame(rows)
-        # rank を数値にしてソート（保険）
-        with pd.option_context('mode.chained_assignment', None):
-            df["rank_num"] = pd.to_numeric(df["rank"], errors="coerce")
-        df = df.sort_values(by=["rank_num", "rank"], ascending=True).drop(columns=["rank_num"])
-        OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(OUT_CSV, index=False, encoding="utf-8-sig")
-        print(f"✅ Done. Saved → {OUT_CSV}")
+        headers = ["rank","name","units","delta_vs_last_month","link","price","image_url"]
+        with open(CSV_PATH, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=headers)
+            w.writeheader()
+            for r in all_rows:
+                w.writerow({k: r.get(k) for k in headers})
 
+        await ctx.close()
         await browser.close()
+
+    print(f"✅ CSV: {CSV_PATH}")
+    print(f"✅ Images: {len(list(IMG_DIR.glob('*.png')))} files under {IMG_DIR}")
 
 if __name__ == "__main__":
     asyncio.run(main())
