@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write   # 他の workflow をトリガーするために必要
+  actions: write
   contents: read
 
 jobs:
@@ -14,11 +14,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # （任意）アーティファクト確認
       - name: (optional) Peek spec_links artifact
-        run: echo "Peek artifact step (optional)"
+        run: echo "skip"
 
-      # （任意）HEADログ確認
       - name: (optional) Show head
         run: git log -1 --oneline
 
@@ -27,5 +25,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
-          # ✅ spec_run_id は autohome_from_speclinks.yml 側で定義されていないため削除
+          # 422を出していた余計なinputsは渡さない
           gh workflow run autohome_from_speclinks.yml --ref main
