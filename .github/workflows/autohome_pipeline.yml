@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas playwright beautifulsoup4 lxml requests openai
+          pip install pandas playwright beautifulsoup4 lxml requests
           python -m playwright install --with-deps chromium
 
       - name: Prepare directories
@@ -29,81 +29,29 @@ jobs:
 
       # 1️⃣ ランキング画像・CSVを100位まで収集
       - name: Capture rank images and CSV (100)
+        env:
+          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"
         run: |
           python .github/scripts/rank_capture_images_and_csv.py
 
-      # 2️⃣ 各シリーズページ<title>からメーカー名を追加
+      # 2️⃣ 各シリーズページから<title>を取得 → メーカー名を追加
       - name: Add manufacturer column from <title>
         run: |
           python .github/scripts/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
 
-      # 3️⃣ メーカー名を日本語化（辞書＋LLM）
-      - name: Translate CN→JA via OpenAI (manufacturer)
+      # 3️⃣ メーカー名を日本語化（辞書＋LLM併用）
+      - name: Translate CN→JA via OpenAI (manufacturer column)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-4.1-mini
         run: |
           python .github/scripts/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
-      # 4️⃣ 車種名を日本人が見て分かるグローバル名へ翻訳（OpenAI v1構文対応）
-      - name: Translate Model CN→JA or EN (user-friendly global name)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4.1-mini
-        run: |
-          python - <<'PYCODE'
-          import os
-          import pandas as pd
-          from openai import OpenAI
-
-          client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-          model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-
-          input_csv = "public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv"
-          output_csv = "public/autohome_ranking_with_model_name_global.csv"
-
-          system_prompt = """あなたは自動車分野に詳しい専門翻訳者です。
-          中国市場の車種名を、日本人が見て分かりやすい形でグローバルに通用する英語名または日本語名に翻訳してください。
-
-          翻訳ルール:
-          - メーカー名は出力に含めない
-          - 英語が含まれるモデル名（Model 3, CS75 PLUSなど）はそのまま残す
-          - 日本車・欧米車は日本語の正式車名を使う（例: 思域 → シビック、轩逸 → シルフィー、卡罗拉锐放 → カローラクロス）
-          - 中国メーカー車は英語のグローバル名に翻訳（例: 海豹 → Seal, 秦PLUS → Qin PLUS）
-          - “新能源”“混动”“EV”等は原則残す（例: Qin L DM-i → Qin L DM-i）
-          - 出力は翻訳後の車名のみ。コメントや説明を付けない。"""
-
-          df = pd.read_csv(input_csv)
-          df["name_global"] = ""
-
-          for i, row in df.iterrows():
-              name = str(row.get("name", "")).strip()
-              if not name:
-                  continue
-              try:
-                  resp = client.chat.completions.create(
-                      model=model,
-                      messages=[
-                          {"role": "system", "content": system_prompt},
-                          {"role": "user", "content": f"車種名: {name}\n翻訳してください。"},
-                      ],
-                      temperature=0.1,
-                  )
-                  out = resp.choices[0].message.content.strip()
-                  df.at[i, "name_global"] = out
-                  print(f"[{i}] {name} → {out}")
-              except Exception as e:
-                  print(f"[{i}] error: {e}")
-
-          df.to_csv(output_csv, index=False, encoding="utf-8-sig")
-          print(f"✅ Saved: {output_csv}")
-          PYCODE
-
-      # 5️⃣ 成果物をアップロード
+      # 4️⃣ 成果物をアップロード
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: autohome-ranking-full
           path: |
-            public/*.csv
+            public/*_with_maker_ja.csv
             public/autohome_images/*.png
