@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 必要フォント（中国語スクショ対策／既存スクリプトに影響なし）
+      # CJKフォント（既存スクリプトへの影響なし）
       - name: Install CJK fonts
         run: |
           sudo apt-get update
@@ -39,10 +39,7 @@ jobs:
           fi
           python -m playwright install chromium
 
-      # ▼▼▼ ここまで既存と同等。以降、既存処理（ランキング生成等）はそのまま ▼▼▼
-
-      # 既存：ランキング＋画像URL抽出（あなたの現行スクリプト名に合わせてください）
-      # 例）tools/rank_capture_images_and_csv.py が public/autohome_ranking_with_image_urls.csv を出力
+      # ▼ 既存：ランキングCSV生成（あなたの既存スクリプトをそのまま実行）
       - name: Build ranking + image URLs CSV (top100)
         run: |
           python tools/rank_capture_images_and_csv.py
@@ -55,30 +52,25 @@ jobs:
             public/*.csv
           if-no-files-found: error
 
-      # ▼▼▼ 連結その1：ランキングCSVから series_id 抽出 → configURL 作成 → アーティファクト化 ▼▼▼
+      # ▼ 連結その1：ランキングCSVから series_id 抽出 → config URL 作成（ヒア構文なし）
       - name: Build spec links from ranking (top100)
         run: |
-          python - <<'PY'
-import csv, re, sys, pathlib
-infile = pathlib.Path("public/autohome_ranking_with_image_urls.csv")
-rows = list(csv.DictReader(infile.open(encoding="utf-8-sig")))
-ids = []
-with open("spec_links.csv","w",encoding="utf-8") as w:
-    w.write("series_id,config_url\n")
-    for r in rows[:100]:
-        href = (r.get("link","") or "").strip()
-        m = re.search(r"/(\d{3,6})/?$", href)
-        if not m:
-            continue
-        sid = m.group(1)
-        ids.append(sid)
-        w.write(f"{sid},https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437\n")
-pathlib.Path("spec_series_ids.txt").write_text("\n".join(ids), encoding="utf-8")
-if not ids:
-    print("No series ids extracted from ranking CSV", file=sys.stderr)
-    sys.exit(1)
-print(f"Extracted {len(ids)} series ids", file=sys.stderr)
-PY
+          python -c 'import csv,re,pathlib,sys;\
+p=pathlib.Path("public/autohome_ranking_with_image_urls.csv");\
+rows=list(csv.DictReader(p.open(encoding="utf-8-sig")));\
+ids=[];\
+open("spec_links.csv","w",encoding="utf-8").write("series_id,config_url\n");\
+import io;\
+w=open("spec_links.csv","a",encoding="utf-8");\
+[ (lambda href: ( \
+    (lambda m: ( \
+      (lambda sid: (ids.append(sid), w.write(f"{sid},https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437\\n")) ) (m.group(1)) \
+    ) if m else None) (re.search(r"/(\\d{3,6})/?$", (href or "").strip())) \
+  ))(r.get("link","")) for r in rows[:100] ];\
+w.close();\
+pathlib.Path("spec_series_ids.txt").write_text("\\n".join(ids),encoding="utf-8");\
+sys.exit(1) if not ids else print(f"Extracted {len(ids)} series ids", file=sys.stderr)'
+          test -s spec_series_ids.txt
 
       - name: Upload artifact (spec series ids)
         uses: actions/upload-artifact@v4
