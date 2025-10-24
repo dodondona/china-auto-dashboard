@@ -1,0 +1,59 @@
+name: after_pipeline_build_speclinks
+
+on:
+  workflow_run:
+    workflows: ["pipeline"]  # ← ここは既存 pipeline.yml の `name:` と一致させてください
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-spec-links:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # pipeline.yml の成果物を前段の run からダウンロード
+      - name: Download artifacts from pipeline run
+        uses: actions/download-artifact@v4
+        with:
+          # 前段ワークフロー(run)のIDで直接取得
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          path: artifacts/pipeline
+
+      # （必要なら）Python 等のセットアップ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ★ スペック表リンク生成：既存の“リンク生成スクリプト/コマンド”だけを呼ぶ
+      # 例: python tools/spec_links_from_pipeline.py など
+      # ※ ここはあなたのリポに既にある「スペック表リンクを作る」処理コマンドに置き換えてください
+      - name: Build spec-link list
+        run: |
+          set -eux
+          # pipeline の成果物を入力として参照する例:
+          ls -lah artifacts/pipeline || true
+          # ▼▼▼ ここをあなたの既存コマンドに置換 ▼▼▼
+          # python tools/spec_links_from_pipeline.py \
+          #   --in artifacts/pipeline/some.csv \
+          #   --out public/spec_links.csv
+          # ▲▲▲ ここをあなたの既存コマンドに置換 ▲▲▲
+          # ダミー生成（置換前の暫定）:
+          mkdir -p public
+          echo "series_id,spec_url" > public/spec_links.csv
+          echo "0000,https://example.com/spec/0000" >> public/spec_links.csv
+
+      # 次段へ渡すため、スペック表リンクを成果物化
+      - name: Upload spec-link artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec_links
+          path: public/spec_links.csv
