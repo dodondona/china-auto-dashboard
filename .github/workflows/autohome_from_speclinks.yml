@@ -1,0 +1,114 @@
+name: autohome_from_speclinks
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec_run_id:
+        description: "Run ID that produced the spec_links artifact (from after_pipeline_build_speclinks)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  from-spec-links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps
+        run: |
+          set -eux
+          python -m pip install --upgrade pip
+          pip install beautifulsoup4 playwright lxml pandas
+          python -m playwright install chromium
+
+      - name: Download spec_links artifact (from previous run)
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.inputs.spec_run_id }}
+          name: spec_links
+          path: artifacts/spec_links
+
+      - name: Show spec_links head
+        run: |
+          set -eux
+          head -n 20 artifacts/spec_links/spec_links.csv || true
+
+      - name: Build JSON lines from spec_links (rank, series_id, spec_url)
+        id: jlines
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+import csv, json
+from pathlib import Path
+
+p = Path("artifacts/spec_links/spec_links.csv")
+rows = []
+with p.open("r", encoding="utf-8") as f:
+    rdr = csv.DictReader(f)
+    for i, r in enumerate(rdr, start=1):
+        sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
+        surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
+        rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
+        if not rk:
+            rk = str(i)
+        if not surl:
+            continue
+        rows.append({"rank": int(rk), "series_id": sid, "spec_url": surl})
+
+rows.sort(key=lambda x: x["rank"])
+out = Path("spec_links.jsonl")
+with out.open("w", encoding="utf-8") as g:
+    for obj in rows:
+        g.write(json.dumps(obj, ensure_ascii=False) + "\n")
+print(f"WROTE {len(rows)} lines to {out}")
+PY
+
+      - name: Run autohome_config_to_csv.py for each link (ranked) and save as 3-digit files
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="public/config_csv"
+          mkdir -p "${out_dir}"
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            rank=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["rank"])')
+            series_id=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["series_id"])')
+            spec_url=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["spec_url"])')
+            printf -v rank3 "%03d" "$rank"
+            base="${rank3}"
+            [ -n "$series_id" ] && base="${rank3}_${series_id}"
+            outfile="${out_dir}/${base}.csv"
+
+            echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
+            # ▼▼▼ 既存スクリプトの呼び方に合わせて必要なら1行だけ調整 ▼▼▼
+            python tools/autohome_config_to_csv.py "${spec_url}"
+            # ▲▲▲
+            latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
+            if [ -n "${latest}" ]; then
+              cp -f "${latest}" "${outfile}"
+            elif [ -f "public/autohome_config.csv" ]; then
+              cp -f "public/autohome_config.csv" "${outfile}"
+            else
+              echo "key,value" > "${outfile}"
+              echo "error,no_output_detected" >> "${outfile}"
+            fi
+            echo "::endgroup::"
+          done < spec_links.jsonl
+
+      - name: Upload all ranked config CSVs
+        uses: actions/upload-artifact@v4
+        with:
+          name: config_csv_ranked
+          path: public/config_csv/*.csv
