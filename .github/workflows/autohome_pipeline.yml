@@ -45,15 +45,18 @@ jobs:
         run: |
           python .github/scripts/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
-      # 4️⃣ 車種名を日本人が見て分かるグローバル名へ翻訳
+      # 4️⃣ 車種名を日本人が見て分かるグローバル名へ翻訳（OpenAI v1構文対応）
       - name: Translate Model CN→JA or EN (user-friendly global name)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-4.1-mini
         run: |
           python - <<'PYCODE'
-          import os, openai, pandas as pd
-          openai.api_key = os.environ["OPENAI_API_KEY"]
+          import os
+          import pandas as pd
+          from openai import OpenAI
+
+          client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
           model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
           input_csv = "public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv"
@@ -78,7 +81,7 @@ jobs:
               if not name:
                   continue
               try:
-                  resp = openai.ChatCompletion.create(
+                  resp = client.chat.completions.create(
                       model=model,
                       messages=[
                           {"role": "system", "content": system_prompt},
@@ -86,7 +89,7 @@ jobs:
                       ],
                       temperature=0.1,
                   )
-                  out = resp["choices"][0]["message"]["content"].strip()
+                  out = resp.choices[0].message.content.strip()
                   df.at[i, "name_global"] = out
                   print(f"[{i}] {name} → {out}")
               except Exception as e:
