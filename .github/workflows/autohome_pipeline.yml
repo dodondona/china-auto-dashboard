@@ -20,6 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install playwright openai pandas beautifulsoup4 requests
           python -m playwright install chromium
@@ -28,6 +29,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          set -euo pipefail
           # 1) ランキング + 画像URL抽出（出力: public/autohome_ranking_with_image_urls.csv）
           python tools/rank_capture_images_and_csv.py
           # 2) タイトルからメーカー名を付与（出力: public/autohome_ranking_with_image_urls_with_maker.csv）
@@ -35,7 +37,6 @@ jobs:
           # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
-      # 最終のランキングCSVをアーティファクト化（従来名を維持）
       - name: Upload artifact (ranking csv)
         uses: actions/upload-artifact@v4
         with:
@@ -44,27 +45,46 @@ jobs:
             public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
 
-      # 上位100の series_id と series/config URL を作成（連結用アーティファクト）
-      - name: Build series ids & config links (top100) → artifact
+      # ===== ここから“連結”のための最小追加（CSV→series_id抽出）=====
+      - name: Build series ids & config links (top100)
         run: |
-          python -c "import csv,re,os; os.makedirs('artifact', exist_ok=True); ids=set(); \
-from pathlib import Path; p=Path('public/autohome_ranking_with_image_urls.csv'); \
-rows=list(csv.DictReader(p.open(encoding='utf-8-sig'))) if p.exists() else []; \
-open('artifact/series_ids.txt','w').close(); open('artifact/series_urls.csv','w',encoding='utf-8-sig').write('series_id,series_url,config_url\n'); \
-w=open('artifact/series_ids.txt','a'); u=open('artifact/series_urls.csv','a',encoding='utf-8-sig'); \
-c=0; \
-import sys; \
-for r in rows: \
-    link=(r.get('link') or r.get('series_url') or '').strip(); m=re.search(r'(\\d{3,7})', link); \
-    sid=m.group(1) if m else None; \
-    if not sid or sid in ids: \
-        continue; \
-    ids.add(sid); c+=1; \
-    w.write(sid+'\\n'); \
-    u.write(f\"{sid},https://www.autohome.com.cn/{sid},https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437\\n\"); \
-    if c>=100: \
-        break; \
-w.close(); u.close()"
+          set -euo pipefail
+          mkdir -p artifact
+          csv="public/autohome_ranking_with_image_urls.csv"
+          if [ ! -s "$csv" ]; then
+            echo "missing: $csv" >&2
+            exit 1
+          fi
+          : > artifact/series_ids.txt
+          printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
+
+          # ヘッダから link or series_url の列番号を取得して抽出（重複排除・先頭100件）
+          awk -F',' '
+            NR==1{
+              for(i=1;i<=NF;i++){
+                col=$i; gsub(/^"|"$/, "", col)
+                if(col=="link")      lc=i
+                if(col=="series_url") sc=i
+              }
+              next
+            }
+            {
+              col = (lc?lc:sc)
+              if(!col) next
+              url = $col
+              gsub(/^"|"$/, "", url)
+              if (match(url,/[0-9]{3,7}/,m)) {
+                sid=m[0]
+                if(!(sid in seen)){
+                  seen[sid]=1
+                  print sid >> "artifact/series_ids.txt"
+                  printf "%s,https://www.autohome.com.cn/%s,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
+                  n++
+                  if(n==100) exit
+                }
+              }
+            }
+          ' "$csv"
 
       - name: Upload artifact (series ids & urls)
         uses: actions/upload-artifact@v4
@@ -72,6 +92,7 @@ w.close(); u.close()"
           name: autohome-series-urls
           path: artifact/
           if-no-files-found: error
+      # ===== “連結”追加ここまで =====
 
       # 画像は別アーティファクトで。保存先は stage2 スクリプト既定の出力パスに合わせています。
       # （典型的には public/images/** または public/autohome_images/** など。既定出力に追従できるよう広めに指定）
