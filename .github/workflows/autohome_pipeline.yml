@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies (Playwright + deps)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
@@ -40,7 +40,7 @@ jobs:
           set -eux
           python tools/rank_capture_images_and_csv.py
 
-      - name: Preview ranking CSV
+      - name: Preview ranking CSV (must exist and have rows)
         run: |
           if [ -s public/autohome_ranking_with_image_urls.csv ]; then
             head -n 5 public/autohome_ranking_with_image_urls.csv
@@ -50,22 +50,22 @@ jobs:
             exit 1
           fi
 
-      - name: Check captured images
+      - name: Check captured images count
         run: |
           if ls -1 public/autohome_images/*.png >/dev/null 2>&1; then
             echo "Captured $(ls -1 public/autohome_images/*.png | wc -l) images"
             ls -lh public/autohome_images/*.png | head
           else
-            echo "Captured 0 images"
+            echo "Captured 0 images (continuing, but this will be visible here)"
           fi
 
-      - name: Run stage2 (merge image CSVs only if csv/ exists)
+      - name: Run stage2 only if csv/ has inputs (avoid overwriting)
         run: |
           set -eux
           if ls csv/*.csv 1>/dev/null 2>&1; then
             python tools/stage2_images_to_public.py public/autohome_ranking_with_image_urls.csv
           else
-            echo "Skip stage2: csv/ folder empty, avoid overwriting"
+            echo "Skip stage2: csv/ folder empty, avoid overwriting final ranking CSV"
           fi
 
       - name: Upload artifact (ranking csv)
@@ -76,7 +76,7 @@ jobs:
           path: public/autohome_ranking_with_image_urls.csv
           if-no-files-found: error
 
-      - name: Build spec_links.csv from ranking CSV
+      - name: Build spec_links.csv from ranking CSV (robust)
         if: always()
         shell: bash
         run: |
@@ -89,36 +89,51 @@ jobs:
           echo 'import csv, re' >> build_spec_links.py
           echo 'src = "public/autohome_ranking_with_image_urls.csv"' >> build_spec_links.py
           echo 'out = "public/spec_links.csv"' >> build_spec_links.py
-          echo 'pat = re.compile(r"https?://(?:\\w+\\.)?autohome\\.com\\.cn/(\\d+)(?:/|\\?|$)")' >> build_spec_links.py
-          echo 'CANDIDATES = ["link","series_url","series_page","url","series","page"]' >> build_spec_links.py
+          echo 'pat_url = re.compile(r"https?://(?:\\w+\\.)?autohome\\.com\\.cn/(\\d+)(?:/|\\?|$)")' >> build_spec_links.py
+          echo 'pat_rel = re.compile(r"/(\\d+)(?:/|$)")' >> build_spec_links.py
+          echo 'id_keys = ["series_id","id","sid","seriesId","SeriesID","SERIES_ID"]' >> build_spec_links.py
+          echo 'candidates = ["link","series_url","series_page","url","series","page","series_page_url"]' >> build_spec_links.py
+          echo 'seen = set()' >> build_spec_links.py
+          echo 'rows=0; hits=0' >> build_spec_links.py
           echo 'with open(src, encoding="utf-8") as f, open(out, "w", encoding="utf-8", newline="") as g:' >> build_spec_links.py
           echo '    r = csv.DictReader(f)' >> build_spec_links.py
           echo '    w = csv.writer(g)' >> build_spec_links.py
           echo '    w.writerow(["series_id","spec_url"])' >> build_spec_links.py
-          echo '    rows = 0' >> build_spec_links.py
-          echo '    hits = 0' >> build_spec_links.py
           echo '    for row in r:' >> build_spec_links.py
           echo '        rows += 1' >> build_spec_links.py
-          echo '        val = ""' >> build_spec_links.py
-          echo '        for k in CANDIDATES:' >> build_spec_links.py
-          echo '            if k in row and row[k]:' >> build_spec_links.py
-          echo '                s = row[k].strip()' >> build_spec_links.py
-          echo '                if s:' >> build_spec_links.py
-          echo '                    val = s' >> build_spec_links.py
-          echo '                    break' >> build_spec_links.py
-          echo '        if not val:' >> build_spec_links.py
-          echo '            for v in row.values():' >> build_spec_links.py
-          echo '                s = (v or "").strip()' >> build_spec_links.py
-          echo '                if "autohome.com.cn" in s:' >> build_spec_links.py
-          echo '                    val = s' >> build_spec_links.py
-          echo '                    break' >> build_spec_links.py
-          echo '        m = pat.search(val)' >> build_spec_links.py
-          echo '        if not m:' >> build_spec_links.py
+          echo '        sid = None' >> build_spec_links.py
+          echo '        # 1) direct id columns' >> build_spec_links.py
+          echo '        for k in id_keys:' >> build_spec_links.py
+          echo '            if k in row and row[k] and str(row[k]).strip().isdigit():' >> build_spec_links.py
+          echo '                sid = str(int(str(row[k]).strip()))' >> build_spec_links.py
+          echo '                break' >> build_spec_links.py
+          echo '        # 2) URL-like columns' >> build_spec_links.py
+          echo '        if not sid:' >> build_spec_links.py
+          echo '            val = ""' >> build_spec_links.py
+          echo '            for k in candidates:' >> build_spec_links.py
+          echo '                if k in row and row[k]:' >> build_spec_links.py
+          echo '                    s = str(row[k]).strip()' >> build_spec_links.py
+          echo '                    if s:' >> build_spec_links.py
+          echo '                        val = s' >> build_spec_links.py
+          echo '                        break' >> build_spec_links.py
+          echo '            if not val:' >> build_spec_links.py
+          echo '                for v in row.values():' >> build_spec_links.py
+          echo '                    s = (str(v) if v is not None else "").strip()' >> build_spec_links.py
+          echo '                    if "autohome.com.cn" in s or s.startswith("/"):' >> build_spec_links.py
+          echo '                        val = s' >> build_spec_links.py
+          echo '                        break' >> build_spec_links.py
+          echo '            if val:' >> build_spec_links.py
+          echo '                m = pat_url.search(val) or pat_rel.search(val)' >> build_spec_links.py
+          echo '                if m:' >> build_spec_links.py
+          echo '                    sid = m.group(1)' >> build_spec_links.py
+          echo '        if not sid:' >> build_spec_links.py
           echo '            continue' >> build_spec_links.py
-          echo '        sid = m.group(1)' >> build_spec_links.py
-          echo '        hits += 1' >> build_spec_links.py
+          echo '        if sid in seen:' >> build_spec_links.py
+          echo '            continue' >> build_spec_links.py
+          echo '        seen.add(sid)' >> build_spec_links.py
           echo '        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])' >> build_spec_links.py
-          echo 'print("done")' >> build_spec_links.py
+          echo '        hits += 1' >> build_spec_links.py
+          echo 'print(f"rows={rows} hits={hits}")' >> build_spec_links.py
 
           python build_spec_links.py
           rm -f build_spec_links.py
