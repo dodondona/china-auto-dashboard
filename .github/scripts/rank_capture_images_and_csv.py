@@ -4,7 +4,7 @@
 # Autohomeランキングを開き、100位までの
 #  - rank / name / units / delta_vs_last_month / link / price / image_url
 # を収集。画像はカード内の見た目をそのまま要素スクショで保存。
-# 先月比(delta)は、矢印色/アイコンと近傍の数字から復旧ロジックで抽出。
+# 先月比(delta)は、カード内テキストの「↑/↓」「上升/下降」+ 数値から抽出（HTML由来）。
 
 import asyncio
 import os
@@ -98,66 +98,67 @@ async def extract_card_record(card):
         except Exception:
             units = None
 
-    # delta（先月比）— 復旧・安定版（色/アイコン＋近傍数字）
+    # delta（先月比）— HTMLテキストからの安定抽出（↑/↓/上升/下降 + 数字）
     delta = None
     try:
-        delta = await card.evaluate("""
+        delta = await card.evaluate(r"""
         (root)=>{
-          function hasUpIcon(){
-            if(root.querySelector('svg use[href*="icon-up"]')) return true;
-            for(const p of root.querySelectorAll('svg path')){
-              const fill=(p.getAttribute('fill')||'').toLowerCase();
-              if(fill.includes('#ff6600')) return true;  // オレンジ=上昇
-            }
-            return false;
-          }
-          function hasDownIcon(){
-            if(root.querySelector('svg use[href*="icon-down"]')) return true;
-            for(const p of root.querySelectorAll('svg path')){
-              const fill=(p.getAttribute('fill')||'').toLowerCase();
-              if(fill.includes('#1ccd99')) return true;  // グリーン=下降
-            }
-            return false;
-          }
-          // テキストから全数字候補を集める
-          const nums=[];
-          const re=/\\d+/g;
-          const walker=document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-          while(walker.nextNode()){
-            const txt=(walker.currentNode.textContent||'').trim();
-            if(!txt) continue;
-            let m; while((m=re.exec(txt))){
-              nums.push({num:m[0], el: walker.currentNode.parentElement});
+          // 1) 要素ツリーから「↑/↓/上升/下降」を含むテキスト片を抽出
+          const texts = [];
+          const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+          while (tw.nextNode()) {
+            const t = (tw.currentNode.textContent || "").trim();
+            if (!t) continue;
+            if (/[↑↓]/.test(t) || /上升|下降/.test(t)) {
+              texts.push(t);
             }
           }
-          // 数字の色から判定（オレンジ/グリーン）
-          function colorTag(el){
-            if(!el) return '';
-            try{
-              const c=getComputedStyle(el).color.replace(/\\s+/g,'').toLowerCase();
-              if(c.includes('255,102,0') || c.includes('#ff6600')) return 'up';
-              if(c.includes('28,205,153') || c.includes('#1ccd99')) return 'down';
-            }catch(e){}
-            return '';
+          // 正規化（全角スペースなど）
+          const norm = s => s.replace(/\s+/g, '');
+
+          // 2) パターン優先順でマッチ
+          //   a) 矢印付き: "↑12" / "↓3"
+          for (const raw of texts) {
+            const t = norm(raw);
+            let m = t.match(/↑\s*(\d+)/);
+            if (m) return '+' + m[1];
+            m = t.match(/↓\s*(\d+)/);
+            if (m) return '-' + m[1];
           }
-          for(const n of nums){
-            const tag=colorTag(n.el);
-            if(tag){
-              return (tag==='up'?'+':'-') + n.num;
+          //   b) 文字: "上升12" / "下降5"
+          for (const raw of texts) {
+            const t = norm(raw);
+            let m = t.match(/上升\s*(\d+)/);
+            if (m) return '+' + m[1];
+            m = t.match(/下降\s*(\d+)/);
+            if (m) return '-' + m[1];
+          }
+
+          // 3) それでも取れない場合、矢印アイコンの存在で符号だけ決め、近傍の数字（2桁以内）を拾う
+          const hasUp = !!root.querySelector('svg use[href*="icon-up"]');
+          const hasDown = !!root.querySelector('svg use[href*="icon-down"]');
+
+          // 数字候補（最大2桁想定、誤検出抑止）
+          const nums = [];
+          const tw2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+          while (tw2.nextNode()) {
+            const t = (tw2.currentNode.textContent || "").trim();
+            if (!t) continue;
+            const mAll = t.match(/\b(\d{1,2})\b/g); // 1～2桁だけ
+            if (mAll) {
+              for (const n of mAll) nums.push({num:n, el: tw2.currentNode.parentElement});
             }
           }
-          // アイコン有無で符号決定し、DOM的に近い数字を採用
-          const hasUp = hasUpIcon();
-          const hasDown = hasDownIcon();
-          if(nums.length){
+          if ((hasUp || hasDown) && nums.length) {
+            // svgに近いテキスト優先
             const svg = root.querySelector('svg');
             let chosen = nums[0];
-            if(svg){
+            if (svg) {
               let best = 1e9;
-              for(const n of nums){
+              for (const n of nums) {
                 let d=0, a=n.el;
                 while(a && a!==root){ d++; a=a.parentElement; }
-                if(d < best){ best=d; chosen=n; }
+                if (d < best) { best=d; chosen=n; }
               }
             }
             const sign = hasUp ? '+' : (hasDown ? '-' : '');
