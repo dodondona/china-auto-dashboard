@@ -52,10 +52,12 @@ jobs:
 
       - name: Check captured images
         run: |
-          shopt -s nullglob
-          imgs=(public/autohome_images/*.png)
-          echo "Captured ${#imgs[@]} images"
-          ls -lh public/autohome_images/*.png | head || true
+          if ls -1 public/autohome_images/*.png >/dev/null 2>&1; then
+            echo "Captured $(ls -1 public/autohome_images/*.png | wc -l) images"
+            ls -lh public/autohome_images/*.png | head
+          else
+            echo "Captured 0 images"
+          fi
 
       - name: Run stage2 (merge image CSVs only if csv/ exists)
         run: |
@@ -83,43 +85,44 @@ jobs:
           OUT="public/spec_links.csv"
           test -s "$SRC" || { echo "missing $SRC"; exit 1; }
 
-          cat > build_spec_links.py <<'PY'
-import csv, re
-src = "public/autohome_ranking_with_image_urls.csv"
-out = "public/spec_links.csv"
-pat = re.compile(r"https?://(?:\w+\.)?autohome\.com\.cn/(\d+)(?:/|\?|$)")
-CANDIDATES = ["link","series_url","series_page","url","series","page"]
-with open(src, encoding="utf-8") as f, open(out, "w", encoding="utf-8", newline="") as g:
-    r = csv.DictReader(f)
-    w = csv.writer(g)
-    w.writerow(["series_id","spec_url"])
-    rows = 0
-    hits = 0
-    for row in r:
-        rows += 1
-        val = ""
-        for k in CANDIDATES:
-            if k in row and row[k]:
-                val = row[k].strip()
-                if val:
-                    break
-        if not val:
-            for v in row.values():
-                s = (v or "").strip()
-                if "autohome.com.cn" in s:
-                    val = s
-                    break
-        m = pat.search(val)
-        if not m:
-            continue
-        sid = m.group(1)
-        hits += 1
-        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
-print(f"rows={rows} hits={hits}")
-PY
+          rm -f build_spec_links.py
+          echo 'import csv, re' >> build_spec_links.py
+          echo 'src = "public/autohome_ranking_with_image_urls.csv"' >> build_spec_links.py
+          echo 'out = "public/spec_links.csv"' >> build_spec_links.py
+          echo 'pat = re.compile(r"https?://(?:\\w+\\.)?autohome\\.com\\.cn/(\\d+)(?:/|\\?|$)")' >> build_spec_links.py
+          echo 'CANDIDATES = ["link","series_url","series_page","url","series","page"]' >> build_spec_links.py
+          echo 'with open(src, encoding="utf-8") as f, open(out, "w", encoding="utf-8", newline="") as g:' >> build_spec_links.py
+          echo '    r = csv.DictReader(f)' >> build_spec_links.py
+          echo '    w = csv.writer(g)' >> build_spec_links.py
+          echo '    w.writerow(["series_id","spec_url"])' >> build_spec_links.py
+          echo '    rows = 0' >> build_spec_links.py
+          echo '    hits = 0' >> build_spec_links.py
+          echo '    for row in r:' >> build_spec_links.py
+          echo '        rows += 1' >> build_spec_links.py
+          echo '        val = ""' >> build_spec_links.py
+          echo '        for k in CANDIDATES:' >> build_spec_links.py
+          echo '            if k in row and row[k]:' >> build_spec_links.py
+          echo '                s = row[k].strip()' >> build_spec_links.py
+          echo '                if s:' >> build_spec_links.py
+          echo '                    val = s' >> build_spec_links.py
+          echo '                    break' >> build_spec_links.py
+          echo '        if not val:' >> build_spec_links.py
+          echo '            for v in row.values():' >> build_spec_links.py
+          echo '                s = (v or "").strip()' >> build_spec_links.py
+          echo '                if "autohome.com.cn" in s:' >> build_spec_links.py
+          echo '                    val = s' >> build_spec_links.py
+          echo '                    break' >> build_spec_links.py
+          echo '        m = pat.search(val)' >> build_spec_links.py
+          echo '        if not m:' >> build_spec_links.py
+          echo '            continue' >> build_spec_links.py
+          echo '        sid = m.group(1)' >> build_spec_links.py
+          echo '        hits += 1' >> build_spec_links.py
+          echo '        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])' >> build_spec_links.py
+          echo 'print("done")' >> build_spec_links.py
 
           python build_spec_links.py
           rm -f build_spec_links.py
+
           if [ ! -s "$OUT" ] || [ "$(wc -l < "$OUT")" -le 1 ]; then
             echo "spec_links.csv is empty"
             exit 1
