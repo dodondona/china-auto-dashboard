@@ -3,7 +3,7 @@ name: autohome_pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 2 * *'
+    - cron: "15 1 2 * *"  # monthly at 01:15 UTC on the 2nd
 
 jobs:
   autohome_pipeline:
@@ -16,12 +16,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install CJK fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y             fonts-noto-cjk fonts-noto-cjk-extra             fonts-wqy-zenhei fonts-wqy-microhei             fonts-noto-color-emoji
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
           fc-cache -f -v
 
       - name: Install Playwright
@@ -30,35 +33,67 @@ jobs:
           pip install playwright
           python -m playwright install chromium
 
-      # === Keep your existing steps here that generate ranking CSVs/images ===
+      # =====================================================
+      # ここから下は、あなたの既存処理（画像収集・ランキング収集など）
+      # これまで通りのステップをすべて維持
+      # =====================================================
+
+      - name: Run Stage1 (ranking + image capture)
+        run: |
+          python tools/rank_capture_images_and_csv.py
+
+      - name: Upload artifact (ranking result)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-ranking
+          path: public/autohome_ranking_with_image_urls.csv
+
+      # =====================================================
+      # ここからが追加部分（スペック表自動生成）
+      # =====================================================
 
       - name: Build series_list.csv (top 100)
         run: |
-          python - <<'PY'
-          import re,csv,glob,sys,os
-          os.makedirs('public', exist_ok=True)
-          ids=set()
-          for path in glob.glob('public/*.csv'):
-              with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                  for line in f:
-                      for m in re.finditer(r'https?://www\.autohome\.com\.cn/(\d+)', line):
-                          ids.add(m.group(1))
-          if not ids:
-              print('No series IDs found in public/*.csv', file=sys.stderr)
-          ids = sorted(ids, key=lambda x:int(x))[:100]
-          with open('public/series_list.csv','w', newline='', encoding='utf-8') as f:
-              w=csv.writer(f)
-              w.writerow(['series_id','series_url','config_url'])
-              for sid in ids:
-                  series_url=f'https://www.autohome.com.cn/{sid}'
-                  config_url=f'https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437'
-                  w.writerow([sid, series_url, config_url])
-          print(f'Wrote {len(ids)} rows to public/series_list.csv')
-          PY
+          mkdir -p public
+          cat > build_series_list.py <<'EOF'
+import re,csv,glob,os
+os.makedirs("public", exist_ok=True)
+ids=set()
+for path in glob.glob("public/*.csv"):
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            for m in re.finditer(r"https?://www\.autohome\.com\.cn/(\d+)", line):
+                ids.add(m.group(1))
+ids = sorted(ids, key=lambda x:int(x))[:100]
+with open("public/series_list.csv","w",newline="",encoding="utf-8") as f:
+    w=csv.writer(f)
+    w.writerow(["series_id","series_url","config_url"])
+    for sid in ids:
+        w.writerow([sid,
+                    f"https://www.autohome.com.cn/{sid}",
+                    f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
+print("Wrote", len(ids), "rows to public/series_list.csv")
+EOF
+          python build_series_list.py
 
-      - name: Upload artifact (series list for config)
+      - name: Build config CSVs for each series (top 100)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -e
+          test -f public/series_list.csv
+          tail -n +2 public/series_list.csv | while IFS=, read -r sid surl curl; do
+            [ -z "$sid" ] && continue
+            echo "::group::Config scrape for series $sid"
+            python tools/autohome_config_to_csv.py "$curl"
+            echo "::endgroup::"
+          done
+
+      - name: Upload artifact (config CSVs)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-series-list
-          path: public/series_list.csv
-          if-no-files-found: error
+          name: autohome-config-csvs
+          path: |
+            output/**/*.csv
+            public/series_list.csv
+          if-no-files-found: warn
