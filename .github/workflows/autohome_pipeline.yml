@@ -45,24 +45,23 @@ jobs:
           SRC="public/autohome_ranking_with_image_urls.csv"
           OUT="public/spec_links.csv"
           test -s "$SRC" || { echo "missing $SRC"; exit 1; }
-          python - "$SRC" "$OUT" <<'PY'
-import csv, re, sys
-src = sys.argv[1]
-out = sys.argv[2]
-pat = re.compile(r"https?://www\.autohome\.com\.cn/(\d+)")
-with open(src, encoding="utf-8") as f, open(out, "w", encoding="utf-8", newline="") as g:
-    r = csv.DictReader(f)
-    w = csv.writer(g)
-    w.writerow(["series_id", "spec_url"])
-    for row in r:
-        link = (row.get("link", "") or "").strip()
-        m = pat.match(link)
-        if not m:
-            continue
-        sid = m.group(1)
-        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
-print("wrote", out)
-PY
+
+          echo 'import csv, re'            > build_spec_links.py
+          echo 'pat=re.compile(r"https?://www\\.autohome\\.com\\.cn/(\\d+)")' >> build_spec_links.py
+          echo 'with open("public/autohome_ranking_with_image_urls.csv",encoding="utf-8") as f, open("public/spec_links.csv","w",encoding="utf-8",newline="") as g:' >> build_spec_links.py
+          echo '    r=csv.DictReader(f)'  >> build_spec_links.py
+          echo '    w=csv.writer(g)'      >> build_spec_links.py
+          echo '    w.writerow(["series_id","spec_url"])' >> build_spec_links.py
+          echo '    for row in r:'        >> build_spec_links.py
+          echo '        link=(row.get("link","") or "").strip()' >> build_spec_links.py
+          echo '        m=pat.match(link)' >> build_spec_links.py
+          echo '        if not m: continue' >> build_spec_links.py
+          echo '        sid=m.group(1)'   >> build_spec_links.py
+          echo '        w.writerow([sid,f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])' >> build_spec_links.py
+
+          python build_spec_links.py
+          rm -f build_spec_links.py
+          ls -lh public/spec_links.csv
 
       - name: Upload artifact (spec links)
         if: always()
