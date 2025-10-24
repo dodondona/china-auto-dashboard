@@ -3,7 +3,7 @@ name: autohome_config_to_csv
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *'
+    - cron: "15 1 * * *"
   workflow_run:
     workflows:
       - autohome_pipeline
@@ -16,8 +16,8 @@ permissions:
 
 jobs:
   autohome_config_to_csv:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,58 +25,78 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Python deps (lenient)
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
           pip install requests || true
 
-      - name: Download series_list.csv from autohome_pipeline (same repo latest run)
-        if: ${{ github.event_name == 'workflow_run' }}
+      # 条件式は使わず常に試す。無ければ失敗しても続行。
+      - name: Download artifact (autohome-series-list) if available
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: autohome-series-list
           path: public
 
-      - name: Fallback: build series_list.csv from live ranking page (top 100)
-        if: ${{ !hashFiles('public/series_list.csv') }}
+      - name: Ensure series_list.csv exists (build fallback if missing)
         run: |
-          python - <<'PY'
-          import re,csv,sys,os,requests
-          os.makedirs('public', exist_ok=True)
-          headers = {
-              'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
-              'Accept-Language':'zh-CN,zh;q=0.9,en;q=0.8',
-              'Referer':'https://www.autohome.com.cn/rank/1'
-          }
-          try:
-              html = requests.get('https://www.autohome.com.cn/rank/1', headers=headers, timeout=30).text
-          except Exception as e:
-              print('Failed to fetch ranking page:', e, file=sys.stderr)
-              html = ''
-          ids = re.findall(r'https?://www\.autohome\.com\.cn/(\d+)', html)
-          seen=set(); uniq=[]
-          for sid in ids:
-              if sid not in seen:
-                  seen.add(sid); uniq.append(sid)
-          uniq = sorted(uniq, key=lambda x:int(x))[:100]
-          with open('public/series_list.csv','w', newline='', encoding='utf-8') as f:
-              w=csv.writer(f); w.writerow(['series_id','series_url','config_url'])
-              for sid in uniq:
-                  w.writerow([sid, f'https://www.autohome.com.cn/{sid}', f'https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437'])
-          print(f'Fallback wrote {len(uniq)} rows to public/series_list.csv')
-          PY
+          mkdir -p public
+          if [ -f public/series_list.csv ]; then
+            echo "series_list.csv exists (from artifact)."
+          else
+            echo "No artifact found. Building fallback series_list.csv from ranking page..."
+            python - <<'PY'
+            import re,csv,os,sys
+            try:
+                import requests
+            except Exception as e:
+                print("installing requests...", file=sys.stderr)
+                import subprocess; subprocess.check_call([sys.executable,"-m","pip","install","requests"])
+                import requests
+            os.makedirs("public", exist_ok=True)
+            headers = {
+                "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer":"https://www.autohome.com.cn/rank/1"
+            }
+            try:
+                html = requests.get("https://www.autohome.com.cn/rank/1", headers=headers, timeout=30).text
+            except Exception as e:
+                print("Failed to fetch ranking:", e)
+                html = ""
+            ids = re.findall(r"https?://www\\.autohome\\.com\\.cn/(\\d+)", html)
+            seen=set(); uniq=[]
+            for sid in ids:
+                if sid not in seen:
+                    seen.add(sid); uniq.append(sid)
+            uniq = sorted(uniq, key=lambda x:int(x))[:100]
+            with open("public/series_list.csv","w",newline="",encoding="utf-8") as f:
+                w=csv.writer(f)
+                w.writerow(["series_id","series_url","config_url"])
+                for sid in uniq:
+                    w.writerow([
+                        sid,
+                        f"https://www.autohome.com.cn/{sid}",
+                        f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"
+                    ])
+            print("series_list.csv rows:", len(uniq))
+            PY
+          fi
 
-      - name: Run autohome_config_to_csv.py for top 100 series
+      - name: Run autohome_config_to_csv.py for each series (top 100)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euo pipefail
-          while IFS=, read -r sid surl curl; do
-            if [ "$sid" = "series_id" ] || [ -z "${sid:-}" ]; then continue; fi
-            echo "::group::Config scrape for series $sid"
-            python tools/autohome_config_to_csv.py "${curl}"
+          set -e
+          if [ ! -f public/series_list.csv ]; then
+            echo "series_list.csv not found. abort."
+            exit 1
+          fi
+          tail -n +2 public/series_list.csv | while IFS=, read -r sid surl curl; do
+            [ -z "$sid" ] && continue
+            echo "::group::Processing $sid"
+            python tools/autohome_config_to_csv.py "$curl"
             echo "::endgroup::"
-          done < public/series_list.csv
+          done
