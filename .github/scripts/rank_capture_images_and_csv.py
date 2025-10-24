@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
 # .github/scripts/rank_capture_images_and_csv.py
-#
-# Autohomeランキングを開き、100位まで全車両のデータ（順位・車名・価格・リンク・台数・変動・画像）を取得。
-# スクロールして100位まで読み込み、各カード画像を要素スクリーンショットで保存。
-# 結果を public/autohome_ranking_with_image_urls.csv に出力します。
 
 import asyncio
 import os
@@ -27,10 +23,10 @@ def sanitize_filename(s: str) -> str:
 
 
 async def scroll_to_100(page):
-    """100位までスクロールしてロード"""
+    """100位までスクロール"""
     print("🔄 Scrolling until 100th rank loaded...")
     loaded = 0
-    for i in range(80):  # 最大80回まで
+    for i in range(80):
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await page.wait_for_timeout(1000)
         cards = await page.locator("div[data-rank-num]").count()
@@ -38,9 +34,7 @@ async def scroll_to_100(page):
             loaded = cards
             print(f"  currently loaded: {loaded} items")
         if loaded >= 100:
-            print("✅ 100 items loaded.")
             break
-        # 「加载更多」ボタンが見える場合クリック
         try:
             btn = page.locator("text=/加载更多|下一页|更多/")
             if await btn.first.is_visible():
@@ -93,20 +87,20 @@ async def extract_card_record(card):
         except:
             units = None
 
-    # delta
+    # delta（先月比：安定版）
     delta = None
-    svg = card.locator("svg").first
-    if await svg.count():
-        svg_html = await svg.inner_html()
-        colors = set(re.findall(r'fill="(#?[0-9a-fA-F]{3,6})"', svg_html))
-        sign = ""
-        if any(c.lower() in {"#f60", "#ff6600"} for c in colors):
-            sign = "+"
-        elif any(c.lower() in {"#1ccd99", "#00cc99", "#1ccd9a"} for c in colors):
-            sign = "-"
-        m3 = re.search(r"\d+", svg_html or "")
-        if m3:
-            delta = f"{sign}{m3.group(0)}"
+    try:
+        icon_up = await card.locator('svg use[href*="icon-up"], svg path[fill*="#FF6600"]').count()
+        icon_down = await card.locator('svg use[href*="icon-down"], svg path[fill*="#1CCD99"]').count()
+        num_el = card.locator(".tw-text-[#FF6600], .tw-text-[#1CCD99]").last
+        delta_text = ""
+        if await num_el.count():
+            delta_text = (await num_el.inner_text()).strip()
+        if delta_text:
+            sign = "+" if icon_up else "-" if icon_down else ""
+            delta = f"{sign}{delta_text}"
+    except Exception:
+        delta = None
 
     return {
         "rank": rank_num,
