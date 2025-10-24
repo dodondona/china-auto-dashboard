@@ -34,18 +34,44 @@ jobs:
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
           # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-          # 4) （復活）画像を実ファイルとして保存するステージ
-          #    以前 .github/scripts/stage2_images_to_public.py だったものを tools に移しただけ
-          python tools/stage2_images_to_public.py public/autohome_ranking_with_image_urls.csv
 
-      # あなたの要望どおり、CSVは最終JA版のみをアップロード
-      - name: Upload artifact (ranking final csv only)
+      # 最終のランキングCSVをアーティファクト化
+      - name: Upload artifact (ranking csv)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-ranking-csv
+          name: autohome-ranking-csvs
           path: |
             public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
+
+      # 上位100の series_id と series/config URL を作成（連結用アーティファクト）
+      - name: Build series ids & config links (top100) → artifact
+        run: |
+          python -c "import csv,re,os; os.makedirs('artifact', exist_ok=True); ids=set(); \
+from pathlib import Path; p=Path('public/autohome_ranking_with_image_urls.csv'); \
+rows=list(csv.DictReader(p.open(encoding='utf-8-sig'))) if p.exists() else []; \
+open('artifact/series_ids.txt','w').close(); open('artifact/series_urls.csv','w',encoding='utf-8-sig').write('series_id,series_url,config_url\n'); \
+w=open('artifact/series_ids.txt','a'); u=open('artifact/series_urls.csv','a',encoding='utf-8-sig'); \
+c=0; \
+import sys; \
+for r in rows: \
+    link=(r.get('link') or r.get('series_url') or '').strip(); m=re.search(r'(\\d{3,7})', link); \
+    sid=m.group(1) if m else None; \
+    if not sid or sid in ids: \
+        continue; \
+    ids.add(sid); c+=1; \
+    w.write(sid+'\\n'); \
+    u.write(f\"{sid},https://www.autohome.com.cn/{sid},https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437\\n\"); \
+    if c>=100: \
+        break; \
+w.close(); u.close()"
+
+      - name: Upload artifact (series ids & urls)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-series-urls
+          path: artifact/
+          if-no-files-found: error
 
       # 画像は別アーティファクトで。保存先は stage2 スクリプト既定の出力パスに合わせています。
       # （典型的には public/images/** または public/autohome_images/** など。既定出力に追従できるよう広めに指定）
