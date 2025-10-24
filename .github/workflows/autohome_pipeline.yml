@@ -2,56 +2,31 @@ name: autohome_pipeline
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "10 1 3 * *"  # monthly at 01:10 UTC on the 3rd
 
 jobs:
-  run:
+  autohome_pipeline:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install pandas playwright beautifulsoup4 lxml requests
-          python -m playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install playwright openai pandas beautifulsoup4
+          python -m playwright install chromium
 
-      - name: Prepare directories
+      - name: Run stage scripts
         run: |
-          mkdir -p public/autohome_images
-          mkdir -p csv
-
-      # 1️⃣ ランキング画像・CSVを100位まで収集
-      - name: Capture rank images and CSV (100)
-        env:
-          PUBLIC_PREFIX: "https://<YOUR_PAGES_DOMAIN>"
-        run: |
-          python .github/scripts/rank_capture_images_and_csv.py
-
-      # 2️⃣ 各シリーズページから<title>を取得 → メーカー名を追加
-      - name: Add manufacturer column from <title>
-        run: |
-          python .github/scripts/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-
-      # 3️⃣ メーカー名を日本語化（辞書＋LLM併用）
-      - name: Translate CN→JA via OpenAI (manufacturer column)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4.1-mini
-        run: |
-          python .github/scripts/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-
-      # 4️⃣ 成果物をアップロード
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-ranking-full
-          path: |
-            public/*_with_maker_ja.csv
-            public/autohome_images/*.png
+          python tools/rank_capture_images_and_csv.py
+          python tools/stage_add_manufacturer_from_title.py
+          python tools/stage_translate_maker_to_ja.py
+          python tools/translate_columns.py
