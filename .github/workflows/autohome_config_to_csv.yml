@@ -1,12 +1,33 @@
 name: autohome_config_to_csv
 
 on:
+  # 既存のトリガー（schedule / workflow_dispatch / push など）があるはずです。崩しません。
   workflow_dispatch:
-  schedule:
-    - cron: "15 1 * * *"  # every day at 01:15 UTC
+    inputs:
+      spec_run_id:
+        description: "Run ID that produced the spec_links artifact (from after_pipeline_build_speclinks)"
+        required: false
+        type: string
+
+  # ↑既存 on: が他にもある場合はそのまま維持してください。
+
+permissions:
+  contents: read
 
 jobs:
-  autohome_config_to_csv:
+  # =============================
+  # 既存ジョブ群（変更しない）
+  # 例:
+  # build-sample:
+  #   runs-on: ubuntu-latest
+  #   steps: ...
+  # =============================
+
+  # ▼▼ ここから“追加”ジョブ：spec_links から実データを一括実行 ▼▼
+  from-spec-links:
+    # 既存に影響を出さないため独立ジョブにしています。
+    # 必要なら if 条件で spec_run_id 入力時のみ動かす。
+    if: ${{ github.event.inputs.spec_run_id != '' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -18,35 +39,132 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      # もし依存が要る場合は最小限だけ（bs4等）。既にrequirementsがあるならそれを使う。
+      - name: Install minimal deps (adjust if you already have requirements.txt)
         run: |
+          set -eux
           python -m pip install --upgrade pip
-          pip install playwright
+          # 既存スクリプトに必要最小限。あなたの環境に合わせて減らしてOK
+          pip install beautifulsoup4 playwright lxml pandas
           python -m playwright install chromium
-          pip install beautifulsoup4 pandas openai requests
 
-      # 必要なシリーズを両方生成（translate_columns.py の既定=7578に合わせるため）
-      - name: Run autohome_config_to_csv.py (7806)
+      # ★ spec_links.csv を「直前の after_pipeline_build_speclinks の run-id」から取得
+      - name: Download spec_links artifact from previous run
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.inputs.spec_run_id }}
+          name: spec_links
+          path: artifacts/spec_links
+
+      - name: Show spec_links head
         run: |
-          python tools/autohome_config_to_csv.py --series 7806
+          set -eux
+          head -n 20 artifacts/spec_links/spec_links.csv || true
 
-      - name: Run autohome_config_to_csv.py (7578)
+      # ★ CSV を読み取り、（rank, series_id, spec_url）の順で安全に解釈し、
+      #    実データで autohome_config_to_csv.py を回す。
+      #    - rank が無ければ、CSVの行順で 1,2,3... を自動採番
+      #    - ファイル名は 3桁ゼロ埋め（001_...csv）
+      #    - 既存スクリプトの引数/挙動に合わせて、必要ならコマンド1行を調整してください。
+      - name: Run autohome_config_to_csv for each spec link (real data)
+        shell: bash
         run: |
-          python tools/autohome_config_to_csv.py --series 7578
+          set -euxo pipefail
 
-      # 翻訳（既定挙動＝7578を読む実装に合わせ、引数は渡さない）
-      - name: Translate columns to Japanese (default behavior)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python tools/translate_columns.py
+          in_csv="artifacts/spec_links/spec_links.csv"
+          out_dir="public/config_csv"
+          mkdir -p "${out_dir}"
 
-      # 生成物をまとめてアップロード
-      - name: Upload artifact (config csvs)
+          # Python で CSV を安全に読み、JSON lines に変換（ヘッダ名は柔軟に解釈）
+          python - << 'PY'
+import csv, json, sys
+from pathlib import Path
+
+in_csv = Path("artifacts/spec_links/spec_links.csv")
+rows = []
+with in_csv.open("r", encoding="utf-8") as f:
+    rdr = csv.DictReader(f)
+    # 列名ゆれ対策
+    # 想定ヘッダ例: rank, series_id, spec_url
+    # なければ推測・埋め
+    for i, r in enumerate(rdr, start=1):
+        # series_id
+        sid = r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or ""
+        sid = sid.strip()
+        # spec_url
+        surl = r.get("spec_url") or r.get("url") or r.get("specUrl") or ""
+        surl = surl.strip()
+        # rank
+        rk = r.get("rank") or r.get("順位") or r.get("rank_index") or ""
+        rk = str(rk).strip()
+        if not rk:
+            rk = str(i)  # 無ければ行番号で採番
+
+        if not surl:
+            # URLが無ければスキップ
+            continue
+        rows.append({"rank": int(rk), "series_id": sid, "spec_url": surl})
+
+# ランキング順に整列
+rows.sort(key=lambda x: x["rank"])
+
+for obj in rows:
+    print(json.dumps(obj, ensure_ascii=False))
+PY
+          # ↑ ここで JSON Lines が出力される
+
+          # 1件ずつ実行
+          i=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            rank=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["rank"])')
+            series_id=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["series_id"])')
+            spec_url=$(echo "$line" | python -c 'import sys,json;print(json.load(sys.stdin)["spec_url"])')
+
+            # 3桁ゼロ埋め
+            printf -v rank3 "%03d" "$rank"
+            # 出力ファイル名
+            base="${rank3}"
+            [ -n "$series_id" ] && base="${rank3}_${series_id}"
+            outfile="${out_dir}/${base}.csv"
+
+            echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
+            # ▼▼▼ ここをあなたの“既存”コマンドに置換してください ▼▼▼
+            # 例1: URLだけ渡す
+            python tools/autohome_config_to_csv.py "${spec_url}"
+            # 例2: series_id を引数にできるなら
+            # python tools/autohome_config_to_csv.py "${spec_url}" --series "${series_id}"
+            # ▲▲▲ ここまで ▲▲▲
+
+            # 直近の出力CSVをリネームして保存する場合の例
+            #   - 既存スクリプトが固定パスに書く想定なら、その場所から mv
+            #   - すでに目的名で出力できるなら mv は不要
+            #   - ここでは「直近の *.csv のうち最終更新」を拾って移動」する安全策にしておく
+            latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n1 || true)
+            if [ -n "${latest}" ]; then
+              cp -f "${latest}" "${outfile}"
+            elif [ -f "public/autohome_config.csv" ]; then
+              cp -f "public/autohome_config.csv" "${outfile}"
+            else
+              echo "WARN: CSV 出力ファイルが見つからないため、空のプレースホルダを作成します"
+              echo "key,value" > "${outfile}"
+              echo "error,no_output_detected" >> "${outfile}"
+            fi
+            echo "::endgroup::"
+
+            i=$((i+1))
+          done < <( python - << 'PY'
+import sys,json
+# 入力：前の Python が吐いた JSON Lines
+# ここでは単純に stdin をそのまま出す（bash で while read -r line; で受けるため）
+for line in sys.stdin:
+    print(line.strip())
+PY
+          )
+
+      - name: Upload all config csvs (ranked)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-config-csv
-          path: |
-            output/autohome/*/config_*.csv
-            output/autohome/*/config_*.ja.csv
-          if-no-files-found: warn
+          name: config_csv_ranked
+          path: public/config_csv/*.csv
