@@ -1,12 +1,15 @@
-name: autohome_pipeline
+name: autohome_config_to_csv
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 1 * * *"  # 毎日01:30 UTC実行（例）
+    - cron: "15 2 * * *"
+  workflow_run:
+    workflows: ["autohome_pipeline"]
+    types: [completed]
 
 jobs:
-  build_autohome_pipeline:
+  autohome_config_to_csv:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,51 +28,54 @@ jobs:
           pip install playwright
           python -m playwright install chromium
 
-      - name: Run build (Top100 ranking + images)
-        run: |
-          set -eux
-          python tools/rank_capture_images_and_csv.py
-
-      - name: Upload artifact (ranking images)
-        if: always()
-        uses: actions/upload-artifact@v4
+      # === ここから追記: 直前の autohome_pipeline ランの specリンクCSV を取得 ===
+      - name: Download spec_links.csv artifact from previous workflow run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v6
         with:
-          name: autohome-ranking-csvs
-          path: public/autohome_ranking_with_image_urls.csv
-          if-no-files-found: error
+          workflow: autohome_pipeline.yml
+          run_id: ${{ github.event.workflow_run.id }}
+          name: autohome-spec-links
+          path: spec_inputs
 
-      # === ここから追記: Top100の series_id から specリンクCSVを作成 ===
-      - name: Build spec_links.csv from ranking CSV
-        if: always()
+      - name: Download latest spec_links.csv artifact (fallback for manual/schedule)
+        if: ${{ github.event_name != 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: autohome_pipeline.yml
+          branch: ${{ github.ref_name }}
+          name: autohome-spec-links
+          path: spec_inputs
+      # === 追記ここまで ===
+
+      - name: Verify input file
+        run: |
+          ls -lh spec_inputs || true
+          cat spec_inputs/spec_links.csv | head || true
+
+      # === ここから追記: spec_links.csv を読み、各 series_id で CSV 化 ===
+      - name: Run autohome_config_to_csv.py for Top100 series
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          SRC="public/autohome_ranking_with_image_urls.csv"
-          OUT="public/spec_links.csv"
-          test -s "$SRC" || { echo "missing $SRC"; exit 1; }
-          python - << 'PY'
-import csv, re
-src="public/autohome_ranking_with_image_urls.csv"
-out="public/spec_links.csv"
-pat=re.compile(r"https?://www\.autohome\.com\.cn/(\d+)")
-with open(src, encoding="utf-8") as f, open(out,"w",encoding="utf-8",newline="") as g:
-    r=csv.DictReader(f)
-    w=csv.writer(g)
-    w.writerow(["series_id","spec_url"])
-    for row in r:
-        link=row.get("link","")
-        m=pat.match(link.strip())
-        if not m:
-            continue
-        sid=m.group(1)
-        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
-print("wrote", out)
-PY
+          CSV="spec_inputs/spec_links.csv"
+          test -s "$CSV" || { echo "spec_links.csv not found"; exit 1; }
+          echo "Start processing spec tables from $CSV"
+          tail -n +2 "$CSV" | cut -d',' -f1 | while read -r SID; do
+            SID_TRIM="${SID%%[$'\r\n']}"
+            if [ -z "$SID_TRIM" ]; then continue; fi
+            echo "=== series $SID_TRIM ==="
+            python tools/autohome_config_to_csv.py --series "$SID_TRIM"
+          done
+      # === 追記ここまで ===
 
-      - name: Upload artifact (spec links)
+      - name: Upload all generated spec CSVs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-spec-links
-          path: public/spec_links.csv
-          if-no-files-found: error
-      # === 追記ここまで ===
+          name: autohome-config-csvs
+          path: |
+            output/**/*.csv
+            public/**/*.csv
+          if-no-files-found: ignore
