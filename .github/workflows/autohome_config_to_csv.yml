@@ -28,3 +28,25 @@ jobs:
       - name: Run autohome_config_to_csv.py
         run: |
           python tools/autohome_config_to_csv.py --series 7806
+
+      # ▼ 翻訳（ChatGPT API 使用）。スクリプト側の既定仕様で処理（余計な変更なし）
+      - name: Translate columns to Japanese
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # 入力は前ステップの出力ログに合わせる
+          IN_PATH="output/autohome/7806/config_7806.csv"
+          # 翻訳後の出力先（上書きしない安全運用）
+          OUT_PATH="output/autohome/7806/config_7806.ja.csv"
+          # 既存 translate スクリプトをそのまま呼ぶ（スクリプト側のデフォルト挙動に委任）
+          python tools/translate_columns.py "$IN_PATH" "$OUT_PATH"
+
+      # ▼ アーティファクト（raw と ja の両方を拾う）
+      - name: Upload artifact (config csvs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-config-7806-csv
+          path: |
+            output/autohome/7806/config_7806.csv
+            output/autohome/7806/config_7806.ja.csv
+          if-no-files-found: warn
