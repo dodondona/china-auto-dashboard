@@ -23,8 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
           python -m playwright install chromium
-          pip install beautifulsoup4 pandas openai
+          pip install beautifulsoup4 pandas openai requests
 
       - name: Run autohome_config_to_csv.py
         run: |
-          python tools/autohome_config_to_csv.py
+          python tools/autohome_config_to_csv.py --series "https://www.autohome.com.cn/config/series/7806.html"
