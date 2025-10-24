@@ -39,39 +39,41 @@ jobs:
           name: spec_links
           path: artifacts/spec_links
 
-      - name: Show spec_links head
+      - name: Verify & show head
         run: |
           set -eux
           test -f artifacts/spec_links/spec_links.csv
           head -n 20 artifacts/spec_links/spec_links.csv || true
 
-      # ヒアドキュメントを避け、Pythonシェルで実行（YAMLが壊れない）
       - name: Normalize spec_links to JSONL
         shell: python
         run: |
           import csv, json, re
-          from pathlib import Path
-
-          p = Path("artifacts/spec_links/spec_links.csv")
           rows = []
-          with p.open("r", encoding="utf-8") as f:
-              rdr = csv.DictReader(f)
-              for i, r in enumerate(rdr, start=1):
-                  sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
-                  surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
-                  rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
-                  if not rk:
-                      rk = str(i)
-                  m = re.search(r"\d+", rk)
-                  rank_int = int(m.group()) if m else i
-                  if surl:
-                      rows.append({"rank": rank_int, "series_id": sid, "spec_url": surl})
-
+          with open("artifacts/spec_links/spec_links.csv","r",encoding="utf-8") as f:
+            rdr = csv.DictReader(f)
+            for i, r in enumerate(rdr, start=1):
+              sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
+              surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
+              rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
+              if not rk: rk = str(i)
+              m = re.search(r"\\d+", rk)
+              rank = int(m.group()) if m else i
+              if not sid:
+                ms = re.search(r"/series/(\\d+)", surl)
+                if ms: sid = ms.group(1)
+              if sid:
+                rows.append({"rank": rank, "series_id": sid, "spec_url": surl})
           rows.sort(key=lambda x: x["rank"])
-          with open("spec_links.jsonl", "w", encoding="utf-8") as g:
-              for obj in rows:
-                  g.write(json.dumps(obj, ensure_ascii=False) + "\n")
-          print(f"WROTE {len(rows)} lines to spec_links.jsonl")
+          with open("spec_links.jsonl","w",encoding="utf-8") as g:
+            for obj in rows:
+              g.write(json.dumps(obj, ensure_ascii=False) + "\n")
+          print("lines:", len(rows))
+
+      - name: Guard non-empty
+        run: |
+          set -eux
+          test -s spec_links.jsonl
 
       - name: Run autohome_config_to_csv per link (ranked)
         run: |
@@ -80,7 +82,6 @@ jobs:
 
           while IFS= read -r line; do
             [ -z "$line" ] && continue
-
             rank=$(printf '%s\n' "$line" | jq -r '.rank')
             series_id=$(printf '%s\n' "$line" | jq -r '.series_id')
             spec_url=$(printf '%s\n' "$line" | jq -r '.spec_url')
@@ -93,18 +94,22 @@ jobs:
             outfile="public/config_csv/${base}.csv"
 
             echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
-            # --series が必須のため付与（余計な変更なし）
+            # --series 必須
             python tools/autohome_config_to_csv.py --series "${series_id}"
 
-            # 出力ファイルを拾ってリネーム保存（あなたのスクリプトに合わせてこのままでOK）
-            latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
-            if [ -n "${latest}" ]; then
-              cp -f "${latest}" "${outfile}"
-            elif [ -f "public/autohome_config.csv" ]; then
-              cp -f "public/autohome_config.csv" "${outfile}"
+            # ←←← ここを修正：実出力の既定場所から拾う
+            expected="output/autohome/${series_id}/config_${series_id}.csv"
+            if [ -f "${expected}" ]; then
+              cp -f "${expected}" "${outfile}"
             else
-              echo "key,value" > "${outfile}"
-              echo "error,no_output_detected" >> "${outfile}"
+              # それでも無い場合のセーフティ
+              latest=$(ls -1t output/autohome/*/config_*.csv public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
+              if [ -n "${latest}" ]; then
+                cp -f "${latest}" "${outfile}"
+              else
+                echo "key,value" > "${outfile}"
+                echo "error,no_output_detected" >> "${outfile}"
+              fi
             fi
             echo "::endgroup::"
           done < spec_links.jsonl
