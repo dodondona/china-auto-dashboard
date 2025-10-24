@@ -25,15 +25,15 @@ jobs:
           python -m playwright install chromium
 
       - name: Run stage scripts
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # 1) ランキング + 画像URL抽出（出力: public/autohome_ranking_with_image_urls.csv）
           python tools/rank_capture_images_and_csv.py
-          # 2) タイトルからメーカー名を付与（入力: ↑のCSV、出力: public/autohome_ranking_with_image_urls_with_maker.csv）
+          # 2) タイトルからメーカー名を付与（出力: public/autohome_ranking_with_image_urls_with_maker.csv）
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          # 3) メーカー名を日本語へ翻訳（※入力CSVを明示）
+          # 3) メーカー名を日本語へ翻訳（入力CSVを明示）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-          # 4) 別途カラム翻訳など（必要なら既存仕様どおり実行）
-          python tools/translate_columns.py
 
       - name: Upload artifact (ranking csvs)
         uses: actions/upload-artifact@v4
@@ -42,4 +42,31 @@ jobs:
           path: |
             public/autohome_ranking_with_image_urls.csv
             public/autohome_ranking_with_image_urls_with_maker.csv
+          if-no-files-found: warn
+
+      # ▼ ここから “config_* がある時だけ” 実行
+      - name: Check existence of default config csv (7578)
+        id: check_config_7578
+        run: |
+          if [ -f "output/autohome/7578/config_7578.csv" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Translate columns for config (optional)
+        if: ${{ steps.check_config_7578.outputs.exists == 'true' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # translate_columns.py はデフォルトで 7578 を読む実装のため、引数なしで実行
+          python tools/translate_columns.py
+
+      - name: Upload artifact (config csvs, if any)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-config-csv
+          path: |
+            output/autohome/*/config_*.csv
+            output/autohome/*/config_*.ja.csv
           if-no-files-found: warn
