@@ -23,17 +23,18 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install playwright beautifulsoup4 openai pandas requests
           python -m playwright install chromium
 
-      # ここからは既存の手動/スケジュール用フロー（例：特定の series を直接指定して回す）
-      # 既存ツールの使用例（ZIPの内容を尊重して維持）
+      # 既存の手動/スケジュール用フローは維持（例のまま）
       - name: Run config scripts (examples / keep as-is)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # 例) 単体シリーズ実行（既存のまま・必要に応じて利用）
+          set -euo pipefail
+          # 例) 単体シリーズ実行（必要時のみ）
           # python tools/autohome_config_to_csv.py --series 7806
           # python tools/autohome_config_to_csv.py --series 7578
           echo "keep existing manual/scheduled steps as-is"
@@ -42,9 +43,9 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          set -euo pipefail
           python tools/translate_columns.py
 
-      # 生成物をまとめてアップロード
       - name: Upload artifact (config csvs)
         uses: actions/upload-artifact@v4
         with:
@@ -54,8 +55,7 @@ jobs:
             output/autohome/*/config_*.ja.csv
           if-no-files-found: warn
 
-  # ↓↓↓ ここからが “連結” 用の追加ジョブ（autohome_pipeline 完了時のみ動作） ↓↓↓
-
+  # ===== “連結”用：pipeline 完了時だけ発火 =====
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' }}
     runs-on: ubuntu-latest
@@ -67,6 +67,7 @@ jobs:
 
       - name: Install jq & unzip
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq unzip
 
@@ -74,6 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           run_id="${{ github.event.workflow_run.id }}"
           api="https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}/artifacts"
           curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "$api" > artifacts.json
@@ -86,6 +88,7 @@ jobs:
       - id: mkjson
         name: Build JSON matrix from series_ids.txt
         run: |
+          set -euo pipefail
           json=$(awk 'NF>0' artifact/series_ids.txt | sed 's/[^0-9]//g' | awk 'NF>0' | head -n 100 | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
 
@@ -109,12 +112,14 @@ jobs:
 
       - name: Install deps (Playwright + bs4)
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install playwright beautifulsoup4
           python -m playwright install chromium
 
       - name: Run config crawler (PC layout) for each series
         run: |
+          set -euo pipefail
           python tools/autohome_config_to_csv.py --series "${{ matrix.series }}"
 
       - name: Upload artifact (config csv per series)
