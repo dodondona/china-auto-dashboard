@@ -2,91 +2,29 @@ name: autohome_config_to_csv
 
 on:
   workflow_dispatch:
-    inputs:
-      series:
-        description: "Autohome series id (e.g., 6814)"
-        required: true
-        default: "7578"
-      mobile:
-        description: "Use mobile site (true/false)"
-        required: false
-        default: "false"
+  schedule:
+    - cron: "15 1 * * *"  # every day at 01:15 UTC
 
 jobs:
-  extract_and_translate:
+  autohome_config_to_csv:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------
-      # 0️⃣ Checkout repository
-      # -----------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # 1️⃣ Set up Python
-      # -----------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # -----------------------------
-      # 2️⃣ Install dependencies
-      # -----------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "openai>=1.3.7" playwright beautifulsoup4 pandas
+          pip install playwright
           python -m playwright install chromium
+          pip install beautifulsoup4 pandas openai
 
-      # -----------------------------
-      # 3️⃣ Extract config table (Autohome)
-      # -----------------------------
-      - name: Run extractor (PC site)
-        if: ${{ inputs.mobile == 'false' }}
+      - name: Run autohome_config_to_csv.py
         run: |
-          python tools/autohome_config_to_csv.py \
-            --series "${{ inputs.series }}" \
-            --outdir output/autohome
-
-      - name: Run extractor (Mobile site)
-        if: ${{ inputs.mobile == 'true' }}
-        run: |
-          python tools/autohome_config_to_csv.py \
-            --series "${{ inputs.series }}" \
-            --outdir output/autohome \
-            --mobile
-
-      # -----------------------------
-      # 4️⃣ Translate CN→JA (sections/items/values)
-      # -----------------------------
-      - name: Translate CN→JA via OpenAI (full table)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4.1-mini
-          CSV_IN:  output/autohome/${{ inputs.series }}/config_${{ inputs.series }}.csv
-          CSV_OUT: output/autohome/${{ inputs.series }}/config_${{ inputs.series }}_ja.csv
-          TRANSLATE_VALUES: "true"
-          EXRATE_CNY_TO_JPY: "21.0"   # ← 例: 1元 = ¥21（自動換算）
-        run: |
-          python tools/translate_columns.py
-
-      # -----------------------------
-      # 5️⃣ Upload translated CSVs
-      # -----------------------------
-      - name: Upload CSV artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome_config_${{ inputs.series }}_translated
-          path: |
-            output/autohome/${{ inputs.series }}/*.csv
-
-      # -----------------------------
-      # 6️⃣ Print summary
-      # -----------------------------
-      - name: Print summary info
-        run: |
-          echo "✅ CSV extraction + translation completed for series ${{ inputs.series }}"
-          echo "Output files:"
-          ls -lh output/autohome/${{ inputs.series }}/
+          python tools/autohome_config_to_csv.py
