@@ -1,120 +1,62 @@
-name: autohome_from_speclinks
+name: from-spec-links
 
 on:
   workflow_dispatch:
-    inputs:
-      spec_run_id:
-        description: "Run ID that produced the spec_links artifact (from after_pipeline_build_speclinks)"
-        required: true
-        type: string
-
-permissions:
-  contents: read
-  actions: read
 
 jobs:
   from-spec-links:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 30
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ★最小修正点：openai を確実に入れる（Playwright と一緒に）
       - name: Install deps (minimal)
         run: |
-          set -eux
           python -m pip install --upgrade pip
-          pip install beautifulsoup4 lxml pandas playwright
+          pip install "openai>=1.40,<2" playwright
           python -m playwright install chromium
-          sudo apt-get update
-          sudo apt-get install -y jq
+          python - <<'PY'
+import openai
+print("✅ openai installed:", openai.__version__)
+PY
 
+      # （前段で作った artifacts を使っている場合のみ）
       - name: Download spec_links artifact
         uses: actions/download-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.inputs.spec_run_id }}
           name: spec_links
-          path: artifacts/spec_links
+          path: .
 
-      - name: Verify & show head
-        run: |
-          set -eux
-          test -f artifacts/spec_links/spec_links.csv
-          head -n 20 artifacts/spec_links/spec_links.csv || true
+      - name: Prepare output directory
+        run: mkdir -p public/config_csv
 
-      - name: Normalize spec_links to JSONL
-        shell: python
-        run: |
-          import csv, json, re
-          rows = []
-          with open("artifacts/spec_links/spec_links.csv","r",encoding="utf-8") as f:
-            rdr = csv.DictReader(f)
-            for i, r in enumerate(rdr, start=1):
-              sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
-              surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
-              rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
-              if not rk: rk = str(i)
-              m = re.search(r"\\d+", rk)
-              rank = int(m.group()) if m else i
-              if not sid:
-                ms = re.search(r"/series/(\\d+)", surl)
-                if ms: sid = ms.group(1)
-              if sid:
-                rows.append({"rank": rank, "series_id": sid, "spec_url": surl})
-          rows.sort(key=lambda x: x["rank"])
-          with open("spec_links.jsonl","w",encoding="utf-8") as g:
-            for obj in rows:
-              g.write(json.dumps(obj, ensure_ascii=False) + "\n")
-          print("lines:", len(rows))
-
-      - name: Guard non-empty
+      - name: Run autohome_config_to_csv per link (翻訳あり)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -eux
           test -s spec_links.jsonl
-
-      - name: Run autohome_config_to_csv per link (ranked)
-        run: |
-          set -eux
-          mkdir -p public/config_csv
-
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            rank=$(printf '%s\n' "$line" | jq -r '.rank')
-            series_id=$(printf '%s\n' "$line" | jq -r '.series_id')
-            spec_url=$(printf '%s\n' "$line" | jq -r '.spec_url')
-
+          cat spec_links.jsonl | jq -c '.[]' | while read -r line; do
+            rank=$(echo "$line" | jq -r .rank)
+            series_id=$(echo "$line" | jq -r .series_id)
+            spec_url=$(echo "$line" | jq -r .spec_url)
             printf -v rank3 "%03d" "$rank"
-            base="${rank3}"
-            if [ -n "$series_id" ] && [ "$series_id" != "null" ]; then
-              base="${rank3}_${series_id}"
-            fi
-            outfile="public/config_csv/${base}.csv"
-
             echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
-            # --series 必須
             python tools/autohome_config_to_csv.py --series "${series_id}"
-
-            # ←←← ここを修正：実出力の既定場所から拾う
-            expected="output/autohome/${series_id}/config_${series_id}.csv"
-            if [ -f "${expected}" ]; then
-              cp -f "${expected}" "${outfile}"
-            else
-              # それでも無い場合のセーフティ
-              latest=$(ls -1t output/autohome/*/config_*.csv public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
-              if [ -n "${latest}" ]; then
-                cp -f "${latest}" "${outfile}"
-              else
-                echo "key,value" > "${outfile}"
-                echo "error,no_output_detected" >> "${outfile}"
-              fi
-            fi
             echo "::endgroup::"
-          done < spec_links.jsonl
+          done
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload config CSVs
+        uses: actions/upload-artifact@v4
         with:
-          name: config_csv_ranked
-          path: public/config_csv/*.csv
+          name: autohome-config-csvs
+          path: public/config_csv
+          if-no-files-found: error
