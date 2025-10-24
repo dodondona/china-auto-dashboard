@@ -3,7 +3,7 @@ name: autohome_pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 1 3 * *"  # monthly at 01:10 UTC on the 3rd
+    - cron: "10 1 3 * *"
 
 jobs:
   autohome_pipeline:
@@ -30,11 +30,8 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          # 1) ランキング + 画像URL抽出（出力: public/autohome_ranking_with_image_urls.csv）
           python tools/rank_capture_images_and_csv.py
-          # 2) タイトルからメーカー名を付与（出力: public/autohome_ranking_with_image_urls_with_maker.csv）
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
       - name: Upload artifact (ranking csv)
@@ -45,8 +42,7 @@ jobs:
             public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
 
-      # ===== ここから“連結”のための最小追加（CSV→series_id抽出）=====
-      - name: Build series ids & config links (top100)
+      - name: Build series ids and links
         run: |
           set -euo pipefail
           mkdir -p artifact
@@ -57,14 +53,12 @@ jobs:
           fi
           : > artifact/series_ids.txt
           printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
-
-          # ヘッダから link or series_url の列番号を取得して抽出（重複排除・先頭100件）
           awk -F',' '
             NR==1{
               for(i=1;i<=NF;i++){
-                col=$i; gsub(/^"|"$/, "", col)
-                if(col=="link")      lc=i
-                if(col=="series_url") sc=i
+                h=$i; gsub(/^"|"$/, "", h)
+                if(h=="link")      lc=i
+                if(h=="series_url") sc=i
               }
               next
             }
@@ -86,16 +80,13 @@ jobs:
             }
           ' "$csv"
 
-      - name: Upload artifact (series ids & urls)
+      - name: Upload artifact (series ids and links)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-series-urls
           path: artifact/
           if-no-files-found: error
-      # ===== “連結”追加ここまで =====
 
-      # 画像は別アーティファクトで。保存先は stage2 スクリプト既定の出力パスに合わせています。
-      # （典型的には public/images/** または public/autohome_images/** など。既定出力に追従できるよう広めに指定）
       - name: Upload artifact (ranking images)
         uses: actions/upload-artifact@v4
         with:
