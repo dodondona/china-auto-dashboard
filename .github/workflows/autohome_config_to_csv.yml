@@ -3,14 +3,16 @@ name: autohome_config_to_csv
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 * * *"  # every day at 01:15 UTC
+    - cron: "15 2 * * *"
+  workflow_run:
+    workflows: ["autohome_pipeline"]
+    types: [completed]
 
 jobs:
   autohome_config_to_csv:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,32 +23,53 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
           pip install playwright
           python -m playwright install chromium
-          pip install beautifulsoup4 pandas openai requests
 
-      # 必要なシリーズを両方生成（translate_columns.py の既定=7578に合わせるため）
-      - name: Run autohome_config_to_csv.py (7806)
+      - name: Download spec_links.csv (workflow_run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: autohome_pipeline.yml
+          run_id: ${{ github.event.workflow_run.id }}
+          name: autohome-spec-links
+          path: spec_inputs
+
+      - name: Download spec_links.csv (fallback latest on branch)
+        if: ${{ github.event_name != 'workflow_run' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: autohome_pipeline.yml
+          branch: ${{ github.ref_name }}
+          name: autohome-spec-links
+          path: spec_inputs
+
+      - name: Verify input file
         run: |
-          python tools/autohome_config_to_csv.py --series 7806
+          ls -lh spec_inputs || true
+          head -n 5 spec_inputs/spec_links.csv || true
 
-      - name: Run autohome_config_to_csv.py (7578)
-        run: |
-          python tools/autohome_config_to_csv.py --series 7578
-
-      # 翻訳（既定挙動＝7578を読む実装に合わせ、引数は渡さない）
-      - name: Translate columns to Japanese (default behavior)
+      - name: Build spec CSVs for Top100
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/translate_columns.py
+          set -euo pipefail
+          CSV="spec_inputs/spec_links.csv"
+          test -s "$CSV" || { echo "spec_links.csv not found"; exit 1; }
+          tail -n +2 "$CSV" | cut -d',' -f1 | while read -r SID; do
+            SID_TRIM="${SID%%[$'\r\n']}"
+            if [ -z "$SID_TRIM" ]; then continue; fi
+            echo "series ${SID_TRIM}"
+            python tools/autohome_config_to_csv.py --series "${SID_TRIM}"
+          done
 
-      # 生成物をまとめてアップロード
-      - name: Upload artifact (config csvs)
+      - name: Upload generated spec CSVs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-config-csv
+          name: autohome-config-csvs
           path: |
-            output/autohome/*/config_*.csv
-            output/autohome/*/config_*.ja.csv
-          if-no-files-found: warn
+            output/**/*.csv
+            public/**/*.csv
+          if-no-files-found: ignore
