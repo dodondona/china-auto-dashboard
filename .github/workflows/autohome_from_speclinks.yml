@@ -28,6 +28,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install beautifulsoup4 lxml pandas playwright
           python -m playwright install chromium
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: Download spec_links artifact
         uses: actions/download-artifact@v4
@@ -43,33 +45,33 @@ jobs:
           test -f artifacts/spec_links/spec_links.csv
           head -n 20 artifacts/spec_links/spec_links.csv || true
 
+      # ヒアドキュメントを避け、Pythonシェルで実行（YAMLが壊れない）
       - name: Normalize spec_links to JSONL
+        shell: python
         run: |
-          set -eux
-          python - << 'PY'
-import csv, json, re
-from pathlib import Path
+          import csv, json, re
+          from pathlib import Path
 
-p = Path("artifacts/spec_links/spec_links.csv")
-rows = []
-with p.open("r", encoding="utf-8") as f:
-    rdr = csv.DictReader(f)
-    for i, r in enumerate(rdr, start=1):
-        sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
-        surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
-        rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
-        if not rk:
-            rk = str(i)
-        m = re.search(r'\d+', rk)
-        rank_int = int(m.group()) if m else i
-        if surl:
-            rows.append({"rank": rank_int, "series_id": sid, "spec_url": surl})
-rows.sort(key=lambda x: x["rank"])
-with open("spec_links.jsonl", "w", encoding="utf-8") as g:
-    for obj in rows:
-        g.write(json.dumps(obj, ensure_ascii=False) + "\n")
-print(f"WROTE {len(rows)} lines to spec_links.jsonl")
-PY
+          p = Path("artifacts/spec_links/spec_links.csv")
+          rows = []
+          with p.open("r", encoding="utf-8") as f:
+              rdr = csv.DictReader(f)
+              for i, r in enumerate(rdr, start=1):
+                  sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or r.get("series") or "").strip()
+                  surl = (r.get("spec_url")  or r.get("url")      or r.get("specUrl")  or "").strip()
+                  rk   = (r.get("rank")      or r.get("順位")      or r.get("rank_index") or "").strip()
+                  if not rk:
+                      rk = str(i)
+                  m = re.search(r"\d+", rk)
+                  rank_int = int(m.group()) if m else i
+                  if surl:
+                      rows.append({"rank": rank_int, "series_id": sid, "spec_url": surl})
+
+          rows.sort(key=lambda x: x["rank"])
+          with open("spec_links.jsonl", "w", encoding="utf-8") as g:
+              for obj in rows:
+                  g.write(json.dumps(obj, ensure_ascii=False) + "\n")
+          print(f"WROTE {len(rows)} lines to spec_links.jsonl")
 
       - name: Run autohome_config_to_csv per link (ranked)
         run: |
@@ -78,31 +80,23 @@ PY
 
           while IFS= read -r line; do
             [ -z "$line" ] && continue
-            echo "$line" > one.json
 
-            rank=$(python - << 'PY'
-import json; print(json.load(open("one.json","r",encoding="utf-8"))["rank"])
-PY
-)
-            series_id=$(python - << 'PY'
-import json; print(json.load(open("one.json","r",encoding="utf-8"))["series_id"])
-PY
-)
-            spec_url=$(python - << 'PY'
-import json; print(json.load(open("one.json","r",encoding="utf-8"))["spec_url"])
-PY
-)
+            rank=$(printf '%s\n' "$line" | jq -r '.rank')
+            series_id=$(printf '%s\n' "$line" | jq -r '.series_id')
+            spec_url=$(printf '%s\n' "$line" | jq -r '.spec_url')
 
             printf -v rank3 "%03d" "$rank"
             base="${rank3}"
-            if [ -n "$series_id" ]; then base="${rank3}_${series_id}"; fi
+            if [ -n "$series_id" ] && [ "$series_id" != "null" ]; then
+              base="${rank3}_${series_id}"
+            fi
             outfile="public/config_csv/${base}.csv"
 
             echo "::group::[${rank3}] ${series_id} -> ${spec_url}"
-            # ▼ 実スクリプト呼び出し：--series 必須対応済み ▼
+            # --series が必須のため付与（余計な変更なし）
             python tools/autohome_config_to_csv.py --series "${series_id}"
-            # ▲ 必要なら --outdir "public" なども追加可 ▲
 
+            # 出力ファイルを拾ってリネーム保存（あなたのスクリプトに合わせてこのままでOK）
             latest=$(ls -1t public/*.csv tools/*.csv 2>/dev/null | head -n 1 || true)
             if [ -n "${latest}" ]; then
               cp -f "${latest}" "${outfile}"
