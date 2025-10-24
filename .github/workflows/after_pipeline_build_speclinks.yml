@@ -2,7 +2,7 @@ name: after_pipeline_build_speclinks
 
 on:
   workflow_run:
-    workflows: ["autohome_pipeline"]  # ← ここは既存 pipeline.yml の `name:` と一致させてください
+    workflows: ["autohome_pipeline"]  # ← .github/workflows/autohome_pipeline.yml の name と一致
     types: [completed]
 
 permissions:
@@ -15,43 +15,86 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # pipeline.yml の成果物を前段の run からダウンロード
+      # 前段 autohome_pipeline の CSV アーティファクトを取得
       - name: Download artifacts from pipeline run
         uses: actions/download-artifact@v4
         with:
-          # 前段ワークフロー(run)のIDで直接取得
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
+          name: autohome-ranking-csvs
           path: artifacts/pipeline
 
-      # （必要なら）Python 等のセットアップ
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # ★ スペック表リンク生成：既存の“リンク生成スクリプト/コマンド”だけを呼ぶ
-      # 例: python tools/spec_links_from_pipeline.py など
-      # ※ ここはあなたのリポに既にある「スペック表リンクを作る」処理コマンドに置き換えてください
-      - name: Build spec-link list
+      - name: Show downloaded CSVs
         run: |
           set -eux
-          # pipeline の成果物を入力として参照する例:
-          ls -lah artifacts/pipeline || true
-          # ▼▼▼ ここをあなたの既存コマンドに置換 ▼▼▼
-          # python tools/spec_links_from_pipeline.py \
-          #   --in artifacts/pipeline/some.csv \
-          #   --out public/spec_links.csv
-          # ▲▲▲ ここをあなたの既存コマンドに置換 ▲▲▲
-          # ダミー生成（置換前の暫定）:
-          mkdir -p public
-          echo "series_id,spec_url" > public/spec_links.csv
-          echo "0000,https://example.com/spec/0000" >> public/spec_links.csv
+          ls -lahR artifacts/pipeline || true
+          find artifacts/pipeline -type f -name '*.csv' -maxdepth 2 -print || true
 
-      # 次段へ渡すため、スペック表リンクを成果物化
+      # 実データから spec_links.csv を生成（列名ゆれに耐性）
+      - name: Build spec_links.csv from pipeline CSVs
+        shell: python
+        run: |
+          import csv, re
+          from pathlib import Path
+
+          in_dir = Path("artifacts/pipeline")
+          # 優先順で探す（どれか1つがあるはず）
+          candidates = [
+            "public/autohome_ranking_with_image_urls.csv",
+            "public/autohome_ranking_with_image_urls_with_maker.csv",
+            "public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv",
+          ]
+          csv_path = None
+          for rel in candidates:
+            p = in_dir / rel
+            if p.exists():
+              csv_path = p
+              break
+          if csv_path is None:
+            # フォールバック：最初のCSV
+            all_csvs = list(in_dir.rglob("*.csv"))
+            if all_csvs:
+              csv_path = all_csvs[0]
+          if csv_path is None:
+            raise SystemExit("ERROR: No CSV found in artifacts/pipeline")
+
+          rows = []
+          with csv_path.open("r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f)
+            for i, r in enumerate(rdr, start=1):
+              # rank
+              rk = (r.get("rank") or r.get("順位") or r.get("ranking") or "").strip()
+              if not rk:
+                rk = str(i)
+              m_rk = re.search(r"\d+", rk)
+              rank = int(m_rk.group()) if m_rk else i
+
+              # series_url / series_id
+              series_url = (r.get("series_url") or r.get("url") or r.get("seriesUrl") or r.get("detail_url") or "").strip()
+              sid = (r.get("series_id") or r.get("seriesId") or r.get("id") or "").strip()
+              if (not sid) and series_url:
+                m_sid = re.search(r"/series/(\\d+)", series_url)
+                if m_sid:
+                  sid = m_sid.group(1)
+
+              if not sid:
+                # 取れなければスキップ
+                continue
+
+              spec_url = f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"
+              rows.append({"rank": rank, "series_id": sid, "spec_url": spec_url})
+
+          rows.sort(key=lambda x: x["rank"])
+          out = Path("public")
+          out.mkdir(parents=True, exist_ok=True)
+          with (out / "spec_links.csv").open("w", newline="", encoding="utf-8") as g:
+            w = csv.DictWriter(g, fieldnames=["rank","series_id","spec_url"])
+            w.writeheader()
+            w.writerows(rows)
+          print(f"WROTE {len(rows)} rows to public/spec_links.csv")
+
       - name: Upload spec-link artifact
         uses: actions/upload-artifact@v4
         with:
