@@ -28,12 +28,12 @@ jobs:
           python -m playwright install chromium
 
       # ここからは既存の手動/スケジュール用フロー（例：特定の series を直接指定して回す）
-      # 既存ツールの使用例（必要に応じてZIP内のままにしてあります）
+      # 既存ツールの使用例（ZIPの内容を尊重して維持）
       - name: Run config scripts (examples / keep as-is)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # 例) 単体シリーズ実行（既存のまま）
+          # 例) 単体シリーズ実行（既存のまま・必要に応じて利用）
           # python tools/autohome_config_to_csv.py --series 7806
           # python tools/autohome_config_to_csv.py --series 7578
           echo "keep existing manual/scheduled steps as-is"
