@@ -2,13 +2,11 @@ name: autohome_config_to_csv
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "15 1 * * *"
-  workflow_run:
-    workflows:
-      - autohome_pipeline
-    types:
-      - completed
+    inputs:
+      series_ids:
+        description: "Comma-separated list of series IDs (例: 5714,6554,7263)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -32,69 +30,65 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests || true
 
-      - name: Download artifact (autohome-series-list) if available
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: autohome-series-list
-          path: public
-
-      - name: Ensure series_list.csv exists (build fallback if missing)
+      - name: Prepare series_list.csv
         run: |
           mkdir -p public
-          if [ -f public/series_list.csv ]; then
-            echo "series_list.csv exists (from artifact)."
+          SERIES_IDS="${{ github.event.inputs.series_ids }}"
+          if [ -z "$SERIES_IDS" ]; then
+            echo "No manual series_ids specified, fetching latest ranking page..."
+            cat > fetch_latest_ids.py <<'EOF'
+import re,requests,csv,os
+os.makedirs("public", exist_ok=True)
+headers={
+    "User-Agent":"Mozilla/5.0",
+    "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.8"
+}
+html=requests.get("https://www.autohome.com.cn/rank/1",headers=headers,timeout=30).text
+ids=re.findall(r"https?://www\\.autohome\\.com\\.cn/(\\d+)",html)
+seen=set();uniq=[]
+for sid in ids:
+    if sid not in seen:
+        seen.add(sid);uniq.append(sid)
+uniq=sorted(uniq,key=lambda x:int(x))[:100]
+with open("public/series_list.csv","w",newline="",encoding="utf-8") as f:
+    w=csv.writer(f);w.writerow(["series_id","series_url","config_url"])
+    for sid in uniq:
+        w.writerow([
+            sid,
+            f"https://www.autohome.com.cn/{sid}",
+            f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"
+        ])
+print("Auto-built list:", len(uniq))
+EOF
+            python fetch_latest_ids.py
           else
-            echo "No artifact found. Building fallback series_list.csv from ranking page..."
-            python - <<'PY'
-            import re,csv,os,sys
-            try:
-                import requests
-            except Exception:
-                import subprocess; subprocess.check_call([sys.executable,"-m","pip","install","requests"])
-                import requests
-            os.makedirs("public", exist_ok=True)
-            headers = {
-                "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.8",
-                "Referer":"https://www.autohome.com.cn/rank/1"
-            }
-            try:
-                html = requests.get("https://www.autohome.com.cn/rank/1", headers=headers, timeout=30).text
-            except Exception as e:
-                print("Failed to fetch ranking:", e)
-                html = ""
-            ids = re.findall(r"https?://www\\.autohome\\.com\\.cn/(\\d+)", html)
-            seen=set(); uniq=[]
-            for sid in ids:
-                if sid not in seen:
-                    seen.add(sid); uniq.append(sid)
-            uniq = sorted(uniq, key=lambda x:int(x))[:100]
-            with open("public/series_list.csv","w",newline="",encoding="utf-8") as f:
-                w=csv.writer(f)
-                w.writerow(["series_id","series_url","config_url"])
-                for sid in uniq:
-                    w.writerow([
-                        sid,
-                        f"https://www.autohome.com.cn/{sid}",
-                        f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"
-                    ])
-            print("series_list.csv rows:", len(uniq))
-            PY
+            echo "Manual IDs specified: $SERIES_IDS"
+            IFS=',' read -ra IDS <<< "$SERIES_IDS"
+            echo "series_id,series_url,config_url" > public/series_list.csv
+            for sid in "${IDS[@]}"; do
+              sid=$(echo "$sid" | xargs)
+              echo "$sid,https://www.autohome.com.cn/$sid,https://www.autohome.com.cn/config/series/$sid.html#pvareaid=3454437" >> public/series_list.csv
+            done
           fi
+          echo "✅ series_list.csv prepared."
 
-      - name: Run autohome_config_to_csv.py for each series (top 100)
+      - name: Run autohome_config_to_csv.py for each series
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -e
-          if [ ! -f public/series_list.csv ]; then
-            echo "series_list.csv not found. abort."
-            exit 1
-          fi
           tail -n +2 public/series_list.csv | while IFS=, read -r sid surl curl; do
             [ -z "$sid" ] && continue
             echo "::group::Processing $sid"
             python tools/autohome_config_to_csv.py "$curl"
             echo "::endgroup::"
           done
+
+      - name: Upload artifact (config CSVs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-config-csvs
+          path: |
+            output/**/*.csv
+            public/series_list.csv
+          if-no-files-found: warn
