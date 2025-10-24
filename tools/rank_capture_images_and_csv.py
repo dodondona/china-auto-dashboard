@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
-# 改良版: Lazy-load完了まで確実に全カードを読み込む
-# 構造・出力互換: public/autohome_images/*.png + public/autohome_ranking_with_image_urls.csv
+# 改良版: Lazy-load待機と確実なスクリーンショット、100件に限定
+# 出力互換: public/autohome_images/*.png + public/autohome_ranking_with_image_urls.csv
 
 import asyncio, os, re, csv, time
 from pathlib import Path
-from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
-RANK_URLS = [
-    "https://www.autohome.com.cn/rank/1",
-]
-
+RANK_URLS = ["https://www.autohome.com.cn/rank/1"]
 PUBLIC_DIR = Path("public")
 IMG_DIR = PUBLIC_DIR / "autohome_images"
 CSV_PATH = PUBLIC_DIR / "autohome_ranking_with_image_urls.csv"
@@ -18,44 +14,42 @@ BASE = "https://www.autohome.com.cn"
 PUBLIC_PREFIX = os.environ.get("PUBLIC_PREFIX", "").rstrip("/")
 
 def sanitize_filename(s: str) -> str:
-    s = re.sub(r"[^\w\-]+", "_", s.strip())
+    s = re.sub(r"[^\w\-]+", "_", (s or "car").strip())
     return s[:80].strip("_") or "car"
 
 async def scroll_and_load(page, target=100):
-    """下までスクロール＋加载更多＋Lazy-load完了待ち"""
+    """下までスクロール＋加载更多＋Lazy-load待ち"""
     seen = 0
     last_update = time.time()
     for _ in range(60):
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(1000)
+        await asyncio.sleep(1.0)
 
-        # 件数をチェック
         count = await page.locator("div[data-rank-num]").count()
         if count > seen:
             seen = count
             last_update = time.time()
 
-        # “加载更多”ボタン対応
+        # “加载更多/更多/下一页” 対応（あれば）
         try:
-            btn = page.locator("text=/加载更多|下一页|更多/")
-            if await btn.first.is_visible():
-                await btn.first.click()
-                await page.wait_for_timeout(1500)
+            btn = page.locator("text=/加载更多|下一页|更多/").first
+            if await btn.is_visible():
+                await btn.click()
+                await asyncio.sleep(1.5)
         except Exception:
             pass
 
-        # 100件以上 or 進展なし5秒で抜ける
         if seen >= target:
             break
         if time.time() - last_update > 5:
             break
 
-    # 最後にLazy-load画像を確実に読み込ませる
-    await page.wait_for_timeout(2000)
+    # 最後に Lazy-load 画像を確実に読み込ませる
+    await asyncio.sleep(2.0)
     await page.evaluate("window.scrollTo(0, 0)")
-    await page.wait_for_timeout(1000)
+    await asyncio.sleep(1.0)
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await page.wait_for_timeout(2000)
+    await asyncio.sleep(2.0)
 
 async def extract_card_record(card):
     rank = await card.get_attribute("data-rank-num")
@@ -113,38 +107,38 @@ async def extract_card_record(card):
     delta = None
     svg = card.locator("svg").first
     if await svg.count():
-        neighbor_text = await (await svg.element_handle()).evaluate("(el)=>el.parentElement && el.parentElement.innerText || ''")
-        m3 = re.search(r"\d+", neighbor_text or "")
-        if m3:
-            num = m3.group(0)
-            svg_html = await svg.inner_html()
-            colors = set(re.findall(r'fill="(#?[0-9a-fA-F]{3,6})"', svg_html))
-            sign = ""
-            if any(c.lower() in {"#f60","#ff6600"} for c in colors):
-                sign = "+"
-            elif any(c.lower() in {"#1ccd99","#00cc99","#1ccd9a"} for c in colors):
-                sign = "-"
-            delta = f"{sign}{num}" if num else None
+        # 親要素のテキストから数字を拾う
+        try:
+            handle = await svg.element_handle()
+            neighbor_text = await handle.evaluate("(el)=>el.parentElement && el.parentElement.innerText || ''")
+            m3 = re.search(r"\d+", neighbor_text or "")
+            if m3:
+                num = m3.group(0)
+                svg_html = await svg.inner_html()
+                colors = set(re.findall(r'fill="(#?[0-9a-fA-F]{3,6})"', svg_html))
+                sign = ""
+                if any(c.lower() in {"#f60","#ff6600"} for c in colors):
+                    sign = "+"
+                elif any(c.lower() in {"#1ccd99","#00cc99","#1ccd9a"} for c in colors):
+                    sign = "-"
+                delta = f"{sign}{num}" if num else None
+        except:
+            pass
 
     return {"rank": rank_num, "name": name, "price": price, "link": link, "units": units, "delta_vs_last_month": delta}
 
 async def screenshot_card_image(card, rank, name):
-    img = card.locator("img").first
-    handle = None
-    if await img.count():
-        handle = await img.element_handle()
-    else:
-        candidate = card.locator("div:has(img)").first
-        if await candidate.count():
-            handle = await candidate.element_handle()
-        else:
-            handle = await card.element_handle()
-
-    fname = f"{rank:03d}_{sanitize_filename(name or 'car')}.png"
+    # 画像が含まれる領域を優先
+    loc = card.locator("img").first
+    if not await loc.count():
+        loc = card.locator("div:has(img)").first
+    if not await loc.count():
+        loc = card  # 最悪カード全体
+    # 描画を少し待ってからスクショ（Locator は wait_for_timeout を持たない）
+    await asyncio.sleep(1.0)
+    fname = f"{(rank or 0):03d}_{sanitize_filename(name)}.png"
     path = IMG_DIR / fname
-    # 画像描画を少し待ってから撮る
-    await card.wait_for_timeout(1000)
-    await handle.screenshot(path=path, type="png")
+    await loc.screenshot(path=str(path), type="png")
     return fname
 
 async def main():
@@ -165,14 +159,20 @@ async def main():
             cards = page.locator("div[data-rank-num]")
             count = await cards.count()
             print(f"  loaded cards: {count}")
+            # 先頭100件だけ（多く出ても100位まで）
+            limit = min(100, count)
             rows = []
-            for i in range(count):
+            for i in range(limit):
                 card = cards.nth(i)
                 rec = await extract_card_record(card)
                 if rec["rank"] is None:
                     continue
                 fname = await screenshot_card_image(card, rec["rank"], rec["name"])
-                rec["image_url"] = f"{PUBLIC_PREFIX}/autohome_images/{fname}" if PUBLIC_PREFIX else f"/autohome_images/{fname}"
+                rec["image_url"] = (
+                    f"{PUBLIC_PREFIX}/autohome_images/{fname}"
+                    if PUBLIC_PREFIX
+                    else f"/autohome_images/{fname}"
+                )
                 rows.append(rec)
 
             rows.sort(key=lambda r: (r["rank"] if r["rank"] is not None else 10**9))
