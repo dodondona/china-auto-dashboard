@@ -3,14 +3,14 @@ name: autohome_pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 1 3 * *"  # monthly at 01:10 UTC on the 3rd
+    - cron: "30 1 * * *"  # 毎日01:30 UTC実行（例）
 
 jobs:
-  autohome_pipeline:
+  build_autohome_pipeline:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,40 +21,55 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright openai pandas beautifulsoup4 requests
+          pip install -r requirements.txt || true
+          pip install playwright
           python -m playwright install chromium
 
-      - name: Run stage scripts (ranking)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run build (Top100 ranking + images)
         run: |
-          # 1) ランキング + 画像URL抽出（出力: public/autohome_ranking_with_image_urls.csv）
+          set -eux
           python tools/rank_capture_images_and_csv.py
-          # 2) タイトルからメーカー名を付与（出力: public/autohome_ranking_with_image_urls_with_maker.csv）
-          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          # 3) メーカー名を日本語へ翻訳（出力: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv）
-          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-          # 4) （復活）画像を実ファイルとして保存するステージ
-          #    以前 .github/scripts/stage2_images_to_public.py だったものを tools に移しただけ
-          python tools/stage2_images_to_public.py public/autohome_ranking_with_image_urls.csv
 
-      # あなたの要望どおり、CSVは最終JA版のみをアップロード
-      - name: Upload artifact (ranking final csv only)
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-ranking-csv
-          path: |
-            public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
-          if-no-files-found: warn
-
-      # 画像は別アーティファクトで。保存先は stage2 スクリプト既定の出力パスに合わせています。
-      # （典型的には public/images/** または public/autohome_images/** など。既定出力に追従できるよう広めに指定）
       - name: Upload artifact (ranking images)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-ranking-images
-          path: |
-            public/**/*.jpg
-            public/**/*.jpeg
-            public/**/*.png
-          if-no-files-found: warn
+          name: autohome-ranking-csvs
+          path: public/autohome_ranking_with_image_urls.csv
+          if-no-files-found: error
+
+      # === ここから追記: Top100の series_id から specリンクCSVを作成 ===
+      - name: Build spec_links.csv from ranking CSV
+        if: always()
+        run: |
+          set -euo pipefail
+          SRC="public/autohome_ranking_with_image_urls.csv"
+          OUT="public/spec_links.csv"
+          test -s "$SRC" || { echo "missing $SRC"; exit 1; }
+          python - << 'PY'
+import csv, re
+src="public/autohome_ranking_with_image_urls.csv"
+out="public/spec_links.csv"
+pat=re.compile(r"https?://www\.autohome\.com\.cn/(\d+)")
+with open(src, encoding="utf-8") as f, open(out,"w",encoding="utf-8",newline="") as g:
+    r=csv.DictReader(f)
+    w=csv.writer(g)
+    w.writerow(["series_id","spec_url"])
+    for row in r:
+        link=row.get("link","")
+        m=pat.match(link.strip())
+        if not m:
+            continue
+        sid=m.group(1)
+        w.writerow([sid, f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
+print("wrote", out)
+PY
+
+      - name: Upload artifact (spec links)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-spec-links
+          path: public/spec_links.csv
+          if-no-files-found: error
+      # === 追記ここまで ===
