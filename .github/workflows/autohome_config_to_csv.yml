@@ -3,7 +3,7 @@ name: autohome_config_to_csv
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 * * *"  # every day at 01:15 UTC
+    - cron: "15 1 * * *"
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -11,7 +11,6 @@ on:
 jobs:
   autohome_config_to_csv:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,16 +27,15 @@ jobs:
           pip install playwright beautifulsoup4 openai pandas requests
           python -m playwright install chromium
 
-      # 既存の手動/スケジュール用フローは維持（例のまま）
-      - name: Run config scripts (examples / keep as-is)
+      - name: Run config scripts (manual/scheduled)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          # 例) 単体シリーズ実行（必要時のみ）
+          echo "keep existing manual/scheduled steps as-is"
+          # examples (kept as comments):
           # python tools/autohome_config_to_csv.py --series 7806
           # python tools/autohome_config_to_csv.py --series 7578
-          echo "keep existing manual/scheduled steps as-is"
 
       - name: Translate columns (JA)
         env:
@@ -55,7 +53,6 @@ jobs:
             output/autohome/*/config_*.ja.csv
           if-no-files-found: warn
 
-  # ===== “連結”用：pipeline 完了時だけ発火 =====
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' }}
     runs-on: ubuntu-latest
@@ -65,13 +62,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install jq & unzip
+      - name: Install jq and unzip
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq unzip
 
-      - name: Download artifact (autohome-series-urls) from triggering run
+      - name: Download artifact (autohome-series-urls)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -86,7 +83,7 @@ jobs:
           test -s artifact/series_ids.txt
 
       - id: mkjson
-        name: Build JSON matrix from series_ids.txt
+        name: Build matrix
         run: |
           set -euo pipefail
           json=$(awk 'NF>0' artifact/series_ids.txt | sed 's/[^0-9]//g' | awk 'NF>0' | head -n 100 | jq -R -s -c 'split("\n")|map(select(length>0))')
@@ -100,7 +97,6 @@ jobs:
       fail-fast: false
       matrix:
         series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,19 +106,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (Playwright + bs4)
+      - name: Install deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install playwright beautifulsoup4
           python -m playwright install chromium
 
-      - name: Run config crawler (PC layout) for each series
+      - name: Run config crawler
         run: |
           set -euo pipefail
           python tools/autohome_config_to_csv.py --series "${{ matrix.series }}"
 
-      - name: Upload artifact (config csv per series)
+      - name: Upload artifact (per series)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-config-csv
