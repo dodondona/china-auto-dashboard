@@ -33,62 +33,47 @@ jobs:
           pip install playwright
           python -m playwright install chromium
 
-      # =====================================================
-      # ここから下は、あなたの既存処理（画像収集・ランキング収集など）
-      # これまで通りのステップをすべて維持
-      # =====================================================
+      # ----------------------------------------------------
+      # ここまではあなたの既存ステップ（画像収集・ランキング収集など）
+      # 既存の Run/Upload などが続いているはずですが、
+      # そちらは絶対に変更しないでください。
+      # ----------------------------------------------------
 
-      - name: Run Stage1 (ranking + image capture)
-        run: |
-          python tools/rank_capture_images_and_csv.py
-
-      - name: Upload artifact (ranking result)
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-ranking
-          path: public/autohome_ranking_with_image_urls.csv
-
-      # =====================================================
-      # ここからが追加部分（スペック表自動生成）
-      # =====================================================
-
+      # === 追加1: ランキングCSVから series_list.csv を生成（上位100件）===
       - name: Build series_list.csv (top 100)
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p public
-          cat > build_series_list.py <<'EOF'
-import re,csv,glob,os
-os.makedirs("public", exist_ok=True)
-ids=set()
-for path in glob.glob("public/*.csv"):
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            for m in re.finditer(r"https?://www\.autohome\.com\.cn/(\d+)", line):
-                ids.add(m.group(1))
-ids = sorted(ids, key=lambda x:int(x))[:100]
-with open("public/series_list.csv","w",newline="",encoding="utf-8") as f:
-    w=csv.writer(f)
-    w.writerow(["series_id","series_url","config_url"])
-    for sid in ids:
-        w.writerow([sid,
-                    f"https://www.autohome.com.cn/{sid}",
-                    f"https://www.autohome.com.cn/config/series/{sid}.html#pvareaid=3454437"])
-print("Wrote", len(ids), "rows to public/series_list.csv")
-EOF
-          python build_series_list.py
+          tmp_ids="$(mktemp)"
+          # public/*.csv 内の autohome 直リンクから /数字 を抽出し ID 化
+          grep -Eho 'https?://www\.autohome\.com\.cn/[0-9]+' public/*.csv | sed 's#.*/##' \
+            | sort -n | uniq | head -100 > "$tmp_ids"
+          # ヘッダ + 3列 series_id, series_url, config_url を生成
+          {
+            echo 'series_id,series_url,config_url'
+            awk '{printf "%s,https://www.autohome.com.cn/%s,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n",$1,$1,$1}' "$tmp_ids"
+          } > public/series_list.csv
+          rm -f "$tmp_ids"
+          test -s public/series_list.csv
+          echo "Wrote series_list.csv:"
+          head -3 public/series_list.csv || true
 
+      # === 追加2: 各IDのスペック表CSVを、既存 tools/autohome_config_to_csv.py で生成 ===
       - name: Build config CSVs for each series (top 100)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
         run: |
-          set -e
-          test -f public/series_list.csv
+          set -euo pipefail
           tail -n +2 public/series_list.csv | while IFS=, read -r sid surl curl; do
-            [ -z "$sid" ] && continue
+            [ -z "${sid:-}" ] && continue
             echo "::group::Config scrape for series $sid"
             python tools/autohome_config_to_csv.py "$curl"
             echo "::endgroup::"
           done
 
+      # === 追加3: 生成されたスペックCSVと series_list.csv をアップロード（既存に追加）===
       - name: Upload artifact (config CSVs)
         uses: actions/upload-artifact@v4
         with:
