@@ -39,28 +39,28 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
+          echo "Running ranking scripts with extended timeout..."
 
-          run_once() {
-            python tools/rank_capture_images_and_csv.py
-            python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-            python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
-          }
+          python - <<'PYCODE'
+          import asyncio
+          from playwright.async_api import async_playwright
 
-          if run_once; then
-            exit 0
-          fi
+          async def main():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch()
+                  page = await browser.new_page()
+                  await page.goto("https://www.autohome.com.cn/rank/1", timeout=60000)
+                  await page.wait_for_load_state("networkidle", timeout=60000)
+                  await page.wait_for_timeout(2000)
+                  await page.screenshot(path="public/test.png", full_page=True)
+                  await browser.close()
 
-          echo "Retry after 15s..."
-          sleep 15
+          asyncio.run(main())
+          PYCODE
 
-          if run_once; then
-            exit 0
-          fi
-
-          echo "Retry after 30s..."
-          sleep 30
-
-          run_once
+          python tools/rank_capture_images_and_csv.py
+          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
+          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
       - name: Upload artifact (ranking csv)
         uses: actions/upload-artifact@v4
@@ -85,7 +85,7 @@ jobs:
             NR==1{
               for(i=1;i<=NF;i++){
                 h=$i; gsub(/^"|"$/, "", h)
-                if(h=="link")      lc=i
+                if(h=="link") lc=i
                 if(h=="series_url") sc=i
               }
               next
