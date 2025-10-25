@@ -10,8 +10,12 @@ on:
         description: "取得ページ数（例: 5）"
         required: false
         default: "5"
+      mode:
+        description: "ja=日本語JSON構造 / zh=中国語高速"
+        required: false
+        default: "ja"
   schedule:
-    - cron: "0 2 1 * *"
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
 
 jobs:
   summarize_reviews:
@@ -32,23 +36,18 @@ jobs:
           pip install --upgrade "openai==1.*" beautifulsoup4 requests pandas playwright
           python -m playwright install chromium
 
-      - name: Print versions (debug)
-        run: |
-          python - << 'PY'
-          import sys,openai,platform,os
-          print('python:', sys.version)
-          print('openai:', openai.__version__)
-          k=os.environ.get("OPENAI_API_KEY","")
-          print('OPENAI_API_KEY set:', bool(k), 'len:', len(k))
-          PY
-
-      - name: Run summary script (Playwright)
+      - name: Run summary script
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/koubei_summary_playwright.py \
-            "${{ github.event.inputs.vehicle_id || '7806' }}" \
-            "${{ github.event.inputs.pages || '5' }}"
+          python tools/koubei_summary.py \
+            "${{ github.event.inputs.vehicle_id }}" \
+            "${{ github.event.inputs.pages }}" \
+            "${{ github.event.inputs.mode }}"
+
+      - name: Build narrative report
+        run: |
+          python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
 
       - name: Upload results
         if: always()
@@ -58,3 +57,5 @@ jobs:
           path: |
             autohome_reviews_*.csv
             autohome_reviews_*.txt
+            autohome_reviews_*.md
+            autohome_reviews_*.json
