@@ -49,6 +49,12 @@ jobs:
         run: |
           python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
 
+      - name: Build story-style summary
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # なくてもOK（テンプレで出ます）
+        run: |
+          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" --pros 5 --cons 4 --quotes 2 --style executive
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
