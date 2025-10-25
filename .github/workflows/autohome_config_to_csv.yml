@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4
+          pip install playwright beautifulsoup4 pandas openai
           python -m playwright install chromium
 
       - name: Run config crawler
@@ -82,6 +82,23 @@ jobs:
           python tools/autohome_config_to_csv.py --series "${{ matrix.series }}" || echo "No config found for ${{ matrix.series }}"
           ls -R output || true
 
+      - name: Translate columns (per series)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 必要なら為替を調整（既定: 21.0）
+          # EXRATE_CNY_TO_JPY: "21.0"
+        run: |
+          set -euo pipefail
+          IN="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv"
+          OUT="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv"
+          if [ -s "$IN" ]; then
+            export CSV_IN="$IN"
+            export CSV_OUT="$OUT"
+            python tools/translate_columns.py
+          else
+            echo "Skip translate: $IN not found."
+          fi
+
       - name: Upload artifact (per series)
         uses: actions/upload-artifact@v4
         with:
@@ -91,7 +108,7 @@ jobs:
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
           if-no-files-found: warn
 
-  # 手動/スケジュール実行用（既存）: workflow_run では走らせない
+  # 旧(手動/スケジュール)の一括翻訳は維持。ただし workflow_run では実行しない
   autohome_config_to_csv:
     if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
@@ -115,6 +132,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
+          # 従来運用: CSV_IN / CSV_OUT を外から与える or デフォルト(7578)を使う
           python tools/translate_columns.py
 
       - name: Upload artifact (config csvs)
