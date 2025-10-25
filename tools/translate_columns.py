@@ -51,7 +51,7 @@ def make_secondary(dst: Path) -> Path:
 
 DST_SECONDARY = make_secondary(DST_PRIMARY)
 
-# OpenAI
+# ====== OpenAI ======
 MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 API_KEY = os.environ.get("OPENAI_API_KEY")
 
@@ -62,13 +62,6 @@ TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "tr
 # 先頭車名を削る（既定ON）。明示パターンは SERIES_PREFIX（例: "駆逐艦05|驱逐舰05"）
 STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
 SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
-
-# 為替
-EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
-
-BATCH_SIZE  = 60
-RETRIES     = 3
-SLEEP_BASE  = 1.2
 
 # ====== クリーニング・辞書 ======
 NOISE_ANY = ["对比", "参数", "图片", "配置", "详情"]
@@ -87,42 +80,50 @@ def clean_price_cell(s: str) -> str:
         t = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", t)
     return t.strip()
 
+# ブランド正規化（BYDは翻訳しない）
 BRAND_MAP = {"BYD": "BYD", "比亚迪": "BYD"}
 
+# 固定訳（価格見出しは「（元）」で統一）
 FIX_JA_ITEMS = {
     "厂商指导价":   "メーカー希望小売価格（元）",
     "经销商参考价": "ディーラー販売価格（元）",
     "经销商报价":   "ディーラー販売価格（元）",
+    "经销商":       "ディーラー販売価格（元）",  # ★追加：原文が「经销商」単独でも固定名に
     "被动安全":     "衝突安全",
 }
 FIX_JA_SECTIONS = {"被动安全": "衝突安全"}
 
-PRICE_ITEM_CN = {"厂商指导价", "经销商参考价", "经销商报价"}
+PRICE_ITEM_CN = {"厂商指导价", "经销商参考价", "经销商报价", "经销商"}
 PRICE_ITEM_JA = {"メーカー希望小売価格（元）", "ディーラー販売価格（元）"}
 
-RE_WAN  = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
-RE_YUAN = re.compile(r"(?P<num>[\d,]+)\s*元")
+# ====== 価格は「元」だけに統一（円併記は除去） ======
+RE_WAN       = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
+RE_YUAN      = re.compile(r"(?P<num>[\d,]+)\s*元")
+RE_JPY_PAREN = re.compile(r"（約¥[0-9,]+）")  # 例: （約¥251,580）
 
-def append_jpy_with_yuan_label(s: str, rate: float) -> str:
+def enforce_yuan_only(s: str) -> str:
+    """
+    ・既存の「（約¥…）」を除去
+    ・「11.98万」等にも「元」を明記（“中国元”は使わない）
+    ・数値が無い/ダッシュはそのまま
+    """
     t = str(s).strip()
     if not t or t in {"-", "–", "—"}:
         return t
-    m1 = RE_WAN.search(t)
-    m2 = RE_YUAN.search(t)
-    cny = None
-    if m1:
-        cny = float(m1.group("num")) * 10000.0
-    elif m2:
-        cny = float(m2.group("num").replace(",", ""))
-    if cny is not None and "元" not in t:
+
+    # 余計な円併記を除去
+    t = RE_JPY_PAREN.sub("", t).strip()
+
+    # 万 or 元 を検出
+    m1 = RE_WAN.search(t)   # ～万
+    m2 = RE_YUAN.search(t)  # ～元
+    if m2:
+        # 既に「元」明記ならそのまま
+        return t
+    if m1 and "元" not in t:
+        # 「11.98万」→「11.98万元」
         t = f"{t}元"
-    if cny is None:
-        return t
-    jpy = int(round(cny * rate))
-    jpy_fmt = f"{jpy:,}"
-    if "（約¥" in t or "(約¥" in t:
-        return t
-    return f"{t}（約¥{jpy_fmt}）"
+    return t
 
 # ====== LLM ======
 def uniq(seq):
@@ -205,16 +206,16 @@ class Translator:
 
     def translate_unique(self, unique_terms: list[str]) -> dict[str, str]:
         out = {}
-        for chunk in chunked(unique_terms, BATCH_SIZE):
-            for attempt in range(1, RETRIES+1):
+        for chunk in chunked(unique_terms, 60):
+            for attempt in range(1, 3+1):
                 try:
                     out.update(self.translate_batch(chunk))
                     break
                 except Exception:
-                    if attempt == RETRIES:
+                    if attempt == 3:
                         for t in chunk:
                             out.setdefault(t, t)
-                    time.sleep(SLEEP_BASE * attempt)
+                    time.sleep(1.2 * attempt)
         return out
 
 # ====== グレード先頭の車名削除 ======
@@ -251,7 +252,7 @@ def main():
     print(f"📝 DST(secondary): {DST_SECONDARY}")
 
     if not Path(SRC).exists():
-        # よくある取り違い対策：_ja.csv を入力にしていないか等をヒント表示
+        # よくある取り違い対策：近傍CSVをヒント表示
         print("⚠ 入力CSVが見つかりません。近傍のCSVを探索します…")
         for p in Path("output").glob("**/config_*.csv"):
             print("  -", p)
@@ -271,7 +272,7 @@ def main():
     sec_map  = tr.translate_unique(uniq_sec)
     item_map = tr.translate_unique(uniq_item)
     sec_map.update(FIX_JA_SECTIONS)
-    item_map.update(FIX_JA_ITEMS)
+    item_map.update(FIX_JA_ITEMS)  # ★固定訳で上書き（经销商→ディーラー販売価格（元）等）
 
     out = df.copy()
     out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
@@ -295,11 +296,11 @@ def main():
             grade_cols  = orig_cols[4:]
             out.columns = fixed_cols + strip_series_prefix_from_grades(grade_cols)
 
-    # 価格セル：「元」明記 + 円併記
+    # 価格セル：「元」だけに統一（円併記は一切なし、既存の「（約¥…）」も除去）
     is_price_row = out["項目"].isin(list(PRICE_ITEM_CN)) | out["項目_ja"].isin(list(PRICE_ITEM_JA))
     for col in out.columns[4:]:
         out.loc[is_price_row, col] = out.loc[is_price_row, col].map(
-            lambda s: append_jpy_with_yuan_label(clean_price_cell(s), EXRATE_CNY_TO_JPY)
+            lambda s: enforce_yuan_only(clean_price_cell(s))
         )
 
     # 値セルの翻訳（価格行は対象外）
