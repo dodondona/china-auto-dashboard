@@ -1,153 +1,248 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Autohome 口碑スクレイピング（Playwright, API不要）
-出力:
-  autohome_reviews_<ID>.csv
-  autohome_reviews_<ID>_summary.txt
+Autohome 口コミ取得（Playwright）→ CSV ＆ 簡易サマリー
+完全オフライン版：OpenAI 依存なし
 
 使い方:
   python tools/koubei_summary_playwright.py 7806 5
 """
-import sys, os, re, time, csv
+
+import sys
+import re
+import time
 import argparse
+from dataclasses import dataclass, asdict
 from typing import List, Dict, Any
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
 import pandas as pd
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
-BASE1 = "https://k.autohome.com.cn/{vid}#pvareaid=3454440"              # 1ページ目
-BASEX = "https://k.autohome.com.cn/{vid}/index_{p}.html?#listcontainer" # 2ページ目以降
+# ----------------------------
+# 設定
+# ----------------------------
+LIST_URL_FIRST = "https://k.autohome.com.cn/{vid}#pvareaid=3454440"
+LIST_URL_PAGED = "https://k.autohome.com.cn/{vid}/index_{page}.html?#listcontainer"
 
-def build_urls(vid: str, pages: int) -> List[str]:
-    urls = []
-    for p in range(1, pages+1):
-        if p == 1:
-            urls.append(BASE1.format(vid=vid))
+# Autohome 側の構造は変化し得るため、複数候補セレクタでフォールバック
+CARD_SELECTORS = [
+    "div.koubei-list>div.item",              # 旧来パターン
+    "div#listcontainer div.list-box div.li", # 代替パターン
+    "div#listcontainer .mouthcon",           # さらに代替
+]
+
+TITLE_SELECTORS = [
+    ".title a", ".tit a", "h3 a", ".mouth-title a"
+]
+
+TEXT_SELECTORS = [
+    ".text-con", ".text", ".mouth-main .text-con", ".con .text"
+]
+
+DATE_SELECTORS = [
+    ".date", ".time", ".mouth-main .time", ".user .time"
+]
+
+RATING_SELECTORS = [
+    ".rating .score", ".mouth-main .score", ".score"
+]
+
+# ----------------------------
+# データ構造
+# ----------------------------
+@dataclass
+class ReviewRow:
+    review_id: str
+    date: str
+    rating: str
+    title: str
+    text: str
+    pros_zh: str
+    cons_zh: str
+    sentiment: str
+
+
+# ----------------------------
+# ユーティリティ
+# ----------------------------
+def clean_text(s: str) -> str:
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def pick_first_text(el, selectors) -> str:
+    if el is None:
+        return ""
+    for sel in selectors:
+        node = el.select_one(sel)
+        if node and node.get_text(strip=True):
+            return clean_text(node.get_text(" ", strip=True))
+    return ""
+
+def quick_sentiment(text: str) -> str:
+    """完全オフラインの超簡易判定（雰囲気レベル）。"""
+    t = text.lower()
+    pos_kw = ["满意", "喜欢", "安静", "省", "划算", "优秀", "舒服", "值得", "推荐", "好"]
+    neg_kw = ["不满", "一般", "噪音", "差", "短", "硬", "糟糕", "抱怨", "问题", "坏"]
+    pos = sum(1 for k in pos_kw if k in t)
+    neg = sum(1 for k in neg_kw if k in t)
+    if pos > neg:
+        return "positive"
+    if neg > pos:
+        return "negative"
+    return "mixed"
+
+def split_pros_cons_zh(text: str) -> (str, str):
+    """
+    口コミ本文から「優点/缺点」っぽい句をざっくり抽出（中国語のまま）。
+    サイトの構造変化に強いよう、キーワードで粗くスプリット。
+    """
+    if not text:
+        return "", ""
+    # 代表的キーワード
+    pros_markers = ["优点", "優點", "优", "优处", "满意", "喜欢", "优点：", "優點："]
+    cons_markers = ["缺点", "缺陷", "不足", "不满", "问题", "槽点", "缺点：", "不足："]
+    pros, cons = [], []
+
+    # 文単位に分割
+    sentences = re.split(r"[。！？!?\n]+", text)
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if any(m in s for m in cons_markers):
+            cons.append(s)
+        elif any(m in s for m in pros_markers):
+            pros.append(s)
         else:
-            urls.append(BASEX.format(vid=vid, p=p))
-    return urls
+            # キーワードなし：ヒューリスティックに寄せる
+            if "静" in s or "省" in s or "舒" in s or "值" in s or "好" in s:
+                pros.append(s)
+            elif "噪" in s or "硬" in s or "短" in s or "差" in s or "慢" in s:
+                cons.append(s)
 
-def fetch_html(urls: List[str], timeout_ms=30000) -> List[str]:
-    htmls = []
+    # " / " 区切り（既存 storywriter が前提にしている形式）
+    pros_s = " / ".join(pros[:6])
+    cons_s = " / ".join(cons[:6])
+    return pros_s, cons_s
+
+def parse_list_html(html: str) -> List[Dict[str, Any]]:
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+    cards = []
+    for sel in CARD_SELECTORS:
+        cards = soup.select(sel)
+        if cards:
+            break
+    for card in cards:
+        title = pick_first_text(card, TITLE_SELECTORS)
+        text = pick_first_text(card, TEXT_SELECTORS)
+        date = pick_first_text(card, DATE_SELECTORS)
+        rating = pick_first_text(card, RATING_SELECTORS)
+        rid_match = re.search(r"data\-koubeiid=['\"]?(\d+)", str(card))
+        review_id = rid_match.group(1) if rid_match else ""
+        text = clean_text(text)
+        pros_zh, cons_zh = split_pros_cons_zh(text)
+        senti = quick_sentiment(text)
+        row = ReviewRow(
+            review_id=review_id,
+            date=date,
+            rating=rating,
+            title=title,
+            text=text,
+            pros_zh=pros_zh,
+            cons_zh=cons_zh,
+            sentiment=senti
+        )
+        items.append(asdict(row))
+    return items
+
+def fetch_reviews(vid: str, pages: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context()
-        for u in urls:
-            page = ctx.new_page()
-            page.goto(u, timeout=timeout_ms, wait_until="load")
-            # スクロールで lazy 部分を読み込み
-            for _ in range(3):
-                page.mouse.wheel(0, 2000)
-                time.sleep(0.6)
-            htmls.append(page.content())
-            page.close()
-        ctx.close()
+        page = ctx.new_page()
+
+        def get(url: str) -> str:
+            page.goto(url, wait_until="load", timeout=60000)
+            # Lazy load 防止のため軽く待機
+            time.sleep(1.5)
+            return page.content()
+
+        # 1ページ目
+        html = get(LIST_URL_FIRST.format(vid=vid))
+        out.extend(parse_list_html(html))
+
+        # 2ページ目以降
+        for p in range(2, pages + 1):
+            url = LIST_URL_PAGED.format(vid=vid, page=p)
+            html = get(url)
+            out.extend(parse_list_html(html))
+
         browser.close()
-    return htmls
+    return out
 
-def parse_reviews(html: str) -> List[Dict[str, Any]]:
-    """
-    Autohomeの口碑は構造が頻繁に変わるため、堅めの抽出:
-    - レビューアイテムを包含する大きめのカードdivを広めに探索
-    - タイトル/本文/優点/缺点/评分 等のキーワードで抽出
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    cards = []
-    # よくあるリスト領域: idやclassに listcontainer / koubei / mouth などが含まれる
-    candidates = soup.select('div[id*="list"], div[class*="koubei"], div[class*="mouth"], ul[class*="list"]')
-    if not candidates:
-        candidates = [soup]  # 最終保険: 全体から拾う
-    for root in candidates:
-        # 1レビューっぽい塊（タイトル+本文）を推定
-        items = root.find_all(["div","li","article","section"], recursive=True)
-        for it in items:
-            txt = it.get_text(" ", strip=True)
-            if not txt or len(txt) < 60:  # 短すぎる要素は除外
-                continue
-            # 口コミの特徴キーワードでフィルタ
-            if not re.search(r"(优点|優点|缺点|缺陷|不足|评价|口碑|点评|试驾|试乘|试用|体验|续航|静音|噪音|加速|刹车|空间|内饰|外观|配置)", txt):
-                continue
-            # タイトル候補
-            title = ""
-            h = it.find(["h1","h2","h3","h4"])
-            if h and h.get_text(strip=True):
-                title = h.get_text(strip=True)
-            # 優点/缺点 部分
-            pros_zh, cons_zh = "", ""
-            pros_m = re.search(r"(优点|優点)[:：]\s*(.+?)($|缺点|不足|—|-)", txt)
-            if pros_m:
-                pros_zh = pros_m.group(2).strip()
-            cons_m = re.search(r"(缺点|不足)[:：]\s*(.+?)($|优点|優点|—|-)", txt)
-            if cons_m:
-                cons_zh = cons_m.group(2).strip()
-            # 本文（雑に）
-            body = txt
-            # スコア（あれば）
-            score = None
-            s_m = re.search(r"(\d\.\d|\d)分", txt)
-            if s_m:
-                try:
-                    score = float(s_m.group(1))
-                except:
-                    score = None
-            # 件の信頼性: pros/consどちらか＋本文の長さ
-            if (pros_zh or cons_zh or (score is not None)) and len(body) >= 80:
-                cards.append({
-                    "title_zh": title,
-                    "pros_zh": pros_zh,
-                    "cons_zh": cons_zh,
-                    "body_zh": body,
-                    "score": score
-                })
-    return cards
-
-def summarize_counts(rows: List[Dict[str, Any]]) -> str:
+def write_outputs(vid: str, rows: List[Dict[str, Any]]):
     df = pd.DataFrame(rows)
+    # 最低限の列構造（storywriter が使う列を確保）
+    if "pros_zh" not in df.columns:
+        df["pros_zh"] = ""
+    if "cons_zh" not in df.columns:
+        df["cons_zh"] = ""
+    if "sentiment" not in df.columns:
+        df["sentiment"] = "mixed"
+
+    csv_path = f"autohome_reviews_{vid}.csv"
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    # 簡易統計
     total = len(df)
-    if total == 0:
-        return "レビューが取得できませんでした。"
-    # 簡易“頻出語”集計（pros/consを term 分解）
-    def split_terms(series):
-        s = series.fillna("").astype(str).str.split(r"[，,。；;、/｜|]+").explode().str.strip()
-        s = s[s != ""]
-        return s
-    pros_top = split_terms(df["pros_zh"]).value_counts().head(10) if "pros_zh" in df else pd.Series(dtype=int)
-    cons_top = split_terms(df["cons_zh"]).value_counts().head(10) if "cons_zh" in df else pd.Series(dtype=int)
-    lines = [f"件数: {total}"]
-    if not pros_top.empty:
-        lines.append("优点TOP: " + " / ".join([f"{k}({v})" for k,v in pros_top.items()]))
-    if not cons_top.empty:
-        lines.append("缺点TOP: " + " / ".join([f"{k}({v})" for k,v in cons_top.items()]))
-    return "\n".join(lines)
+    pos = int((df["sentiment"].astype(str).str.lower()=="positive").sum())
+    neg = int((df["sentiment"].astype(str).str.lower()=="negative").sum())
+    mix = int((df["sentiment"].astype(str).str.lower()=="mixed").sum())
+
+    def ratio(n: int) -> float:
+        return 0.0 if total==0 else round(n/total*100, 1)
+
+    # 頻出語（ざっくり：スラッシュ区切りを集計）
+    def split_terms(series: pd.Series):
+        return series.dropna().astype(str).str.split(" / ").explode().str.strip()
+
+    pros_top = split_terms(df["pros_zh"]).value_counts().head(10)
+    cons_top = split_terms(df["cons_zh"]).value_counts().head(10)
+
+    lines = []
+    lines.append(f"【車両ID: {vid}】口コミ取得サマリー")
+    lines.append(f"件数: {total}")
+    lines.append(f"Sentiment: Positive {pos} ({ratio(pos)}%), Mixed {mix} ({ratio(mix)}%), Negative {neg} ({ratio(neg)}%)")
+    lines.append("")
+    lines.append("＜ポジティブ頻出（zh 抜粋）＞")
+    for t, c in pros_top.items():
+        lines.append(f"- {t} ({c})")
+    lines.append("")
+    lines.append("＜ネガティブ頻出（zh 抜粋）＞")
+    for t, c in cons_top.items():
+        lines.append(f"- {t} ({c})")
+    lines.append("")
+    lines.append("※ 完全オフライン抽出（OpenAI 不使用）")
+
+    with open(f"autohome_reviews_{vid}_summary.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("vehicle_id")
-    ap.add_argument("pages", nargs="?", default="5")
+    ap.add_argument("vehicle_id", help="Autohome vehicle id (例: 7806)")
+    ap.add_argument("pages", type=int, help="取得ページ数（例: 5）")
     args = ap.parse_args()
 
-    vid = str(args.vehicle_id).strip()
-    pages = int(args.pages)
+    vid = args.vehicle_id.strip()
+    pages = max(1, int(args.pages))
 
-    urls = build_urls(vid, pages)
-    htmls = fetch_html(urls)
-    all_rows: List[Dict[str, Any]] = []
-    for h in htmls:
-        rows = parse_reviews(h)
-        all_rows.extend(rows)
-
-    # CSV
-    out_csv = f"autohome_reviews_{vid}.csv"
-    pd.DataFrame(all_rows).to_csv(out_csv, index=False, encoding="utf-8-sig")
-
-    # Summary TXT
-    out_txt = f"autohome_reviews_{vid}_summary.txt"
-    with open(out_txt, "w", encoding="utf-8") as f:
-        f.write(summarize_counts(all_rows))
-
-    print(f"✅ generated: {out_csv}")
-    print(f"✅ generated: {out_txt}")
+    rows = fetch_reviews(vid, pages)
+    write_outputs(vid, rows)
+    print(f"✅ autohome_reviews_{vid}.csv / _summary.txt を生成しました（OpenAI 不使用）")
 
 if __name__ == "__main__":
     main()
