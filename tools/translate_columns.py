@@ -58,12 +58,14 @@ EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
 
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 
-# ====== クリーニング・辞書など（元のまま） ======
+# ====== クリーニング・辞書など ======
 NOISE_ANY = ["对比","参数","图片","配置","详情"]
 NOISE_PRICE_TAIL = ["询价","计算器","询底价","报价","价格询问","起","起售"]
+
 def clean_any_noise(s:str)->str:
     s=str(s) if s is not None else ""
-    for w in NOISE_ANY+NOISE_PRICE_TAIL: s=s.replace(w,"")
+    for w in NOISE_ANY+NOISE_PRICE_TAIL:
+        s=s.replace(w,"")
     return re.sub(r"\s+"," ",s).strip(" 　-—–")
 
 def clean_price_cell(s:str)->str:
@@ -74,6 +76,7 @@ def clean_price_cell(s:str)->str:
 
 RE_PAREN_ANY_YEN=re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
 RE_ANY_YEN_TOKEN=re.compile(r"(日本円|JPY|[¥￥]|円)")
+
 def strip_any_yen_tokens(s:str)->str:
     t=str(s)
     t=RE_PAREN_ANY_YEN.sub("",t)
@@ -81,6 +84,7 @@ def strip_any_yen_tokens(s:str)->str:
     return re.sub(r"\s+"," ",t).strip()
 
 BRAND_MAP={"BYD":"BYD","比亚迪":"BYD"}
+
 FIX_JA_ITEMS={
     "厂商指导价":"メーカー希望小売価格",
     "经销商参考价":"ディーラー販売価格（元）",
@@ -96,6 +100,7 @@ PRICE_ITEM_DEALER_CN={"经销商参考价","经销商报价","经销商"}
 # ====== 金額整形 ======
 RE_WAN=re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN=re.compile(r"(?P<num>[\d,]+)\s*元")
+
 def parse_cny(text:str):
     t=str(text)
     m1=RE_WAN.search(t)
@@ -122,7 +127,7 @@ def dealer_to_yuan_only(cell:str)->str:
     if("元"not in t)and RE_WAN.search(t):t=f"{t}元"
     return t
 
-# ====== 翻訳補助 ======
+# ====== 共通関数 ======
 def uniq(seq):
     s, out = set(), []
     for x in seq:
@@ -144,7 +149,7 @@ def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
         pass
     return {t: t for t in terms}
 
-# ====== Translator（辞書対応版） ======
+# ====== Translator（辞書対応＋API修正） ======
 def _load_dict(path: str | None) -> dict[str, str]:
     if not path: return {}
     p = Path(path)
@@ -166,7 +171,8 @@ class Translator:
     def __init__(self, model, api_key, dict_sec=None, dict_item=None, cache_sec=None, cache_item=None):
         self.model = model
         self.api_key = api_key
-        self.client = None if not api_key else OpenAI(api_key=api_key)
+        # ✅ 修正：空文字キーでも認識
+        self.client = OpenAI(api_key=api_key) if api_key and api_key.strip() else None
         self.dict_sec = dict_sec or {}
         self.dict_item = dict_item or {}
         self.cache_sec = _load_dict(cache_sec)
@@ -190,6 +196,7 @@ class Translator:
 
     def _api_batch(self, terms):
         if not self.client:
+            print("⚠️ API client not initialized, skipping translation.")
             return {t: t for t in terms}
         msgs = [
             {"role": "system", "content": self.system},
