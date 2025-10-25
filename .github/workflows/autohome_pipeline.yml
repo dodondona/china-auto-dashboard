@@ -18,6 +18,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
+          fc-cache -f -v
+
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -30,9 +39,28 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          python tools/rank_capture_images_and_csv.py
-          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
-          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+
+          run_once() {
+            python tools/rank_capture_images_and_csv.py
+            python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
+            python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+          }
+
+          if run_once; then
+            exit 0
+          fi
+
+          echo "Retry after 15s..."
+          sleep 15
+
+          if run_once; then
+            exit 0
+          fi
+
+          echo "Retry after 30s..."
+          sleep 30
+
+          run_once
 
       - name: Upload artifact (ranking csv)
         uses: actions/upload-artifact@v4
