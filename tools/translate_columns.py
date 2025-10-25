@@ -1,17 +1,23 @@
-# tools/translate_columns.py
 from __future__ import annotations
 import os, json, time, re
 from pathlib import Path
 import pandas as pd
 from openai import OpenAI
 
+# 入出力
 SRC = Path(os.environ.get("CSV_IN",  "output/autohome/7578/config_7578.csv"))
 DST = Path(os.environ.get("CSV_OUT", "output/autohome/7578/config_7578_ja.csv"))
+
+# モデル・キー
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 API_KEY = os.environ.get("OPENAI_API_KEY")
-TRANSLATE_VALUES = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
 
-# 為替（CNY→JPY）。例として21.0。必要に応じて Actions の env で上書きしてください。
+# 値セルの翻訳有無
+TRANSLATE_VALUES = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
+# 列ヘッダ（グレード名など）の翻訳有無（デフォルト有効）
+TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
+
+# 為替（CNY→JPY）。必要に応じて Actions の env で上書き
 EXRATE_CNY_TO_JPY = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
 
 BATCH_SIZE = 60
@@ -46,15 +52,16 @@ BRAND_MAP = {
 
 # 最優先の固定訳（上書き）
 FIX_JA_ITEMS = {
-    "厂商指导价": "メーカー希望小売価格（元）",
-    "经销商参考价": "ディーラー販売価格（元）",
-    "经销商报价": "ディーラー販売価格（元）",
+    # 「（元）」→「（中国元）」に統一
+    "厂商指导价": "メーカー希望小売価格（中国元）",
+    "经销商参考价": "ディーラー販売価格（中国元）",
+    "经销商报价": "ディーラー販売価格（中国元）",
     "被动安全": "衝突安全",
 }
 FIX_JA_SECTIONS = {"被动安全": "衝突安全"}
 
 PRICE_ITEM_CN = {"厂商指导价", "经销商参考价", "经销商报价"}
-PRICE_ITEM_JA = {"メーカー希望小売価格（元）", "ディーラー販売価格（元）"}
+PRICE_ITEM_JA = {"メーカー希望小売価格（中国元）", "ディーラー販売価格（中国元）"}
 
 # 価格併記
 RE_WAN  = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
@@ -98,7 +105,6 @@ def chunked(xs, n):
 
 def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
     """常に dict を返す。JSON崩れ時にフォールバック。"""
-    # 1) 期待通りの JSON
     try:
         data = json.loads(content)
         if isinstance(data, dict) and "translations" in data:
@@ -112,7 +118,6 @@ def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
                 return m
     except Exception:
         pass
-    # 2) コードブロック内のJSONを拾う
     mjson = re.search(r"\{[\s\S]*\}", content)
     if mjson:
         try:
@@ -128,7 +133,6 @@ def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
                     return m
         except Exception:
             pass
-    # 3) タブ区切り "cn\tja" の列を拾う
     m = {}
     for line in content.splitlines():
         if "\t" in line:
@@ -136,7 +140,6 @@ def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
             cn = cn.strip(); ja = ja.strip()
             if cn:
                 m[cn] = ja or cn
-    # 4) 穴埋め（恒等）
     for t in terms:
         m.setdefault(t, t)
     return m
@@ -150,7 +153,7 @@ class Translator:
         self.system = (
             "あなたは自動車仕様表の専門翻訳者です。"
             "入力は中国語の『セクション名/項目名/モデル名/セル値』の配列です。"
-            "自然で簡潔な日本語へ翻訳してください。数値・単位は保持。"
+            "自然で簡潔な日本語へ翻訳してください。数値・年式・排量・AT/MT等の記号は保持。"
             "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
         )
 
@@ -179,7 +182,7 @@ class Translator:
                     part = self.translate_batch(chunk)
                     out.update(part)
                     break
-                except Exception as e:
+                except Exception:
                     if attempt == RETRIES:
                         for t in chunk:
                             out.setdefault(t, t)
@@ -195,8 +198,11 @@ def main():
     # ノイズ除去（原文からUI残滓を除く）
     df = df.map(clean_any_noise)
 
-    # 列ヘッダ（モデル名など）にブランド辞書適用（BYD固定）
-    df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
+    # 列ヘッダ（ブランド正規化：BYD固定）
+    new_cols = []
+    for c in df.columns:
+        new_cols.append(BRAND_MAP.get(c, c))
+    df.columns = new_cols
 
     # —— 縦列（セクション/項目）の翻訳 —— #
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("").tolist() if str(x).strip()])
@@ -214,22 +220,38 @@ def main():
     out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
     out.insert(3, "項目_ja",     out["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
 
-    # 列ヘッダ（モデル名）も LLM で翻訳したい場合はここで適用（今回は余計な変更回避のため未変更）
+    # —— 列ヘッダ（グレード名など）の翻訳（任意） —— #
+    if TRANSLATE_COLNAMES:
+        orig_cols = list(out.columns)
+        fixed_cols = orig_cols[:4]
+        grade_cols = orig_cols[4:]
+
+        # 既知ブランド名は先に正規化（例：比亚迪→BYD）
+        grade_cols_norm = [BRAND_MAP.get(c, c) for c in grade_cols]
+
+        # LLMで翻訳。安全のため重複削除→マップ→元順序に復元
+        uniq_grades = uniq([str(c).strip() for c in grade_cols_norm])
+        grade_map = tr.translate_unique(uniq_grades)
+
+        # 年式/排量/AT等の英数・記号はそのまま残るよう、空訳は原文にフォールバック
+        translated_grades = [grade_map.get(g, g) or g for g in grade_cols_norm]
+        out.columns = fixed_cols + translated_grades
 
     # —— 価格セル：ノイズ除去 → CNY→JPY 併記 —— #
     is_price_row = out["項目"].isin(list(PRICE_ITEM_CN)) | out["項目_ja"].isin(list(PRICE_ITEM_JA))
     for col in out.columns[4:]:
-        out.loc[is_price_row, col] = out.loc[is_price_row, col].map(lambda s: append_jpy(clean_price_cell(s), EXRATE_CNY_TO_JPY))
+        out.loc[is_price_row, col] = out.loc[is_price_row, col].map(
+            lambda s: append_jpy(clean_price_cell(s), EXRATE_CNY_TO_JPY)
+        )
 
     # —— 値セルの翻訳（元の仕様どおり有効化されていれば実行） —— #
     if TRANSLATE_VALUES:
-        # 翻訳対象（記号・純数値のみは除外）
         values = []
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         for col in out.columns[4:]:
             for v in out[col].astype(str).tolist():
                 vv = v.strip()
-                if vv in {"", "●", "○", "–", "-", "—"}: 
+                if vv in {"", "●", "○", "–", "-", "—"}:
                     continue
                 if numeric_like.fullmatch(vv):
                     continue
@@ -239,7 +261,9 @@ def main():
 
         non_price_mask = ~is_price_row
         for col in out.columns[4:]:
-            out.loc[non_price_mask, col] = out.loc[non_price_mask, col].map(lambda s: val_map.get(str(s).strip(), str(s).strip()))
+            out.loc[non_price_mask, col] = out.loc[non_price_mask, col].map(
+                lambda s: val_map.get(str(s).strip(), str(s).strip())
+            )
 
     DST.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(DST, index=False, encoding="utf-8-sig")
