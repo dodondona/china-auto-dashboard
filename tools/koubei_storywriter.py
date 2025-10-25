@@ -1,153 +1,139 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Autohome 口碑スクレイピング（Playwright, API不要）
-出力:
-  autohome_reviews_<ID>.csv
-  autohome_reviews_<ID>_summary.txt
-
-使い方:
-  python tools/koubei_summary_playwright.py 7806 5
+CSV → ストーリー要約（自然文・オフライン）
+・OpenAI/外部API 依存なし
+・既存の“良かった”出力の調子を維持
 """
-import sys, os, re, time, csv
+
+import os
+import re
 import argparse
-from typing import List, Dict, Any
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
 import pandas as pd
 
-BASE1 = "https://k.autohome.com.cn/{vid}#pvareaid=3454440"              # 1ページ目
-BASEX = "https://k.autohome.com.cn/{vid}/index_{p}.html?#listcontainer" # 2ページ目以降
+def detect_csv(vehicle_id: str):
+    cand = [
+        f"autohome_reviews_{vehicle_id}.csv",
+        f"output/autohome/{vehicle_id}/autohome_reviews_{vehicle_id}.csv",
+    ]
+    for p in cand:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"CSV not found for vehicle_id={vehicle_id}")
 
-def build_urls(vid: str, pages: int) -> List[str]:
-    urls = []
-    for p in range(1, pages+1):
-        if p == 1:
-            urls.append(BASE1.format(vid=vid))
-        else:
-            urls.append(BASEX.format(vid=vid, p=p))
-    return urls
+def detect_cols(df: pd.DataFrame):
+    if {"pros_ja","cons_ja"}.issubset(df.columns): return "pros_ja","cons_ja","ja"
+    if {"pros_zh","cons_zh"}.issubset(df.columns): return "pros_zh","cons_zh","zh"
+    if {"pros","cons"}.issubset(df.columns):
+        text = " ".join(df["pros"].dropna().astype(str).head(30).tolist())
+        lang = "ja" if re.search(r"[ぁ-ゟ゠-ヿ]", text) else "zh"
+        return "pros","cons",lang
+    # なければ本文 text から推定（zh とみなす）
+    if "text" in df.columns:
+        return None,None,"zh"
+    return None,None,"zh"
 
-def fetch_html(urls: List[str], timeout_ms=30000) -> List[str]:
-    htmls = []
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context()
-        for u in urls:
-            page = ctx.new_page()
-            page.goto(u, timeout=timeout_ms, wait_until="load")
-            # スクロールで lazy 部分を読み込み
-            for _ in range(3):
-                page.mouse.wheel(0, 2000)
-                time.sleep(0.6)
-            htmls.append(page.content())
-            page.close()
-        ctx.close()
-        browser.close()
-    return htmls
+def split_terms(series: pd.Series):
+    if series is None:
+        return pd.Series(dtype=str)
+    s = series.dropna().astype(str).str.split(" / ").explode().str.strip()
+    s = s[s!=""]
+    return s
 
-def parse_reviews(html: str) -> List[Dict[str, Any]]:
-    """
-    Autohomeの口碑は構造が頻繁に変わるため、堅めの抽出:
-    - レビューアイテムを包含する大きめのカードdivを広めに探索
-    - タイトル/本文/優点/缺点/评分 等のキーワードで抽出
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    cards = []
-    # よくあるリスト領域: idやclassに listcontainer / koubei / mouth などが含まれる
-    candidates = soup.select('div[id*="list"], div[class*="koubei"], div[class*="mouth"], ul[class*="list"]')
-    if not candidates:
-        candidates = [soup]  # 最終保険: 全体から拾う
-    for root in candidates:
-        # 1レビューっぽい塊（タイトル+本文）を推定
-        items = root.find_all(["div","li","article","section"], recursive=True)
-        for it in items:
-            txt = it.get_text(" ", strip=True)
-            if not txt or len(txt) < 60:  # 短すぎる要素は除外
-                continue
-            # 口コミの特徴キーワードでフィルタ
-            if not re.search(r"(优点|優点|缺点|缺陷|不足|评价|口碑|点评|试驾|试乘|试用|体验|续航|静音|噪音|加速|刹车|空间|内饰|外观|配置)", txt):
-                continue
-            # タイトル候補
-            title = ""
-            h = it.find(["h1","h2","h3","h4"])
-            if h and h.get_text(strip=True):
-                title = h.get_text(strip=True)
-            # 優点/缺点 部分
-            pros_zh, cons_zh = "", ""
-            pros_m = re.search(r"(优点|優点)[:：]\s*(.+?)($|缺点|不足|—|-)", txt)
-            if pros_m:
-                pros_zh = pros_m.group(2).strip()
-            cons_m = re.search(r"(缺点|不足)[:：]\s*(.+?)($|优点|優点|—|-)", txt)
-            if cons_m:
-                cons_zh = cons_m.group(2).strip()
-            # 本文（雑に）
-            body = txt
-            # スコア（あれば）
-            score = None
-            s_m = re.search(r"(\d\.\d|\d)分", txt)
-            if s_m:
-                try:
-                    score = float(s_m.group(1))
-                except:
-                    score = None
-            # 件の信頼性: pros/consどちらか＋本文の長さ
-            if (pros_zh or cons_zh or (score is not None)) and len(body) >= 80:
-                cards.append({
-                    "title_zh": title,
-                    "pros_zh": pros_zh,
-                    "cons_zh": cons_zh,
-                    "body_zh": body,
-                    "score": score
-                })
-    return cards
+def top_terms(series: pd.Series, k=5):
+    s = split_terms(series)
+    if s.empty:
+        return []
+    vc = s.value_counts().head(k)
+    return list(vc.index)
 
-def summarize_counts(rows: List[Dict[str, Any]]) -> str:
-    df = pd.DataFrame(rows)
-    total = len(df)
+def quick_sentiment_breakdown(df: pd.DataFrame):
+    if "sentiment" not in df.columns:
+        return 0,0,0,len(df)
+    s = df["sentiment"].astype(str).str.lower()
+    pos = int((s=="positive").sum())
+    mix = int((s=="mixed").sum())
+    neg = int((s=="negative").sum())
+    return pos, mix, neg, len(df)
+
+def ratio(n, total):
+    return 0.0 if total<=0 else round(n/total*100,1)
+
+def build_section(title, lines):
+    out = [f"### {title}"]
+    for ln in lines:
+        if ln.strip():
+            out.append(ln.strip())
+    return "\n".join(out) + "\n\n"
+
+def generate_story(df: pd.DataFrame, vid: str):
+    pros_col, cons_col, lang = detect_cols(df)
+    pros_terms = top_terms(df[pros_col]) if pros_col else []
+    cons_terms = top_terms(df[cons_col]) if cons_col else []
+
+    pos, mix, neg, total = quick_sentiment_breakdown(df)
+
+    # 全体サマリー
     if total == 0:
-        return "レビューが取得できませんでした。"
-    # 簡易“頻出語”集計（pros/consを term 分解）
-    def split_terms(series):
-        s = series.fillna("").astype(str).str.split(r"[，,。；;、/｜|]+").explode().str.strip()
-        s = s[s != ""]
-        return s
-    pros_top = split_terms(df["pros_zh"]).value_counts().head(10) if "pros_zh" in df else pd.Series(dtype=int)
-    cons_top = split_terms(df["cons_zh"]).value_counts().head(10) if "cons_zh" in df else pd.Series(dtype=int)
-    lines = [f"件数: {total}"]
-    if not pros_top.empty:
-        lines.append("优点TOP: " + " / ".join([f"{k}({v})" for k,v in pros_top.items()]))
-    if not cons_top.empty:
-        lines.append("缺点TOP: " + " / ".join([f"{k}({v})" for k,v in cons_top.items()]))
-    return "\n".join(lines)
+        overall = "取得されたレビューが少なく、全体傾向の判断は困難です。"
+    else:
+        # 最多カテゴリで傾向をひとこと
+        order = sorted([("positive",pos),("mixed",mix),("negative",neg)], key=lambda x: x[1], reverse=True)
+        top_tag = order[0][0]
+        if top_tag == "positive":
+            overall = f"全体として好意的な評価が相対的に多く（Positive {ratio(pos,total)}%）、日常的な使いやすさや価格対効果に満足する声が目立ちます。"
+        elif top_tag == "mixed":
+            overall = f"全体として評価はやや分かれ（Mixed {ratio(mix,total)}%）、良い点と改善希望が併存しています。"
+        else:
+            overall = f"全体として否定的な評価が相対的に多く（Negative {ratio(neg,total)}%）、静粛性や装備面での改善要望が見られます。"
+
+    # ポジティブ側
+    if pros_terms:
+        if len(pros_terms) == 1:
+            pros_text = f"ポジティブ面では、{pros_terms[0]}への評価が中心です。日常利用での満足度を底上げする要素として挙げられています。"
+        elif len(pros_terms) == 2:
+            pros_text = f"多くのユーザーが{pros_terms[0]}を評価しており、{pros_terms[1]}にも満足の声が集まっています。使い勝手の良さが総合的な評価につながっている印象です。"
+        else:
+            pros_text = f"多くのユーザーは{pros_terms[0]}を高く評価し、{pros_terms[1]}や{pros_terms[2]}も好意的に受け止めています。価格とのバランスに納得感があり、日常シーンでの使い心地が支持されています。"
+    else:
+        pros_text = "ポジティブ面の頻出要素は明確ではありませんが、一定の満足感はうかがえます。"
+
+    # ネガティブ側
+    if cons_terms:
+        if len(cons_terms) == 1:
+            cons_text = f"ネガティブ面では、{cons_terms[0]}が主な懸念点です。用途や条件によって体感差が出るため、事前確認が推奨されます。"
+        elif len(cons_terms) == 2:
+            cons_text = f"一方で、{cons_terms[0]}への不満が挙がり、{cons_terms[1]}も改善要望として見られます。長距離や季節による影響を考慮したうえでの判断が無難です。"
+        else:
+            cons_text = f"一方で、{cons_terms[0]}に対する不満が挙がり、{cons_terms[1]}や{cons_terms[2]}も課題として指摘されています。致命的というより“惜しい”というトーンが多く、試乗や仕様確認で納得感を得るのが安心です。"
+    else:
+        cons_text = "ネガティブ面で目立つ指摘は限定的です。"
+
+    story = []
+    story.append(f"【車両ID: {vid}】口コミストーリー要約\n")
+    story.append(build_section("全体サマリー", [overall]))
+    story.append(build_section("ポジティブな評価", [pros_text]))
+    story.append(build_section("ネガティブな評価", [cons_text]))
+    story.append("※ 本要約は取得した口コミの頻出語・記述内容に基づいて自動生成しています。")
+    return "\n".join(story)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("vehicle_id")
-    ap.add_argument("pages", nargs="?", default="5")
+    ap.add_argument("vehicle_id", help="Autohome vehicle id")
     args = ap.parse_args()
 
-    vid = str(args.vehicle_id).strip()
-    pages = int(args.pages)
+    csv_path = detect_csv(args.vehicle_id)
+    vid_match = re.search(r"autohome_reviews_(\d+)\.csv$", os.path.basename(csv_path))
+    vid = vid_match.group(1) if vid_match else args.vehicle_id
 
-    urls = build_urls(vid, pages)
-    htmls = fetch_html(urls)
-    all_rows: List[Dict[str, Any]] = []
-    for h in htmls:
-        rows = parse_reviews(h)
-        all_rows.extend(rows)
+    df = pd.read_csv(csv_path)
+    story = generate_story(df, vid)
 
-    # CSV
-    out_csv = f"autohome_reviews_{vid}.csv"
-    pd.DataFrame(all_rows).to_csv(out_csv, index=False, encoding="utf-8-sig")
-
-    # Summary TXT
-    out_txt = f"autohome_reviews_{vid}_summary.txt"
+    out_txt = f"autohome_reviews_{vid}_story.txt"
     with open(out_txt, "w", encoding="utf-8") as f:
-        f.write(summarize_counts(all_rows))
+        f.write(story)
 
-    print(f"✅ generated: {out_csv}")
-    print(f"✅ generated: {out_txt}")
+    print(f"✅ {out_txt} を生成（OpenAI 不使用）")
 
 if __name__ == "__main__":
     main()
