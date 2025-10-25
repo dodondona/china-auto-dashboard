@@ -51,23 +51,19 @@ def choose_representatives(df, col, terms, max_each=2):
     reps = []
     used_idx = set()
     col = df[col].fillna("").astype(str)
-    # 原文（ソース）を作る：pros/cons どちらもあれば併記
+
     def row_source(i):
         parts = []
-        if "pros_ja" in df.columns and df.loc[i, "pros_ja"]:
-            parts.append(df.loc[i, "pros_ja"])
-        elif "pros_zh" in df.columns and df.loc[i, "pros_zh"]:
-            parts.append(df.loc[i, "pros_zh"])
-        if "cons_ja" in df.columns and df.loc[i, "cons_ja"]:
-            parts.append(df.loc[i, "cons_ja"])
-        elif "cons_zh" in df.columns and df.loc[i, "cons_zh"]:
-            parts.append(df.loc[i, "cons_zh"])
-        # 片方しかない場合もOK
-        return " / ".join(p for p in parts if p).strip()
+        # 各候補列を確認
+        for c in ["pros_ja","pros_zh","pros","cons_ja","cons_zh","cons"]:
+            if c in df.columns:
+                val = df.loc[i, c]
+                if isinstance(val, (str, int)) or not pd.isna(val):
+                    parts.append(str(val))
+        return " / ".join(p.strip() for p in parts if p).strip()
 
     for term in terms:
         picks = []
-        # term を含む行を走査（上からでよい：多様性確保でランダムサンプル）
         cand_idx = [i for i, v in col.items() if term in v]
         random.shuffle(cand_idx)
         for i in cand_idx:
@@ -87,10 +83,8 @@ def detect_cols(df):
     if {"pros_zh","cons_zh"}.issubset(df.columns):
         return "zh","pros_zh","cons_zh"
     if {"pros","cons"}.issubset(df.columns):
-        # 簡易判定
         text = " ".join(df["pros"].dropna().astype(str).head(40).tolist())
         return ("ja" if re.search(r"[ぁ-ゟ゠-ヿ]", text) else "zh"), "pros","cons"
-    # 何もない場合は空
     return "ja", None, None
 
 def ratio(n, total):
@@ -106,21 +100,14 @@ def get_client_or_none():
         return None
 
 def build_prompt(payload, style):
-    """スタイルは 'executive'（簡潔） / 'friendly'（やわらかめ）など"""
     tone = {
         "executive": "簡潔・客観・要点先出し",
         "friendly": "やわらかい語り口・読みやすさ重視",
         "neutral": "中立で事実に忠実",
     }.get(style, "簡潔・客観・要点先出し")
 
-    # 代表コメントは多すぎると冗長なので、必要最低限だけ提示
-    pros_lines = []
-    for term, cnt, pct in payload["pros_top"]:
-        pros_lines.append(f"- {term}｜{cnt}件（{pct}%）")
-    cons_lines = []
-    for term, cnt, pct in payload["cons_top"]:
-        cons_lines.append(f"- {term}｜{cnt}件（{pct}%）")
-
+    pros_lines = [f"- {term}｜{cnt}件（{pct}%）" for term, cnt, pct in payload["pros_top"]]
+    cons_lines = [f"- {term}｜{cnt}件（{pct}%）" for term, cnt, pct in payload["cons_top"]]
     rep_lines = []
     for t, quotes in payload["representatives"]:
         for q in quotes:
@@ -153,7 +140,7 @@ def build_prompt(payload, style):
         "4) 向いているユーザー像と、購入時の注意点を1段落\n"
         "5) 最後に但し書き（サンプル範囲・時期により変動）\n"
         "6) すべて日本語。適度に接続詞を入れて自然に。\n"
-        "7) 代表コメントは必要に応じて“例：〜”の形で軽く引用可（過度に多くは引用しない）。\n\n"
+        "7) 代表コメントは必要に応じて“例：〜”の形で軽く引用可。\n\n"
         f"メタ情報:\n{meta}\n"
         f"ポジティブ上位:\n{pros_block}\n\n"
         f"ネガティブ上位:\n{cons_block}\n\n"
@@ -170,10 +157,9 @@ def ask_model(client, system, user):
     )
     return comp.choices[0].message.content.strip()
 
-# ---------- フォールバック（APIなし時） ----------
+# ---------- フォールバック ----------
 def rule_based_narrative(payload):
     pos_pct = payload["pos_pct"]; mix_pct = payload["mix_pct"]; neg_pct = payload["neg_pct"]
-    # 導入
     if payload["pos"] >= max(payload["mix"], payload["neg"]):
         intro = f"全体としては好意的な声が比較的多く（Positive {pos_pct}%）、続いてMixed、Negativeが続く傾向でした。"
     elif payload["neg"] >= max(payload["mix"], payload["pos"]):
@@ -223,34 +209,32 @@ def rule_based_narrative(payload):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("vehicle_id", nargs="?", help="Autohome vehicle id（例: 5714）")
-    ap.add_argument("--pros", type=int, default=5, help="ポジティブ上位の件数")
-    ap.add_argument("--cons", type=int, default=4, help="ネガティブ上位の件数")
-    ap.add_argument("--quotes", type=int, default=2, help="代表コメントをtermごとに何件添えるか（OpenAIに渡す最大数）")
-    ap.add_argument("--style", default="executive", choices=["executive","friendly","neutral"], help="文体")
+    ap.add_argument("--pros", type=int, default=5)
+    ap.add_argument("--cons", type=int, default=4)
+    ap.add_argument("--quotes", type=int, default=2)
+    ap.add_argument("--style", default="executive", choices=["executive","friendly","neutral"])
     args = ap.parse_args()
 
     csv_path = detect_csv(args.vehicle_id)
     df = pd.read_csv(csv_path)
     lang, pros_col, cons_col = detect_cols(df)
 
-    # センチメント
     pos, mix, neg, total = sentiment_counts(df)
-    pos_pct, mix_pct, neg_pct = (round(pos/total*100,1) if total else 0.0,
-                                 round(mix/total*100,1) if total else 0.0,
-                                 round(neg/total*100,1) if total else 0.0)
+    pos_pct, mix_pct, neg_pct = (
+        round(pos/total*100,1) if total else 0.0,
+        round(mix/total*100,1) if total else 0.0,
+        round(neg/total*100,1) if total else 0.0,
+    )
 
-    # TOP抽出
     pros_top_c = top_k(df[pros_col], args.pros) if pros_col else Counter()
     cons_top_c = top_k(df[cons_col], args.cons) if cons_col else Counter()
 
-    # 代表コメント（上位語に紐づく原文断片）
     reps = []
     if pros_col:
         reps += choose_representatives(df, pros_col, list(pros_top_c.keys()), max_each=args.quotes)
     if cons_col:
         reps += choose_representatives(df, cons_col, list(cons_top_c.keys()), max_each=args.quotes)
 
-    # ペイロード
     vid_match = re.search(r"autohome_reviews_(\d+)\.csv$", os.path.basename(csv_path))
     vid = vid_match.group(1) if vid_match else (args.vehicle_id or "unknown")
     payload = {
@@ -259,10 +243,9 @@ def main():
         "pos_pct": pos_pct, "mix_pct": mix_pct, "neg_pct": neg_pct,
         "pros_top": [(t, c, round(c/total*100,1) if total else 0.0) for t,c in pros_top_c.items()],
         "cons_top": [(t, c, round(c/total*100,1) if total else 0.0) for t,c in cons_top_c.items()],
-        "representatives": reps[:8],  # 渡しすぎると冗長
+        "representatives": reps[:8],
     }
 
-    # 生成
     client = get_client_or_none()
     if client:
         system, user = build_prompt(payload, args.style)
