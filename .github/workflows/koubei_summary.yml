@@ -1,0 +1,41 @@
+name: koubei_summary
+
+on:
+  workflow_dispatch:
+    inputs:
+      vehicle_id:
+        description: "Autohome vehicle ID (例: 5714)"
+        required: true
+  schedule:
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
+
+jobs:
+  summarize_reviews:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openai beautifulsoup4 requests pandas
+
+      - name: Run summary script
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/koubei_summary.py ${{ github.event.inputs.vehicle_id || '5714' }}
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_summary
+          path: |
+            autohome_reviews_*.csv
+            autohome_reviews_*.txt
