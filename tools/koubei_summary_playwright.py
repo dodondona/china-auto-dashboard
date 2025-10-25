@@ -1,339 +1,153 @@
 #!/usr/bin/env python3
-import sys, os, re, time, json
-import pandas as pd
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
-from openai import OpenAI
-
+# -*- coding: utf-8 -*-
 """
-使い方:
-  export OPENAI_API_KEY=sk-xxxx
-  python tools/koubei_summary_playwright.py 7806 5
-
+Autohome 口碑スクレイピング（Playwright, API不要）
 出力:
-  リポジトリ直下に autohome_reviews_<ID>.csv と _summary.txt
-  主要列: pros_ja / cons_ja / sentiment
-  デバッグ列: pros_raw / cons_raw
+  autohome_reviews_<ID>.csv
+  autohome_reviews_<ID>_summary.txt
+
+使い方:
+  python tools/koubei_summary_playwright.py 7806 5
 """
+import sys, os, re, time, csv
+import argparse
+from typing import List, Dict, Any
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+import pandas as pd
 
-# -------- 引数 --------
-if len(sys.argv) < 2:
-    print("Usage: python tools/koubei_summary_playwright.py <vehicle_id> [pages]")
-    sys.exit(1)
+BASE1 = "https://k.autohome.com.cn/{vid}#pvareaid=3454440"              # 1ページ目
+BASEX = "https://k.autohome.com.cn/{vid}/index_{p}.html?#listcontainer" # 2ページ目以降
 
-VEHICLE_ID = sys.argv[1].strip()
-PAGES = int(sys.argv[2]) if len(sys.argv) >= 3 and sys.argv[2].strip().isdigit() else 5
+def build_urls(vid: str, pages: int) -> List[str]:
+    urls = []
+    for p in range(1, pages+1):
+        if p == 1:
+            urls.append(BASE1.format(vid=vid))
+        else:
+            urls.append(BASEX.format(vid=vid, p=p))
+    return urls
 
-BASE_URL = f"https://k.autohome.com.cn/{VEHICLE_ID}/index_{{page}}.html?#listcontainer"
-OUTDIR = os.path.join(os.path.dirname(__file__), "..")  # リポジトリ直下
-CSV_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}.csv")
-TXT_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}_summary.txt")
-
-# -------- ユーティリティ --------
-def looks_japanese(s: str) -> bool:
-    """ひらがな/カタカナを含むなら日本語とみなす（中国語の漢字は判別しにくいため）"""
-    if not s:
-        return False
-    return bool(re.search(r"[ぁ-ゟ゠-ヿ]", s))  # ひらがな/カタカナ
-
-def normalize_list(x):
-    if not x:
-        return []
-    if isinstance(x, list):
-        return [str(i).strip() for i in x if str(i).strip()]
-    return [str(x).strip()]
-
-# -------- Playwright: レンダ後HTML取得 --------
-def fetch_rendered_html(page_index: int) -> str:
-    url = BASE_URL.format(page=page_index)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+def fetch_html(urls: List[str], timeout_ms=30000) -> List[str]:
+    htmls = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
         ctx = browser.new_context()
-        pg = ctx.new_page()
-        pg.set_default_timeout(60000)
-        pg.goto(url, wait_until="domcontentloaded")
-
-        # 遅延読み込み対策: 下へ数回スクロール
-        for _ in range(8):
-            pg.mouse.wheel(0, 2200)
-            pg.wait_for_timeout(400)
-
-        # 代表セレクタ登場を軽く待つ（失敗しても続行）
-        selectors = [
-            ".mouthcon", ".mouthcon-cont", ".text-con",
-            ".comment-content", ".koubei-item", ".koubei-content",
-            ".review-item", ".review-content",
-            '[data-type="koubei"]', '[data-mark*="koubei"]'
-        ]
-        try:
-            pg.wait_for_selector(",".join(selectors), timeout=3000)
-        except Exception:
-            pass
-
-        html = pg.content()
+        for u in urls:
+            page = ctx.new_page()
+            page.goto(u, timeout=timeout_ms, wait_until="load")
+            # スクロールで lazy 部分を読み込み
+            for _ in range(3):
+                page.mouse.wheel(0, 2000)
+                time.sleep(0.6)
+            htmls.append(page.content())
+            page.close()
+        ctx.close()
         browser.close()
-        return html
+    return htmls
 
-# -------- レビュー抽出（総当り + 近傍） --------
-def parse_reviews(html: str):
+def parse_reviews(html: str) -> List[Dict[str, Any]]:
+    """
+    Autohomeの口碑は構造が頻繁に変わるため、堅めの抽出:
+    - レビューアイテムを包含する大きめのカードdivを広めに探索
+    - タイトル/本文/優点/缺点/评分 等のキーワードで抽出
+    """
     soup = BeautifulSoup(html, "html.parser")
-    selectors = [
-        ".mouthcon", ".mouthcon-cont", ".text-con",
-        ".comment-content", ".koubei-item", ".koubei-content",
-        ".review-item", ".review-content"
-    ]
-    reviews = []
-
-    # 1) 既知クラス候補を総当り
-    for sel in selectors:
-        for blk in soup.select(sel):
-            txt = " ".join(blk.get_text(" ", strip=True).split())
-            if len(txt) >= 50:
-                reviews.append(txt)
-
-    # 2) フォールバック: キーワード近傍（优点/缺点/最满意/最不满意 など）
-    if not reviews:
-        keywords = ["优点", "缺点", "最满意", "最不满意", "不足", "槽点", "评价", "口碑"]
-        for kw in keywords:
-            for hit in soup.find_all(string=re.compile(kw)):
-                blk = hit.find_parent()
-                if blk:
-                    txt = " ".join(blk.get_text(" ", strip=True).split())
-                    if len(txt) >= 50:
-                        reviews.append(txt)
-
-    # 3) 重複除去（先頭120文字でキー化）
-    uniq, seen = [], set()
-    for t in reviews:
-        k = t[:120]
-        if k not in seen:
-            seen.add(k)
-            uniq.append(t)
-    return uniq
-
-# -------- OpenAIクライアント --------
-def get_client():
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    return OpenAI(api_key=api_key)
-
-# -------- JSON抽出のロバスト化 --------
-def extract_json_loose(s: str):
-    if not s:
-        return None
-    s = re.sub(r"```json\s*|\s*```", "", s, flags=re.I).strip()
-    m = re.search(r"(\[.*\]|\{.*\})", s, re.S)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except Exception:
-        return None
-
-# -------- 要約（日本語JSONを強制） --------
-def summarize_batch(texts, client: OpenAI):
-    sys_prompt = (
-        "あなたはレビューテキストのアナリストです。入力は中国語の車ユーザー口コミです。"
-        "各レビューから『良い点(Pros)』『悪い点(Cons)』を**日本語**で短く抽出し、"
-        "overall感情を positive/mixed/negative のいずれかで判断してください。"
-        "出力は**必ず JSON 配列**（各要素: {\"pros\":[..],\"cons\":[..],\"sentiment\":\"...\"}）。"
-        "前置き・後書き・説明文は一切出力しない。値は短い日本語フレーズにする。"
-    )
-    user_text = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
-
-    content = None
-    try:
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.0,
-        )
-        content = comp.choices[0].message.content
-        data = extract_json_loose(content)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
-            return data["results"]
-    except Exception:
-        pass
-
-    # フォールバック（JSONモード非対応/一時障害）
-    try:
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.0,
-        )
-        content = comp.choices[0].message.content
-        data = extract_json_loose(content)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
-            return data["results"]
-    except Exception:
-        pass
-
-    if content:
-        print("LLM raw (head):", content.replace("\n", " ")[:200])
-    return []
-
-# -------- 翻訳（日本語でない場合の最終保険） --------
-def translate_list_to_ja(texts, client: OpenAI):
-    texts = [t for t in texts if t]
-    if not texts:
-        return []
-    # まとめて翻訳（箇条書きで返す）
-    sys_prompt = (
-        "あなたはプロの翻訳者です。与えられた短いフレーズ群を**自然な日本語**に翻訳し、"
-        "JSON配列（文字列の配列のみ）で返してください。説明や前置きは不要。"
-    )
-    user_text = "\n".join(f"- {t}" for t in texts)
-    try:
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.0,
-        )
-        data = extract_json_loose(comp.choices[0].message.content)
-        if isinstance(data, list):
-            return [str(x).strip() for x in data]
-    except Exception:
-        pass
-
-    # ダメでも最低限そのまま返す
-    return texts
-
-# -------- ヒューリスティック（LLM空返し時） --------
-def heuristic_extract(review_text: str):
-    pros_keys = ["最满意", "优点", "优點"]
-    cons_keys = ["最不满意", "缺点", "缺點", "不足", "槽点"]
-    pros = []
-    cons = []
-    for k in pros_keys:
-        m = re.search(k + r"[:： ]?(.*?)(?=(最不满意|缺点|不足|槽点|$))", review_text)
-        if m:
-            pros.append(m.group(1).strip())
-            break
-    for k in cons_keys:
-        m = re.search(k + r"[:： ]?(.*?)(?=$)", review_text)
-        if m:
-            cons.append(m.group(1).strip())
-            break
-    return {"pros": normalize_list(pros), "cons": normalize_list(cons), "sentiment": "mixed"}
-
-# -------- メイン --------
-def main():
-    print(f"Vehicle: {VEHICLE_ID}  Pages: {PAGES}")
-    all_reviews = []
-    for p in range(1, PAGES + 1):
-        try:
-            html = fetch_rendered_html(p)
-            revs = parse_reviews(html)
-            print(f"✅ Page {p}: {len(revs)} reviews")
-            all_reviews.extend(revs)
-        except Exception as e:
-            print(f"❌ Page {p} error: {e}")
-
-    if not all_reviews:
-        print("No reviews found.")
-        pd.DataFrame(columns=["pros_raw","cons_raw","pros_ja","cons_ja","sentiment"]).to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-        with open(TXT_PATH, "w", encoding="utf-8") as f:
-            f.write(f"【車両ID】{VEHICLE_ID}\nレビューが取得できませんでした。\n")
-        print(f"✅ 出力完了（空）: {CSV_PATH}, {TXT_PATH}")
-        return
-
-    client = get_client()
-
-    # OpenAIへは8件ずつバッチ投入
-    rows = []
-    chunk = 8
-    for i in range(0, len(all_reviews), chunk):
-        batch = all_reviews[i:i+chunk]
-        results = summarize_batch(batch, client)
-
-        # LLMが空返しなら、ヒューリスティックで埋める
-        if not results:
-            print("batch returned empty; use heuristic + translate")
-            for t in batch:
-                h = heuristic_extract(t)
-                pros_raw = normalize_list(h.get("pros", []))
-                cons_raw = normalize_list(h.get("cons", []))
-
-                # 翻訳（日本語っぽくなければ翻訳）
-                pros_ja = pros_raw
-                cons_ja = cons_raw
-                if not any(looks_japanese(x) for x in pros_ja):
-                    pros_ja = translate_list_to_ja(pros_ja, client)
-                if not any(looks_japanese(x) for x in cons_ja):
-                    cons_ja = translate_list_to_ja(cons_ja, client)
-
-                rows.append({
-                    "pros_raw": " / ".join(pros_raw),
-                    "cons_raw": " / ".join(cons_raw),
-                    "pros_ja": " / ".join(pros_ja),
-                    "cons_ja": " / ".join(cons_ja),
-                    "sentiment": h.get("sentiment", "mixed"),
+    cards = []
+    # よくあるリスト領域: idやclassに listcontainer / koubei / mouth などが含まれる
+    candidates = soup.select('div[id*="list"], div[class*="koubei"], div[class*="mouth"], ul[class*="list"]')
+    if not candidates:
+        candidates = [soup]  # 最終保険: 全体から拾う
+    for root in candidates:
+        # 1レビューっぽい塊（タイトル+本文）を推定
+        items = root.find_all(["div","li","article","section"], recursive=True)
+        for it in items:
+            txt = it.get_text(" ", strip=True)
+            if not txt or len(txt) < 60:  # 短すぎる要素は除外
+                continue
+            # 口コミの特徴キーワードでフィルタ
+            if not re.search(r"(优点|優点|缺点|缺陷|不足|评价|口碑|点评|试驾|试乘|试用|体验|续航|静音|噪音|加速|刹车|空间|内饰|外观|配置)", txt):
+                continue
+            # タイトル候補
+            title = ""
+            h = it.find(["h1","h2","h3","h4"])
+            if h and h.get_text(strip=True):
+                title = h.get_text(strip=True)
+            # 優点/缺点 部分
+            pros_zh, cons_zh = "", ""
+            pros_m = re.search(r"(优点|優点)[:：]\s*(.+?)($|缺点|不足|—|-)", txt)
+            if pros_m:
+                pros_zh = pros_m.group(2).strip()
+            cons_m = re.search(r"(缺点|不足)[:：]\s*(.+?)($|优点|優点|—|-)", txt)
+            if cons_m:
+                cons_zh = cons_m.group(2).strip()
+            # 本文（雑に）
+            body = txt
+            # スコア（あれば）
+            score = None
+            s_m = re.search(r"(\d\.\d|\d)分", txt)
+            if s_m:
+                try:
+                    score = float(s_m.group(1))
+                except:
+                    score = None
+            # 件の信頼性: pros/consどちらか＋本文の長さ
+            if (pros_zh or cons_zh or (score is not None)) and len(body) >= 80:
+                cards.append({
+                    "title_zh": title,
+                    "pros_zh": pros_zh,
+                    "cons_zh": cons_zh,
+                    "body_zh": body,
+                    "score": score
                 })
-            continue
+    return cards
 
-        # 正常返答
-        for r in results:
-            pros_raw = normalize_list(r.get("pros", []))
-            cons_raw = normalize_list(r.get("cons", []))
-
-            pros_ja = pros_raw
-            cons_ja = cons_raw
-            if not any(looks_japanese(x) for x in pros_raw):
-                pros_ja = translate_list_to_ja(pros_raw, client)
-            if not any(looks_japanese(x) for x in cons_raw):
-                cons_ja = translate_list_to_ja(cons_raw, client)
-
-            rows.append({
-                "pros_raw": " / ".join(pros_raw),
-                "cons_raw": " / ".join(cons_raw),
-                "pros_ja": " / ".join(pros_ja),
-                "cons_ja": " / ".join(cons_ja),
-                "sentiment": r.get("sentiment", "mixed"),
-            })
-        time.sleep(0.8)
-
-    # DataFrame 化
-    df = pd.DataFrame(rows, columns=["pros_raw","cons_raw","pros_ja","cons_ja","sentiment"])
-    df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-
-    # 集計（日本語列で）
-    def head_counts(series):
-        s = series.dropna().astype(str).str.split(" / ").explode().str.strip()
+def summarize_counts(rows: List[Dict[str, Any]]) -> str:
+    df = pd.DataFrame(rows)
+    total = len(df)
+    if total == 0:
+        return "レビューが取得できませんでした。"
+    # 簡易“頻出語”集計（pros/consを term 分解）
+    def split_terms(series):
+        s = series.fillna("").astype(str).str.split(r"[，,。；;、/｜|]+").explode().str.strip()
         s = s[s != ""]
-        return s.value_counts().head(15)
+        return s
+    pros_top = split_terms(df["pros_zh"]).value_counts().head(10) if "pros_zh" in df else pd.Series(dtype=int)
+    cons_top = split_terms(df["cons_zh"]).value_counts().head(10) if "cons_zh" in df else pd.Series(dtype=int)
+    lines = [f"件数: {total}"]
+    if not pros_top.empty:
+        lines.append("优点TOP: " + " / ".join([f"{k}({v})" for k,v in pros_top.items()]))
+    if not cons_top.empty:
+        lines.append("缺点TOP: " + " / ".join([f"{k}({v})" for k,v in cons_top.items()]))
+    return "\n".join(lines)
 
-    top_pros = head_counts(df["pros_ja"]) if not df.empty else pd.Series(dtype=int)
-    top_cons = head_counts(df["cons_ja"]) if not df.empty else pd.Series(dtype=int)
-    senti = df["sentiment"].value_counts() if "sentiment" in df.columns else pd.Series(dtype=int)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("vehicle_id")
+    ap.add_argument("pages", nargs="?", default="5")
+    args = ap.parse_args()
 
-    with open(TXT_PATH, "w", encoding="utf-8") as f:
-        f.write(f"【車両ID】{VEHICLE_ID}\n")
-        f.write("=== ポジティブTOP（日本語） ===\n")
-        f.write(top_pros.to_string() if not top_pros.empty else "(なし)")
-        f.write("\n\n=== ネガティブTOP（日本語） ===\n")
-        f.write(top_cons.to_string() if not top_cons.empty else "(なし)")
-        f.write("\n\n=== センチメント比 ===\n")
-        f.write(senti.to_string() if not senti.empty else "(なし)")
-        f.write("\n")
+    vid = str(args.vehicle_id).strip()
+    pages = int(args.pages)
 
-    print(f"\n✅ 出力完了: {CSV_PATH}, {TXT_PATH}")
+    urls = build_urls(vid, pages)
+    htmls = fetch_html(urls)
+    all_rows: List[Dict[str, Any]] = []
+    for h in htmls:
+        rows = parse_reviews(h)
+        all_rows.extend(rows)
+
+    # CSV
+    out_csv = f"autohome_reviews_{vid}.csv"
+    pd.DataFrame(all_rows).to_csv(out_csv, index=False, encoding="utf-8-sig")
+
+    # Summary TXT
+    out_txt = f"autohome_reviews_{vid}_summary.txt"
+    with open(out_txt, "w", encoding="utf-8") as f:
+        f.write(summarize_counts(all_rows))
+
+    print(f"✅ generated: {out_csv}")
+    print(f"✅ generated: {out_txt}")
 
 if __name__ == "__main__":
     main()
