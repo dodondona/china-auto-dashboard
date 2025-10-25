@@ -34,46 +34,36 @@ jobs:
           pip install --upgrade beautifulsoup4 requests pandas playwright
           python -m playwright install chromium
 
-      # ===== Guards: APIを絶対使わないための検査 =====
-      - name: Guard: scan repository for OpenAI usage
+      - name: Guard - scan repository for OpenAI usage
         run: |
-          set -e
-          echo "Scanning repo for OpenAI usage..."
-          if grep -RInE "from +openai|import +openai|OpenAI\\(|openai\\." . ; then
-            echo "❌ 'openai' 参照を検出。API未使用運用では禁止です。"
+          echo "Scanning repository for OpenAI usage..."
+          if grep -RInE "from openai|import openai|OpenAI\\(|openai\\." . ; then
+            echo "❌ 'openai' reference detected. This workflow must not call API."
             exit 1
           fi
-          echo "✅ openai参照なし"
+          echo "✅ No OpenAI references detected."
 
-      - name: Guard: verify openai package is NOT installed
+      - name: Guard - verify openai package is NOT installed
         run: |
-          python - << 'PY'
-          import pkgutil, sys
-          found = pkgutil.find_loader("openai")
-          print("openai module present?:", bool(found))
-          sys.exit(1 if found else 0)
-          PY
+          python -c "import pkgutil, sys; found=pkgutil.find_loader('openai'); print('openai module present?:', bool(found)); sys.exit(1 if found else 0)"
 
-      - name: Guard: hard-disable API env
+      - name: Guard - hard-disable API env
         run: |
           echo "OPENAI_API_KEY=" >> $GITHUB_ENV
           echo "OPENAI_API_BASE=" >> $GITHUB_ENV
           echo "OPENAI_ORG=" >> $GITHUB_ENV
           echo "AZURE_OPENAI_API_KEY=" >> $GITHUB_ENV
           echo "AZURE_OPENAI_ENDPOINT=" >> $GITHUB_ENV
-          env | grep -E "OPENAI|AZURE_OPENAI" || true
+          echo "✅ Environment variables for OpenAI disabled."
 
-      # ===== 実処理 =====
       - name: Run summary script (scrape & summarize)
         run: |
-          python tools/koubei_summary_playwright.py \
-            "${{ github.event.inputs.vehicle_id }}" \
-            "${{ github.event.inputs.pages }}"
+          python tools/koubei_summary_playwright.py "${{ github.event.inputs.vehicle_id }}" "${{ github.event.inputs.pages }}"
 
       - name: Assert outputs exist
         run: |
-          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}.csv"
-          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}_summary.txt"
+          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}.csv" || exit 1
+          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}_summary.txt" || exit 1
 
       - name: Build story-style summary (no API)
         run: |
