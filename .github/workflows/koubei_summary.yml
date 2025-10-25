@@ -11,9 +11,11 @@ on:
         required: false
         default: "5"
       mode:
-        description: "ja=日本語JSON構造 / zh=中国語高速（後段の文章生成で使用）"
+        description: "ja=日本語JSON構造 / zh=中国語高速"
         required: false
         default: "ja"
+  schedule:
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
 
 jobs:
   summarize_reviews:
@@ -41,7 +43,7 @@ jobs:
           print("python:", sys.version)
           PY
 
-      # ✅ ここを koubei_summary.py ではなく Playwright 版に
+      # ✅ スクレイピング＋要約（実処理）
       - name: Run summary script (scrape & summarize)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -50,27 +52,34 @@ jobs:
             "${{ github.event.inputs.vehicle_id }}" \
             "${{ github.event.inputs.pages }}"
 
-      # 文章レポ（テンプレ整形）
+      # ① 頻出要素を自然文レポに整形
       - name: Build narrative report
         run: |
           python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
 
-      # ストーリー版（代表コメ活用／API任意）
+      # ② ストーリー版（「良かった」核）
       - name: Build story-style summary
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # なくてもテンプレにフォールバック
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" --pros 5 --cons 4 --quotes 2 --style executive
+          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" \
+            --pros 5 --cons 4 --quotes 2 --style executive
 
-      # 2–3文の超要約（ポジ/ネガ）
+      # ③ 超短文サマリー（2〜3文）
       - name: Build 2-3 sentence brief
         run: |
           python tools/koubei_brief.py "${{ github.event.inputs.vehicle_id }}" --k 3
 
-      # story.txt → CSV 変換
+      # ④ story.txt を構造化（CSV）
       - name: Convert story.txt to CSV
         run: |
           python tools/story_to_csv.py "${{ github.event.inputs.vehicle_id }}"
+
+      # ⑤ story.txt を厚み付きの自然文に補強
+      - name: Enrich story (add depth + quotes)
+        run: |
+          python tools/story_enricher.py "${{ github.event.inputs.vehicle_id }}" \
+            --pos 3 --neg 3 --quotes 2
 
       - name: Upload results
         if: always()
