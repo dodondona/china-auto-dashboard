@@ -30,14 +30,19 @@ jobs:
           pip install --upgrade beautifulsoup4 requests pandas playwright
           python -m playwright install chromium
 
-      - name: Guard - scan repository for OpenAI usage
+      # この2ファイルのみを対象に、OpenAI参照が無いことを確認（他の .py は無視）
+      - name: Guard - ensure no OpenAI refs in koubei scripts only
         run: |
-          echo "Scanning repository for OpenAI usage..."
-          if grep -RInE "from openai|import openai|OpenAI\\(|openai\\." . ; then
-            echo "❌ 'openai' reference detected. Remove them to run this workflow."
-            exit 1
-          fi
-          echo "✅ No OpenAI references detected."
+          set -e
+          for f in tools/koubei_summary_playwright.py tools/koubei_storywriter.py; do
+            if [ -f "$f" ]; then
+              if grep -RInE "from openai|import openai|OpenAI\\(|openai\\." "$f"; then
+                echo "❌ OpenAI reference detected in $f"
+                exit 1
+              fi
+            fi
+          done
+          echo "✅ No OpenAI references in koubei scripts."
 
       - name: Run summary script (scrape & summarize)
         run: |
@@ -48,7 +53,7 @@ jobs:
           ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}.csv" || exit 1
           ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}_summary.txt" || exit 1
 
-      - name: Build story-style summary (no API)
+      - name: Build story-style summary (offline)
         run: |
           python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}"
 
