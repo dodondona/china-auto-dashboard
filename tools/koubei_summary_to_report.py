@@ -14,25 +14,81 @@ import pandas as pd
 
 # ---------- 基本ユーティリティ ----------
 def detect_files(vehicle_id: str | None):
+    """
+    指定の vehicle_id があれば、その ID の CSV/TXT を優先的に探す。
+    なければ最新ペアを自動検出。
+    探索順：
+      1) ./autohome_reviews_{id}.csv / _summary.txt
+      2) ./output/autohome/{id}/autohome_reviews_{id}.csv / _summary.txt
+      3) **/autohome_reviews_{id}.csv / _summary.txt （広域グロブ）
+    """
+    def try_pair(csv_path: str, txt_path: str) -> tuple[str, str] | None:
+        if os.path.exists(csv_path) and os.path.exists(txt_path):
+            return csv_path, txt_path
+        return None
+
     if vehicle_id:
-        csv = f"autohome_reviews_{vehicle_id}.csv"
-        txt = f"autohome_reviews_{vehicle_id}_summary.txt"
-        if not os.path.exists(csv) or not os.path.exists(txt):
-            raise FileNotFoundError(f"必要ファイルが見つかりません: {csv}, {txt}")
-        return csv, txt
+        # 1) 直下
+        c1 = f"autohome_reviews_{vehicle_id}.csv"
+        t1 = f"autohome_reviews_{vehicle_id}_summary.txt"
+        pair = try_pair(c1, t1)
+        if pair: return pair
+
+        # 2) output/autohome/{id}/
+        c2 = f"output/autohome/{vehicle_id}/autohome_reviews_{vehicle_id}.csv"
+        t2 = f"output/autohome/{vehicle_id}/autohome_reviews_{vehicle_id}_summary.txt"
+        pair = try_pair(c2, t2)
+        if pair: return pair
+
+        # 3) 広域グロブ（最後の保険）
+        cands_csv = sorted(glob.glob(f"**/autohome_reviews_{vehicle_id}.csv", recursive=True), key=os.path.getmtime, reverse=True)
+        cands_txt = sorted(glob.glob(f"**/autohome_reviews_{vehicle_id}_summary.txt", recursive=True), key=os.path.getmtime, reverse=True)
+        if cands_csv and cands_txt:
+            # 同一ディレクトリの組を優先
+            for c in cands_csv:
+                base = os.path.dirname(c)
+                t = os.path.join(base, f"autohome_reviews_{vehicle_id}_summary.txt")
+                if os.path.exists(t):
+                    return c, t
+            return cands_csv[0], cands_txt[0]
+
+        tried = [c1, t1, c2, t2, f"**/autohome_reviews_{vehicle_id}.csv", f"**/autohome_reviews_{vehicle_id}_summary.txt"]
+        raise FileNotFoundError(f"必要ファイルが見つかりません: {tried}")
+
+    # vehicle_id 未指定：最新ペア検出
     csvs = sorted(glob.glob("autohome_reviews_*.csv"), key=os.path.getmtime, reverse=True)
     txts = sorted(glob.glob("autohome_reviews_*_summary.txt"), key=os.path.getmtime, reverse=True)
+
+    # 直下に無ければ output/autohome/* も見る
+    if not csvs:
+        csvs = sorted(glob.glob("output/autohome/*/autohome_reviews_*.csv"), key=os.path.getmtime, reverse=True)
+    if not txts:
+        txts = sorted(glob.glob("output/autohome/*/autohome_reviews_*_summary.txt"), key=os.path.getmtime, reverse=True)
+
     if not csvs or not txts:
-        raise FileNotFoundError("入力CSV/TXTが見つかりません。")
+        # 広域
+        csvs = sorted(glob.glob("**/autohome_reviews_*.csv", recursive=True), key=os.path.getmtime, reverse=True)
+        txts = sorted(glob.glob("**/autohome_reviews_*_summary.txt", recursive=True), key=os.path.getmtime, reverse=True)
+        if not csvs or not txts:
+            raise FileNotFoundError("入力CSV/TXTが見つかりません。")
+
     # 同じIDのペアを優先
     for c in csvs:
         m = re.search(r"autohome_reviews_(\d+)\.csv$", c)
         if not m:
             continue
         vid = m.group(1)
+        # 同ディレクトリの txt を最優先
+        base = os.path.dirname(c)
+        t_same_dir = os.path.join(base, f"autohome_reviews_{vid}_summary.txt")
+        if os.path.exists(t_same_dir):
+            return c, t_same_dir
+        # リスト内にあればそれを返す
         t = f"autohome_reviews_{vid}_summary.txt"
         if t in txts or os.path.exists(t):
             return c, t
+
+    # それでもマッチしなければ最上位の候補を返す
     return csvs[0], txts[0]
 
 
