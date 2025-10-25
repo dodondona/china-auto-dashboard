@@ -38,7 +38,7 @@ def fetch_rendered_html(page_index: int) -> str:
 
         # 遅延読み込み対策: 下へ数回スクロール
         for _ in range(8):
-            pg.mouse.wheel(0, 2000)
+            pg.mouse.wheel(0, 2200)
             pg.wait_for_timeout(400)
 
         # 代表セレクタ登場を軽く待つ（失敗しても続行）
@@ -95,10 +95,26 @@ def parse_reviews(html: str):
     return uniq
 
 # -------- OpenAI: JSON構造で要約 --------
+def _extract_json_loose(s: str):
+    """コードフェンスや前後テキストが混じってもJSONを抽出する"""
+    if not s:
+        return None
+    # ```json ... ``` を除去
+    s = re.sub(r"```json\s*|\s*```", "", s, flags=re.I)
+    s = s.strip()
+    # 先頭/末尾にゴミがある場合、最初の [ または { から最後の対応括弧まで抜く
+    m = re.search(r"(\[.*\]|\{.*\})", s, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
+
 def summarize_batch(texts):
     """
-    Chat Completions APIで JSON出力を強制。
-    SDK v1.* で安定。もし model 側で json を返せない場合は try/except で素テキスト→json.loads を試行。
+    Chat Completions(JSONモード)でJSON配列のみを返させる。
+    失敗時は緩い抽出を試み、なお空なら [] を返す。
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -110,10 +126,11 @@ def summarize_batch(texts):
         "各レビューから『良い点(Pros)』『悪い点(Cons)』を日本語で短く抽出し、"
         "overall感情を positive/mixed/negative のいずれかで判断してください。"
         "出力は必ず JSON 配列（各要素: {\"pros\":[..],\"cons\":[..],\"sentiment\":\"...\"}）のみ。"
-        "文章や説明は一切出力しないこと。"
+        "前置き・後書き・説明文は一切出力しないこと。"
     )
     user_text = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
 
+    content = None
     try:
         comp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -125,31 +142,66 @@ def summarize_batch(texts):
             temperature=0.2,
         )
         content = comp.choices[0].message.content
-        data = json.loads(content)
-        # data が {"results":[...]} のときにも対応
-        return data if isinstance(data, list) else data.get("results", [])
+        data = _extract_json_loose(content)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+            return data["results"]
     except Exception as e:
-        # フォールバック（json_object非対応や一時障害時）
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.2,
-        )
-        content = comp.choices[0].message.content
-        # JSON以外が混ざることもあるので抽出を試みる
+        # JSONモード非対応/一時障害時フォールバック
         try:
-            # 最初の { から最後の } までを抜いて JSON として読む
-            m = re.search(r"\{.*\}|\[.*\]", content, re.S)
-            if m:
-                return json.loads(m.group(0))
-        except Exception:
-            pass
-        # どうしてもダメなら空で返す（後段でスキップされる）
-        print("fallback parse failed:", e)
-        return []
+            comp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.2,
+            )
+            content = comp.choices[0].message.content
+            data = _extract_json_loose(content)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+                return data["results"]
+        except Exception as e2:
+            print("OpenAI error:", e2)
+
+    # ここまで来たら空→デバッグ出力（先頭200文字だけ）
+    if content:
+        snip = content.replace("\n", " ")[:200]
+        print("LLM raw (head):", snip)
+    return []
+
+# -------- 簡易ヒューリスティック（最終フォールバック） --------
+def heuristic_extract(review_text: str):
+    """
+    LLMが空返しの場合に最低限の情報を埋める。
+    '最满意/优点' と '最不满意/缺点' の前後を粗く抽出。
+    """
+    pros_keys = ["最满意", "优点", "优點"]
+    cons_keys = ["最不满意", "缺点", "缺點", "不足", "槽点"]
+    pros = []
+    cons = []
+
+    # pros
+    for k in pros_keys:
+        m = re.search(k + r"[:： ]?(.*?)(?=(最不满意|缺点|不足|槽点|$))", review_text)
+        if m:
+            pros.append(m.group(1).strip())
+            break
+    # cons
+    for k in cons_keys:
+        m = re.search(k + r"[:： ]?(.*?)(?=$)", review_text)
+        if m:
+            cons.append(m.group(1).strip())
+            break
+
+    return {
+        "pros": [p for p in [re.sub(r"\s+", " ", x) for x in pros] if p],
+        "cons": [c for c in [re.sub(r"\s+", " ", x) for x in cons] if c],
+        "sentiment": "mixed"
+    }
 
 # -------- メイン --------
 def main():
@@ -166,7 +218,6 @@ def main():
 
     if not all_reviews:
         print("No reviews found.")
-        # それでも空の成果物を出し、ワークフローが次工程で困らないようにする
         pd.DataFrame(columns=["pros","cons","sentiment"]).to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
         with open(TXT_PATH, "w", encoding="utf-8") as f:
             f.write(f"【車両ID】{VEHICLE_ID}\nレビューが取得できませんでした。\n")
@@ -179,16 +230,26 @@ def main():
     for i in range(0, len(all_reviews), chunk):
         batch = all_reviews[i:i+chunk]
         results = summarize_batch(batch)
+
+        # LLMが空返しなら、ヒューリスティックで埋める
         if not results:
-            print("batch returned empty; skip")
+            print("batch returned empty; use heuristic")
+            for t in batch:
+                r = heuristic_extract(t)
+                rows.append({
+                    "pros": " / ".join(r.get("pros", [])),
+                    "cons": " / ".join(r.get("cons", [])),
+                    "sentiment": r.get("sentiment", "mixed"),
+                })
             continue
+
         for r in results:
             rows.append({
                 "pros": " / ".join(r.get("pros", [])) if isinstance(r.get("pros", []), list) else str(r.get("pros", "")),
                 "cons": " / ".join(r.get("cons", [])) if isinstance(r.get("cons", []), list) else str(r.get("cons", "")),
                 "sentiment": r.get("sentiment", "mixed"),
             })
-        time.sleep(1.0)
+        time.sleep(0.8)
 
     # DataFrame 化（空でもカラムは用意）
     df = pd.DataFrame(rows, columns=["pros","cons","sentiment"])
