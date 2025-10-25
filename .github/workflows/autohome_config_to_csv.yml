@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "keep existing manual/scheduled steps as-is"
-          # examples (kept as comments):
+          # examples:
           # python tools/autohome_config_to_csv.py --series 7806
           # python tools/autohome_config_to_csv.py --series 7578
 
@@ -67,6 +67,11 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y jq unzip
+
+      - name: Wait for upstream artifacts to be ready
+        run: |
+          echo "Waiting 60 seconds for autohome-series-urls to finalize..."
+          sleep 60
 
       - name: Download artifact (autohome-series-urls)
         env:
@@ -121,7 +126,7 @@ jobs:
       - name: Upload artifact (per series)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-config-csv
+          name: autohome-config-csv-${{ matrix.series }}
           path: |
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
