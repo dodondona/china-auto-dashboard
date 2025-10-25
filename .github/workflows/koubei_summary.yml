@@ -11,7 +11,7 @@ on:
         required: false
         default: "5"
   schedule:
-    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
+    - cron: "0 2 1 * *"
 
 jobs:
   summarize_reviews:
@@ -34,7 +34,13 @@ jobs:
 
       - name: Print versions (debug)
         run: |
-          python -c "import sys,openai,playwright; print('python', sys.version); print('openai', openai.__version__)"
+          python - << 'PY'
+          import sys,openai,platform,os
+          print('python:', sys.version)
+          print('openai:', openai.__version__)
+          k=os.environ.get("OPENAI_API_KEY","")
+          print('OPENAI_API_KEY set:', bool(k), 'len:', len(k))
+          PY
 
       - name: Run summary script (Playwright)
         env:
