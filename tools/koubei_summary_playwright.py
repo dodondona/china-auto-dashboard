@@ -9,8 +9,11 @@ from openai import OpenAI
 使い方:
   export OPENAI_API_KEY=sk-xxxx
   python tools/koubei_summary_playwright.py 7806 5
+
 出力:
   リポジトリ直下に autohome_reviews_<ID>.csv と _summary.txt
+  主要列: pros_ja / cons_ja / sentiment
+  デバッグ列: pros_raw / cons_raw
 """
 
 # -------- 引数 --------
@@ -25,6 +28,20 @@ BASE_URL = f"https://k.autohome.com.cn/{VEHICLE_ID}/index_{{page}}.html?#listcon
 OUTDIR = os.path.join(os.path.dirname(__file__), "..")  # リポジトリ直下
 CSV_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}.csv")
 TXT_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}_summary.txt")
+
+# -------- ユーティリティ --------
+def looks_japanese(s: str) -> bool:
+    """ひらがな/カタカナを含むなら日本語とみなす（中国語の漢字は判別しにくいため）"""
+    if not s:
+        return False
+    return bool(re.search(r"[ぁ-ゟ゠-ヿ]", s))  # ひらがな/カタカナ
+
+def normalize_list(x):
+    if not x:
+        return []
+    if isinstance(x, list):
+        return [str(i).strip() for i in x if str(i).strip()]
+    return [str(x).strip()]
 
 # -------- Playwright: レンダ後HTML取得 --------
 def fetch_rendered_html(page_index: int) -> str:
@@ -94,15 +111,18 @@ def parse_reviews(html: str):
             uniq.append(t)
     return uniq
 
-# -------- OpenAI: JSON構造で要約 --------
-def _extract_json_loose(s: str):
-    """コードフェンスや前後テキストが混じってもJSONを抽出する"""
+# -------- OpenAIクライアント --------
+def get_client():
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    return OpenAI(api_key=api_key)
+
+# -------- JSON抽出のロバスト化 --------
+def extract_json_loose(s: str):
     if not s:
         return None
-    # ```json ... ``` を除去
-    s = re.sub(r"```json\s*|\s*```", "", s, flags=re.I)
-    s = s.strip()
-    # 先頭/末尾にゴミがある場合、最初の [ または { から最後の対応括弧まで抜く
+    s = re.sub(r"```json\s*|\s*```", "", s, flags=re.I).strip()
     m = re.search(r"(\[.*\]|\{.*\})", s, re.S)
     if not m:
         return None
@@ -111,22 +131,14 @@ def _extract_json_loose(s: str):
     except Exception:
         return None
 
-def summarize_batch(texts):
-    """
-    Chat Completions(JSONモード)でJSON配列のみを返させる。
-    失敗時は緩い抽出を試み、なお空なら [] を返す。
-    """
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    client = OpenAI(api_key=api_key)
-
+# -------- 要約（日本語JSONを強制） --------
+def summarize_batch(texts, client: OpenAI):
     sys_prompt = (
         "あなたはレビューテキストのアナリストです。入力は中国語の車ユーザー口コミです。"
-        "各レビューから『良い点(Pros)』『悪い点(Cons)』を日本語で短く抽出し、"
+        "各レビューから『良い点(Pros)』『悪い点(Cons)』を**日本語**で短く抽出し、"
         "overall感情を positive/mixed/negative のいずれかで判断してください。"
-        "出力は必ず JSON 配列（各要素: {\"pros\":[..],\"cons\":[..],\"sentiment\":\"...\"}）のみ。"
-        "前置き・後書き・説明文は一切出力しないこと。"
+        "出力は**必ず JSON 配列**（各要素: {\"pros\":[..],\"cons\":[..],\"sentiment\":\"...\"}）。"
+        "前置き・後書き・説明文は一切出力しない。値は短い日本語フレーズにする。"
     )
     user_text = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
 
@@ -139,69 +151,87 @@ def summarize_batch(texts):
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": user_text},
             ],
-            temperature=0.2,
+            temperature=0.0,
         )
         content = comp.choices[0].message.content
-        data = _extract_json_loose(content)
+        data = extract_json_loose(content)
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
             return data["results"]
-    except Exception as e:
-        # JSONモード非対応/一時障害時フォールバック
-        try:
-            comp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                temperature=0.2,
-            )
-            content = comp.choices[0].message.content
-            data = _extract_json_loose(content)
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
-                return data["results"]
-        except Exception as e2:
-            print("OpenAI error:", e2)
+    except Exception:
+        pass
 
-    # ここまで来たら空→デバッグ出力（先頭200文字だけ）
+    # フォールバック（JSONモード非対応/一時障害）
+    try:
+        comp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.0,
+        )
+        content = comp.choices[0].message.content
+        data = extract_json_loose(content)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+            return data["results"]
+    except Exception:
+        pass
+
     if content:
-        snip = content.replace("\n", " ")[:200]
-        print("LLM raw (head):", snip)
+        print("LLM raw (head):", content.replace("\n", " ")[:200])
     return []
 
-# -------- 簡易ヒューリスティック（最終フォールバック） --------
+# -------- 翻訳（日本語でない場合の最終保険） --------
+def translate_list_to_ja(texts, client: OpenAI):
+    texts = [t for t in texts if t]
+    if not texts:
+        return []
+    # まとめて翻訳（箇条書きで返す）
+    sys_prompt = (
+        "あなたはプロの翻訳者です。与えられた短いフレーズ群を**自然な日本語**に翻訳し、"
+        "JSON配列（文字列の配列のみ）で返してください。説明や前置きは不要。"
+    )
+    user_text = "\n".join(f"- {t}" for t in texts)
+    try:
+        comp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.0,
+        )
+        data = extract_json_loose(comp.choices[0].message.content)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data]
+    except Exception:
+        pass
+
+    # ダメでも最低限そのまま返す
+    return texts
+
+# -------- ヒューリスティック（LLM空返し時） --------
 def heuristic_extract(review_text: str):
-    """
-    LLMが空返しの場合に最低限の情報を埋める。
-    '最满意/优点' と '最不满意/缺点' の前後を粗く抽出。
-    """
     pros_keys = ["最满意", "优点", "优點"]
     cons_keys = ["最不满意", "缺点", "缺點", "不足", "槽点"]
     pros = []
     cons = []
-
-    # pros
     for k in pros_keys:
         m = re.search(k + r"[:： ]?(.*?)(?=(最不满意|缺点|不足|槽点|$))", review_text)
         if m:
             pros.append(m.group(1).strip())
             break
-    # cons
     for k in cons_keys:
         m = re.search(k + r"[:： ]?(.*?)(?=$)", review_text)
         if m:
             cons.append(m.group(1).strip())
             break
-
-    return {
-        "pros": [p for p in [re.sub(r"\s+", " ", x) for x in pros] if p],
-        "cons": [c for c in [re.sub(r"\s+", " ", x) for x in cons] if c],
-        "sentiment": "mixed"
-    }
+    return {"pros": normalize_list(pros), "cons": normalize_list(cons), "sentiment": "mixed"}
 
 # -------- メイン --------
 def main():
@@ -218,60 +248,86 @@ def main():
 
     if not all_reviews:
         print("No reviews found.")
-        pd.DataFrame(columns=["pros","cons","sentiment"]).to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
+        pd.DataFrame(columns=["pros_raw","cons_raw","pros_ja","cons_ja","sentiment"]).to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
         with open(TXT_PATH, "w", encoding="utf-8") as f:
             f.write(f"【車両ID】{VEHICLE_ID}\nレビューが取得できませんでした。\n")
         print(f"✅ 出力完了（空）: {CSV_PATH}, {TXT_PATH}")
         return
+
+    client = get_client()
 
     # OpenAIへは8件ずつバッチ投入
     rows = []
     chunk = 8
     for i in range(0, len(all_reviews), chunk):
         batch = all_reviews[i:i+chunk]
-        results = summarize_batch(batch)
+        results = summarize_batch(batch, client)
 
         # LLMが空返しなら、ヒューリスティックで埋める
         if not results:
-            print("batch returned empty; use heuristic")
+            print("batch returned empty; use heuristic + translate")
             for t in batch:
-                r = heuristic_extract(t)
+                h = heuristic_extract(t)
+                pros_raw = normalize_list(h.get("pros", []))
+                cons_raw = normalize_list(h.get("cons", []))
+
+                # 翻訳（日本語っぽくなければ翻訳）
+                pros_ja = pros_raw
+                cons_ja = cons_raw
+                if not any(looks_japanese(x) for x in pros_ja):
+                    pros_ja = translate_list_to_ja(pros_ja, client)
+                if not any(looks_japanese(x) for x in cons_ja):
+                    cons_ja = translate_list_to_ja(cons_ja, client)
+
                 rows.append({
-                    "pros": " / ".join(r.get("pros", [])),
-                    "cons": " / ".join(r.get("cons", [])),
-                    "sentiment": r.get("sentiment", "mixed"),
+                    "pros_raw": " / ".join(pros_raw),
+                    "cons_raw": " / ".join(cons_raw),
+                    "pros_ja": " / ".join(pros_ja),
+                    "cons_ja": " / ".join(cons_ja),
+                    "sentiment": h.get("sentiment", "mixed"),
                 })
             continue
 
+        # 正常返答
         for r in results:
+            pros_raw = normalize_list(r.get("pros", []))
+            cons_raw = normalize_list(r.get("cons", []))
+
+            pros_ja = pros_raw
+            cons_ja = cons_raw
+            if not any(looks_japanese(x) for x in pros_raw):
+                pros_ja = translate_list_to_ja(pros_raw, client)
+            if not any(looks_japanese(x) for x in cons_raw):
+                cons_ja = translate_list_to_ja(cons_raw, client)
+
             rows.append({
-                "pros": " / ".join(r.get("pros", [])) if isinstance(r.get("pros", []), list) else str(r.get("pros", "")),
-                "cons": " / ".join(r.get("cons", [])) if isinstance(r.get("cons", []), list) else str(r.get("cons", "")),
+                "pros_raw": " / ".join(pros_raw),
+                "cons_raw": " / ".join(cons_raw),
+                "pros_ja": " / ".join(pros_ja),
+                "cons_ja": " / ".join(cons_ja),
                 "sentiment": r.get("sentiment", "mixed"),
             })
         time.sleep(0.8)
 
-    # DataFrame 化（空でもカラムは用意）
-    df = pd.DataFrame(rows, columns=["pros","cons","sentiment"])
+    # DataFrame 化
+    df = pd.DataFrame(rows, columns=["pros_raw","cons_raw","pros_ja","cons_ja","sentiment"])
     df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
 
-    # 集計（防御的：カラム欠損時も落ちない）
-    def head_counts(col):
-        if col not in df.columns or df.empty:
-            return pd.Series(dtype=int)
-        s = df[col].dropna().astype(str).str.split(" / ").explode().str.strip()
+    # 集計（日本語列で）
+    def head_counts(series):
+        s = series.dropna().astype(str).str.split(" / ").explode().str.strip()
         s = s[s != ""]
         return s.value_counts().head(15)
 
-    top_pros = head_counts("pros")
-    top_cons = head_counts("cons")
+    top_pros = head_counts(df["pros_ja"]) if not df.empty else pd.Series(dtype=int)
+    top_cons = head_counts(df["cons_ja"]) if not df.empty else pd.Series(dtype=int)
     senti = df["sentiment"].value_counts() if "sentiment" in df.columns else pd.Series(dtype=int)
 
     with open(TXT_PATH, "w", encoding="utf-8") as f:
         f.write(f"【車両ID】{VEHICLE_ID}\n")
-        f.write("=== ポジティブTOP ===\n")
+        f.write("=== ポジティブTOP（日本語） ===\n")
         f.write(top_pros.to_string() if not top_pros.empty else "(なし)")
-        f.write("\n\n=== ネガティブTOP ===\n")
+        f.write("\n\n=== ネガティブTOP（日本語） ===\n")
         f.write(top_cons.to_string() if not top_cons.empty else "(なし)")
         f.write("\n\n=== センチメント比 ===\n")
         f.write(senti.to_string() if not senti.empty else "(なし)")
