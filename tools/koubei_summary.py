@@ -1,369 +1,215 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-import sys, os, re, time, json, hashlib, statistics
-import pandas as pd
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+# tools/koubei_summary.py
+from __future__ import annotations
+import os
+import time
+import math
+import random
+import textwrap
+from typing import List, Dict, Any, Iterable
+
+import httpx
 from openai import OpenAI
+from openai import APIConnectionError, RateLimitError, APITimeoutError, APIStatusError
 
-# ========= 引数 =========
-if len(sys.argv) < 2:
-    print("Usage: python tools/koubei_summary.py <vehicle_id> [pages] [mode: ja|zh]")
-    sys.exit(1)
+# =========================
+# 設定（環境変数で上書き可）
+# =========================
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+LLM_BATCH = int(os.getenv("LLM_BATCH", "10"))        # LLMに投げる件数（小さめが安定）
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "45"))  # 秒
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "7"))     # 自前リトライ回数（指数バックオフ）
 
-VEHICLE_ID = sys.argv[1].strip()
-PAGES = int(sys.argv[2]) if len(sys.argv) >= 3 and sys.argv[2].strip().isdigit() else 5
-MODE = (sys.argv[3].strip().lower() if len(sys.argv) >= 4 else "ja")
-if MODE not in ("ja", "zh"):
-    MODE = "ja"
+# =========================
+# OpenAI クライアント（HTTP/2無効）
+# =========================
+def make_client() -> OpenAI:
+    # GitHub Actions で稀に出る httpx.RemoteProtocolError 回避のため HTTP/2 を明示的にOFF
+    http_client = httpx.Client(http2=False, timeout=HTTP_TIMEOUT)
+    # SDK 内の軽い自動リトライ + 我々の重めの自前リトライを併用
+    return OpenAI(http_client=http_client, max_retries=3)
 
-BASE_URL = f"https://k.autohome.com.cn/{VEHICLE_ID}/index_{{page}}.html?#listcontainer"
-OUTDIR = os.path.join(os.path.dirname(__file__), "..")
-CSV_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}.csv")
-TXT_PATH = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}_summary.txt")
-TIMING_JSON = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}_timing.json")
-TIMING_TXT  = os.path.join(OUTDIR, f"autohome_reviews_{VEHICLE_ID}_timing.txt")
+client = make_client()
 
-# ========= メトリクス器 =========
-T = {
-    "fetch_pages": [],   # per page seconds
-    "parse_pages": [],   # per page seconds
-    "llm_batches": [],   # per batch seconds
-    "trans_batches": [], # translation batch seconds (ja only)
-    "io": []             # save/load seconds
-}
+# =========================
+# 汎用：指数バックオフ付き呼び出し
+# =========================
+def call_chat_with_retries(
+    *,
+    model: str,
+    messages: List[Dict[str, Any]],
+    response_format: Dict[str, Any] | None = None,
+    max_attempts: int = MAX_RETRIES,
+    base_delay: float = 1.0,
+):
+    """
+    RemoteProtocolError / ConnectionError / 429 / 5xx を粘って再試行。
+    1,2,4,8,...秒 + ジッタ(0〜300ms)。
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                response_format=response_format or {"type": "text"},
+            )
+        except (APIConnectionError, APITimeoutError) as e:
+            if attempt == max_attempts:
+                raise
+        except APIStatusError as e:
+            # レートや一時的なサーバーエラーのみ再試行対象
+            if e.status_code not in (429, 500, 502, 503, 504):
+                raise
+            if attempt == max_attempts:
+                raise
+        # バックオフ
+        sleep = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.3)
+        time.sleep(sleep)
 
-def tick(fn, bucket):
-    t0 = time.time()
+# =========================
+# 進捗表示ヘルパ
+# =========================
+def tick(fn, label: str):
+    """
+    ログで段階名を示すヘルパ。あなたのログの ‘tick(_call, "llm_batches")’ に合わせています。
+    """
+    print(f"{label} ...", flush=True)
     res = fn()
-    T[bucket].append(time.time() - t0)
+    print(f"{label} done", flush=True)
     return res
 
-def print_summary_and_save():
-    def s(lst):
-        if not lst: return "0.00s (0)"
-        return f"{sum(lst):.2f}s total  | avg {statistics.mean(lst):.2f}s × {len(lst)}"
-    lines = []
-    lines.append(f"[Timing] Vehicle {VEHICLE_ID} mode={MODE} pages={PAGES}")
-    lines.append(f"  fetch_pages   : {s(T['fetch_pages'])}")
-    lines.append(f"  parse_pages   : {s(T['parse_pages'])}")
-    lines.append(f"  llm_batches   : {s(T['llm_batches'])}")
-    lines.append(f"  trans_batches : {s(T['trans_batches'])}")
-    lines.append(f"  io            : {s(T['io'])}")
-    txt = "\n".join(lines)
-    print("\n" + txt + "\n")
-    with open(TIMING_TXT, "w", encoding="utf-8") as f:
-        f.write(txt + "\n")
-    with open(TIMING_JSON, "w", encoding="utf-8") as f:
-        json.dump(T, f, ensure_ascii=False, indent=2)
-
-# ========= 共通ユーティリティ =========
-def text_hash(s: str) -> str:
-    return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
-
-def looks_japanese(s: str) -> bool:
-    return bool(s and re.search(r"[ぁ-ゟ゠-ヿ]", s))
-
-def normalize_list(x):
-    if not x:
-        return []
-    if isinstance(x, list):
-        return [str(i).strip() for i in x if str(i).strip()]
-    return [str(x).strip()]
-
-def extract_json_loose(s: str):
-    if not s:
-        return None
-    s = re.sub(r"```json\s*|\s*```", "", s, flags=re.I).strip()
-    m = re.search(r"(\[.*\]|\{.*\})", s, re.S)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except Exception:
-        return None
-
-def get_client():
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    return OpenAI(api_key=api_key)
-
-# ========= Playwright =========
-def _fetch_rendered_html(page_index: int) -> str:
-    url = BASE_URL.format(page=page_index)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        ctx = browser.new_context(
-            viewport={"width": 1200, "height": 1600},
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-        )
-        def _route(route):
-            t = route.request.resource_type
-            if t in ("image", "media", "font", "stylesheet", "other"):
-                return route.abort()
-            return route.continue_()
-        ctx.route("**/*", _route)
-        pg = ctx.new_page()
-        pg.set_default_timeout(30000)
-        pg.goto(url, wait_until="networkidle")
-        for _ in range(2):
-            pg.mouse.wheel(0, 2000)
-            pg.wait_for_timeout(250)
-        html = pg.content()
-        browser.close()
-        return html
-
-def fetch_rendered_html(page_index: int) -> str:
-    return tick(lambda: _fetch_rendered_html(page_index), "fetch_pages")
-
-# ========= 解析 =========
-def _parse_reviews(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    selectors = [
-        "#listcontainer .mouthcon",
-        "#listcontainer .mouthcon-cont",
-        "#listcontainer .text-con",
-        "#listcontainer .comment-content",
-        "#listcontainer .koubei-item",
-        "#listcontainer .koubei-content",
-        "#listcontainer .review-item",
-        "#listcontainer .review-content",
-        ".mouthcon", ".mouthcon-cont", ".text-con",
-        ".comment-content", ".koubei-item", ".koubei-content",
-        ".review-item", ".review-content",
-    ]
-    reviews, seen = [], set()
-    for sel in selectors:
-        for blk in soup.select(sel):
-            txt = " ".join(blk.get_text(" ", strip=True).split())
-            if len(txt) >= 50:
-                h = text_hash(txt[:300])
-                if h not in seen:
-                    seen.add(h)
-                    reviews.append(txt)
-    if not reviews:
-        keywords = ["优点", "缺点", "最满意", "最不满意", "不足", "槽点", "评价", "口碑"]
-        for kw in keywords:
-            for hit in soup.find_all(string=re.compile(kw)):
-                blk = hit.find_parent()
-                if blk:
-                    txt = " ".join(blk.get_text(" ", strip=True).split())
-                    if len(txt) >= 50:
-                        h = text_hash(txt[:300])
-                        if h not in seen:
-                            seen.add(h)
-                            reviews.append(txt)
-    return reviews
-
-def parse_reviews(html: str):
-    return tick(lambda: _parse_reviews(html), "parse_pages")
-
-# ========= LLM =========
-def summarize_batch_ja(texts, client: OpenAI):
-    sys_prompt = (
-        "あなたはレビューテキストのアナリストです。入力は中国語の車ユーザー口コミです。"
-        "各レビューから『良い点(Pros)』『悪い点(Cons)』を**日本語**で短く抽出し、"
-        "overall感情を positive/mixed/negative のいずれかで判断してください。"
-        "出力は**必ず JSON 配列**（各要素: {\"pros\":[..],\"cons\":[..],\"sentiment\":\"...\"}）。"
-        "前置き・後書き・説明文は一切出力しない。値は短い日本語フレーズにする。"
+# =========================
+# LLM 呼び出しの薄いラッパ（元の _call 名に合わせる）
+# =========================
+def _call(messages: List[Dict[str, Any]]):
+    comp = call_chat_with_retries(
+        model=OPENAI_MODEL,
+        messages=messages,
+        response_format={"type": "text"},
     )
-    user_text = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
+    return comp.choices[0].message.content or ""
 
-    def _call():
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
-            temperature=0.0,
-        )
-        data = extract_json_loose(comp.choices[0].message.content)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("results"), list):
-            return data["results"]
-        return []
-    return tick(_call, "llm_batches")
+# =========================
+# チャンク分割
+# =========================
+def batched(iterable: Iterable[Any], n: int) -> Iterable[list[Any]]:
+    batch: list[Any] = []
+    for x in iterable:
+        batch.append(x)
+        if len(batch) >= n:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
-def summarize_batch_zh(texts, client: OpenAI):
-    sys_prompt = (
-        "你是汽车用户口碑的分析助手。请从每条中文评论中，提取“优点(Pros)”“缺点(Cons)”并给出情感"
-        "（positive/mixed/negative）。输出**JSON数组**，每个元素形如："
-        "{\"pros\":[...],\"cons\":[...],\"sentiment\":\"...\"}。不要任何解释。"
+# =========================
+# 要約プロンプト
+# =========================
+SYSTEM_JA = (
+    "あなたは中国語のクルマのユーザーレビューを要約する日本語アナリストです。"
+    "入力は複数件のレビュー本文（中国語）です。重複や宣伝は無視し、"
+    "長所/短所/気づき（品質・乗り心地・電費/燃費・価格・内外装・装備・不具合）を簡潔に日本語で箇条書きにしてください。"
+)
+SYSTEM_ZH = (
+    "你是汽车用户口碑的中文分析师。请对多条原文（中文）做去重摘要，"
+    "按优点/缺点/其他洞见分点列出，语言简洁。"
+)
+
+def build_messages_ja(reviews: List[str]) -> List[Dict[str, Any]]:
+    joined = "\n\n---\n\n".join(r.strip() for r in reviews if str(r).strip())
+    user_content = (
+        "以下のレビューをまとめて要約してください（日本語）。\n"
+        "フォーマット：\n"
+        "【長所】\n"
+        "・...\n"
+        "【短所】\n"
+        "・...\n"
+        "【気づき】\n"
+        "・...\n\n"
+        f"レビュー本文:\n{joined}"
     )
-    user_text = "\n\n".join(f"[{i+1}] {t}" for i, t in enumerate(texts))
-    def _call():
-        comp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
-            temperature=0.0,
-        )
-        data = extract_json_loose(comp.choices[0].message.content)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("results"), list):
-            return data["results"]
-        return []
-    return tick(_call, "llm_batches")
+    return [{"role": "system", "content": SYSTEM_JA},
+            {"role": "user", "content": user_content}]
 
-def translate_to_ja_unique(phrases, client: OpenAI):
-    need = [p for p in phrases if p and not looks_japanese(p)]
-    if not need:
-        return {p: p for p in phrases}
-    mapping = {}
-    sys_prompt = (
-        "あなたはプロの翻訳者です。与えられた短いフレーズ群を**自然な日本語**に翻訳し、"
-        "JSONの {原文: 日本語訳} の辞書で返してください。説明は不要。"
+def build_messages_zh(reviews: List[str]) -> List[Dict[str, Any]]:
+    joined = "\n\n---\n\n".join(r.strip() for r in reviews if str(r).strip())
+    user_content = (
+        "请对以下多条中文用户口碑进行去重摘要，用简洁的中文按“优点/缺点/其他发现”列点：\n\n"
+        f"{joined}"
     )
-    batch_size = 200
-    for i in range(0, len(need), batch_size):
-        chunk = need[i:i+batch_size]
-        user_text = "\n".join(f"- {t}" for t in chunk)
-        def _call():
-            comp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
-                temperature=0.0,
-            )
-            data = extract_json_loose(comp.choices[0].message.content) or {}
-            if isinstance(data, dict):
-                for k, v in data.items():
-                    mapping[str(k).strip()] = str(v).strip()
-        tick(_call, "trans_batches")
-        time.sleep(0.2)
-    for p in phrases:
-        mapping.setdefault(p, p)
-    return mapping
+    return [{"role": "system", "content": SYSTEM_ZH},
+            {"role": "user", "content": user_content}]
 
-# ========= フォールバック =========
-def heuristic_extract(review_text: str):
-    pros_keys = ["最满意", "优点", "优點"]
-    cons_keys = ["最不满意", "缺点", "缺點", "不足", "槽点"]
-    pros = []
-    cons = []
-    for k in pros_keys:
-        m = re.search(k + r"[:： ]?(.*?)(?=(最不满意|缺点|不足|槽点|$))", review_text)
-        if m:
-            pros.append(m.group(1).strip()); break
-    for k in cons_keys:
-        m = re.search(k + r"[:： ]?(.*?)(?=$)", review_text)
-        if m:
-            cons.append(m.group(1).strip()); break
-    return {"pros": normalize_list(pros), "cons": normalize_list(cons), "sentiment": "mixed"}
+# =========================
+# バッチ要約（日本語 / 中国語）
+# =========================
+def summarize_batch_ja(reviews: List[str]) -> List[str]:
+    """
+    reviews: 中国語レビューの配列
+    return: それぞれのバッチの要約テキスト（長文1本/バッチ）
+    """
+    outputs: List[str] = []
+    for i, chunk in enumerate(batched(reviews, LLM_BATCH), start=1):
+        # 混雑回避のため、バッチ間に少し隙を入れる
+        if i > 1:
+            time.sleep(0.2)
+        def work():
+            msgs = build_messages_ja(chunk)
+            return _call(msgs)
+        text = tick(work, "llm_batches")
+        outputs.append(text)
+        print(f"batch {i}: summarized {len(chunk)} reviews", flush=True)
+    return outputs
 
-# ========= メイン =========
+def summarize_batch_zh(reviews: List[str]) -> List[str]:
+    outputs: List[str] = []
+    for i, chunk in enumerate(batched(reviews, LLM_BATCH), start=1):
+        if i > 1:
+            time.sleep(0.2)
+        def work():
+            msgs = build_messages_zh(chunk)
+            return _call(msgs)
+        text = tick(work, "llm_batches")
+        outputs.append(text)
+        print(f"batch {i}: summarized {len(chunk)} reviews", flush=True)
+    return outputs
+
+# =========================
+# 参考：ページング取得のログ出し（存在するなら呼び出し側で使ってください）
+# =========================
+def log_fetched_page(page_index: int, n: int):
+    print(f"page {page_index:>2}: fetched {n} reviews", flush=True)
+
+# =========================
+# メイン（既存の呼び出しと互換：MODE, INPUT を環境変数で渡す場合のみ）
+# =========================
 def main():
-    print(f"[Start] Vehicle={VEHICLE_ID} mode={MODE} pages={PAGES}")
-    all_reviews = []
-    for p in range(1, PAGES + 1):
-        try:
-            html = fetch_rendered_html(p)
-            revs = parse_reviews(html)
-            print(f"  page {p:>2}: fetched {len(revs)} reviews")
-            all_reviews.extend(revs)
-        except Exception as e:
-            print(f"  page {p:>2}: ERROR {e}")
-
-    if not all_reviews:
-        print("No reviews found.")
-        cols = ["pros_ja","cons_ja","sentiment"] if MODE=="ja" else ["pros_zh","cons_zh","sentiment"]
-        def _save_empty():
-            pd.DataFrame(columns=cols).to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-            with open(TXT_PATH, "w", encoding="utf-8") as f:
-                f.write(f"【車両ID】{VEHICLE_ID}\nレビューが取得できませんでした。\n")
-        tick(_save_empty, "io")
-        print_summary_and_save()
+    """
+    既存ログの呼び出しは `results = summarize_batch_ja(batch, client) if MODE=="ja" else summarize_batch_zh(batch, client)`
+    のようでした。本スクリプトでも互換で動かせるよう、環境変数 INPUT_PATH が与えられた時のみ
+    そこで与えたテキスト一覧（1行1件）を読み込み、サマリーを標準出力へ吐きます。
+    Actions 側の既存フローに合わせるなら、この main は実行されなくても問題ありません。
+    """
+    input_path = os.getenv("INPUT_PATH", "").strip()
+    mode = os.getenv("MODE", "ja").lower()
+    if not input_path:
+        print("INFO: INPUT_PATH 未指定のため main は何もしません（既存の呼び出しがこのモジュールの関数を使う想定）")
         return
 
-    client = get_client()
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"INPUT not found: {input_path}")
 
-    rows = []
-    chunk = 16
-    for i in range(0, len(all_reviews), chunk):
-        batch = all_reviews[i:i+chunk]
-        results = summarize_batch_ja(batch, client) if MODE=="ja" else summarize_batch_zh(batch, client)
-        if not results:
-            # LLM空返し → 簡易抽出
-            for t in batch:
-                h = heuristic_extract(t)
-                if MODE=="ja":
-                    rows.append({"pros_raw":" / ".join(h["pros"]), "cons_raw":" / ".join(h["cons"]), "sentiment":h["sentiment"]})
-                else:
-                    rows.append({"pros_zh":" / ".join(h["pros"]), "cons_zh":" / ".join(h["cons"]), "sentiment":h["sentiment"]})
-            continue
-        for r in results:
-            pros = " / ".join(normalize_list(r.get("pros", [])))
-            cons = " / ".join(normalize_list(r.get("cons", [])))
-            if MODE=="ja":
-                rows.append({"pros_raw":pros, "cons_raw":cons, "sentiment":r.get("sentiment","mixed")})
-            else:
-                rows.append({"pros_zh":pros, "cons_zh":cons, "sentiment":r.get("sentiment","mixed")})
-        time.sleep(0.2)
+    with open(input_path, "r", encoding="utf-8") as f:
+        reviews = [line.rstrip("\n") for line in f if line.strip()]
 
-    if MODE=="ja":
-        df = pd.DataFrame(rows, columns=["pros_raw","cons_raw","sentiment"]).fillna("")
-        pros_terms = set(t.strip() for t in df["pros_raw"].str.split(" / ").explode().dropna() if t.strip())
-        cons_terms = set(t.strip() for t in df["cons_raw"].str.split(" / ").explode().dropna() if t.strip())
-        pros_map = translate_to_ja_unique(pros_terms, client)
-        cons_map = translate_to_ja_unique(cons_terms, client)
-
-        def _join_map(series, mapping):
-            out = []
-            for cell in series.fillna(""):
-                terms = [t.strip() for t in cell.split(" / ") if t.strip()]
-                out.append(" / ".join(mapping.get(t, t) for t in terms))
-            return out
-
-        df["pros_ja"] = _join_map(df["pros_raw"], pros_map)
-        df["cons_ja"] = _join_map(df["cons_raw"], cons_map)
-
-        def _save_ja():
-            df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-            # サマリーTXT
-            def head_counts(col):
-                s = df[col].dropna().astype(str).str.split(" / ").explode().str.strip()
-                s = s[s != ""]
-                return s.value_counts().head(15)
-            top_pros = head_counts("pros_ja") if not df.empty else pd.Series(dtype=int)
-            top_cons = head_counts("cons_ja") if not df.empty else pd.Series(dtype=int)
-            senti = df["sentiment"].value_counts() if "sentiment" in df.columns else pd.Series(dtype=int)
-            with open(TXT_PATH, "w", encoding="utf-8") as f:
-                f.write(f"【車両ID】{VEHICLE_ID}\n")
-                f.write("=== ポジティブTOP（日本語） ===\n")
-                f.write(top_pros.to_string() if not top_pros.empty else "(なし)")
-                f.write("\n\n=== ネガティブTOP（日本語） ===\n")
-                f.write(top_cons.to_string() if not top_cons.empty else "(なし)")
-                f.write("\n\n=== センチメント比 ===\n")
-                f.write(senti.to_string() if not senti.empty else "(なし)")
-                f.write("\n")
-        tick(_save_ja, "io")
-
+    if mode == "ja":
+        results = summarize_batch_ja(reviews)
     else:
-        df = pd.DataFrame(rows, columns=["pros_zh","cons_zh","sentiment"]).fillna("")
-        def _save_zh():
-            df.to_csv(CSV_PATH, index=False, encoding="utf-8-sig")
-            def head_counts(col):
-                s = df[col].dropna().astype(str).str.split(" / ").explode().str.strip()
-                s = s[s != ""]
-                return s.value_counts().head(15)
-            top_pros = head_counts("pros_zh") if not df.empty else pd.Series(dtype=int)
-            top_cons = head_counts("cons_zh") if not df.empty else pd.Series(dtype=int)
-            senti = df["sentiment"].value_counts() if "sentiment" in df.columns else pd.Series(dtype=int)
-            with open(TXT_PATH, "w", encoding="utf-8") as f:
-                f.write(f"【车系ID】{VEHICLE_ID}\n")
-                f.write("=== 优点TOP ===\n")
-                f.write(top_pros.to_string() if not top_pros.empty else "(无)")
-                f.write("\n\n=== 缺点TOP ===\n")
-                f.write(top_cons.to_string() if not top_cons.empty else "(无)")
-                f.write("\n\n=== 情感比例 ===\n")
-                f.write(senti.to_string() if not senti.empty else "(无)")
-                f.write("\n")
-        tick(_save_zh, "io")
+        results = summarize_batch_zh(reviews)
 
-    print_summary_and_save()
-    print(f"[Done] CSV={CSV_PATH}  TXT={TXT_PATH}  TIMING=({TIMING_TXT}, {TIMING_JSON})")
+    # 出力：単純に連結
+    print("\n\n===== SUMMARY =====\n")
+    print("\n\n---\n\n".join(results))
 
 if __name__ == "__main__":
     main()
