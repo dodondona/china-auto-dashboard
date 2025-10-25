@@ -1,0 +1,82 @@
+name: koubei_summary
+
+on:
+  workflow_dispatch:
+    inputs:
+      vehicle_id:
+        description: "Autohome vehicle ID (例: 7806, 5714)"
+        required: true
+      pages:
+        description: "取得ページ数（例: 5）"
+        required: false
+        default: "5"
+      mode:
+        description: "ja=日本語JSON構造 / zh=中国語高速"
+        required: false
+        default: "ja"
+  schedule:
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
+
+jobs:
+  summarize_reviews:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade "openai==1.*" beautifulsoup4 requests pandas playwright
+          python -m playwright install chromium
+
+      - name: Print versions (debug)
+        run: |
+          python - << 'PY'
+          import sys
+          print('python:', sys.version)
+          PY
+
+      # ① 口コミ抽出＋要約（既存メイン）
+      - name: Run summary script
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/koubei_summary.py \
+            "${{ github.event.inputs.vehicle_id }}" \
+            "${{ github.event.inputs.pages }}" \
+            "${{ github.event.inputs.mode }}"
+
+      # ② 自然文レポ（既存の長め文章）
+      - name: Build narrative report
+        run: |
+          python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
+
+      # ③ “あなた好みの自然文”版（段落構成・代表コメント活用）
+      - name: Build story-style summary
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # 無くてもテンプレで出ます
+        run: |
+          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" --pros 5 --cons 4 --quotes 2 --style executive
+
+      # ④ 今回の要望：各2〜3文の超要約（ポジ/ネガ）
+      - name: Build 2-3 sentence brief
+        run: |
+          python tools/koubei_brief.py "${{ github.event.inputs.vehicle_id }}" --k 3
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_summary
+          path: |
+            autohome_reviews_*.csv
+            autohome_reviews_*.txt
+            autohome_reviews_*.md
+            autohome_reviews_*.json
