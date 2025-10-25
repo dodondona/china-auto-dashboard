@@ -91,8 +91,9 @@ jobs:
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
           if-no-files-found: warn
 
+  # 手動/スケジュール実行用（既存）: workflow_run では走らせない
   autohome_config_to_csv:
-    needs: autohome_config_from_pipeline
+    if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
