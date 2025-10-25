@@ -54,7 +54,7 @@ API_KEY = os.environ.get("OPENAI_API_KEY")
 TRANSLATE_VALUES   = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
 TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
 
-# 先頭車名削除（既定ON）／明示パターン（例: "駆逐艦05|驱逐舰05"）
+# 先頭車名を削る（既定ON）。明示パターンは SERIES_PREFIX（例: "駆逐艦05|驱逐舰05"）
 STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
 SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
 
@@ -82,14 +82,14 @@ def clean_price_cell(s: str) -> str:
         t = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", t)
     return t.strip()
 
-# 円/JPY/¥ を括弧内外ともに除去（MSRP再生成前/Dealer厳禁で使用）
-RE_PAREN_ANY_YEN = re.compile(r"（[^）]*(?:日本円|JPY|¥|円)[^）]*）")
-RE_ANY_YEN_TOKEN = re.compile(r"(日本円|JPY|¥|円)")
+# 円/JPY/¥/￥ を括弧内外ともに除去（MSRP再生成前/Dealer厳禁で使用）
+RE_PAREN_ANY_YEN = re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
+RE_ANY_YEN_TOKEN = re.compile(r"(日本円|JPY|[¥￥]|円)")
 
 def strip_any_yen_tokens(s: str) -> str:
     t = str(s)
     t = RE_PAREN_ANY_YEN.sub("", t)         # （日本円…）や（約¥…）などの括弧丸ごと削除
-    t = RE_ANY_YEN_TOKEN.sub("", t)         # 括弧外の「円/¥/JPY/日本円」も削除
+    t = RE_ANY_YEN_TOKEN.sub("", t)         # 括弧外の「円/¥/￥/JPY/日本円」も削除
     return re.sub(r"\s+", " ", t).strip()
 
 # ブランド正規化（BYDは翻訳しない）
@@ -112,7 +112,7 @@ PRICE_ITEM_MSRP_JA    = {"メーカー希望小売価格"}
 PRICE_ITEM_DEALER_CN  = {"经销商参考价", "经销商报价", "经销商"}
 PRICE_ITEM_DEALER_JA  = {"ディーラー販売価格（元）"}
 
-# ====== 価格整形（超強化） ======
+# ====== 価格整形 ======
 RE_WAN       = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN      = re.compile(r"(?P<num>[\d,]+)\s*元")
 
@@ -130,7 +130,7 @@ def parse_cny(text: str):
 def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
     """
     MSRPを「xx万元（日本円YYY円）」に**必ず**統一。
-    ・既存の円/¥/JPY痕跡は括弧内外とも**完全除去**してから再生成
+    ・既存の円/¥/￥/JPY痕跡は括弧内外とも**完全除去**してから再生成
     ・「11.98万」→「11.98万元（日本円251,580円）」
       「129,800元」→「129,800元（日本円2,725,800円）」
     """
@@ -140,17 +140,15 @@ def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
 
     cny = parse_cny(t)
     if cny is None:
-        # 金額抽出できない場合は、せめて「万」に「元」を付ける
         if ("元" not in t) and RE_WAN.search(t):
             t = f"{t}元"
         return t
 
-    # 表示用の「元」側
+    # 表示用（元側）
     m1 = RE_WAN.search(t)
     if m1:
         yuan_disp = f"{m1.group('num')}万元"
     else:
-        # 129,800元 → 「129,800元」
         if "元" not in t:
             t = f"{t}元"
         yuan_disp = t
@@ -162,7 +160,7 @@ def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
 def dealer_to_yuan_only(cell: str) -> str:
     """
     ディーラー価格は「…元」だけ（円は絶対に付けない）。
-    既存の円/¥/JPY痕跡は括弧内外とも完全除去。
+    既存の円/¥/￥/JPY痕跡は括弧内外とも完全除去。
     """
     t = strip_any_yen_tokens(clean_price_cell(cell))
     if not t or t in {"-", "–", "—"}:
@@ -336,6 +334,14 @@ def main():
     out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
     out.insert(3, "項目_ja",     out["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
 
+    # --- 見出し(項目_ja)の正規化：通貨や括弧書きを落として統一 ---
+    PAREN_CURR_RE = re.compile(r"（\s*(?:円|元|人民元|CNY|RMB|JPY)[^）]*）")
+    out["項目_ja"] = out["項目_ja"].astype(str).str.replace(PAREN_CURR_RE, "", regex=True).str.strip()
+    # 「メーカー希望小売価格」で始まるものは完全に統一
+    out.loc[out["項目_ja"].str.match(r"^メーカー希望小売価格.*$", na=False), "項目_ja"] = "メーカー希望小売価格"
+    # ディーラーも強制統一
+    out.loc[out["項目_ja"].str.contains(r"ディーラー販売価格", na=False), "項目_ja"] = "ディーラー販売価格（元）"
+
     # 列ヘッダ（グレード）翻訳＆先頭車名削除（汎用化）
     if TRANSLATE_COLNAMES:
         orig_cols   = list(out.columns)
@@ -355,11 +361,14 @@ def main():
             out.columns = fixed_cols + strip_series_prefix_from_grades(grade_cols)
 
     # ===== 価格セル整形 =====
-    is_msrp_row   = out["項目"].isin(list(PRICE_ITEM_MSRP_CN))   | out["項目_ja"].isin(list(PRICE_ITEM_MSRP_JA))
-    is_dealer_row = out["項目"].isin(list(PRICE_ITEM_DEALER_CN)) | out["項目_ja"].isin(list(PRICE_ITEM_DEALER_JA))
+    MSRP_JA_RE   = re.compile(r"^メーカー希望小売価格$")
+    DEALER_JA_RE = re.compile(r"^ディーラー販売価格（元）$")
+
+    is_msrp_row   = out["項目"].isin(PRICE_ITEM_MSRP_CN)   | out["項目_ja"].fillna("").str.match(MSRP_JA_RE)
+    is_dealer_row = out["項目"].isin(PRICE_ITEM_DEALER_CN) | out["項目_ja"].fillna("").str.match(DEALER_JA_RE)
 
     for col in out.columns[4:]:
-        # MSRP: 「xx万元（日本円YYY円）」に**強制**統一（円痕跡は全削除の上で再生成）
+        # MSRP: 「xx万元（日本円YYY円）」に強制統一（円痕跡は全削除の上で再生成）
         out.loc[is_msrp_row, col] = out.loc[is_msrp_row, col].map(
             lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY)
         )
@@ -392,6 +401,16 @@ def main():
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(DST_PRIMARY, index=False, encoding="utf-8-sig")
     out.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
+
+    # ===== 仕上げチェック（ログ） =====
+    print("🔎 MSRP ラベル uniq:", sorted(out.loc[out["項目_ja"].str.contains("メーカー希望小売価格", na=False), "項目_ja"].unique()))
+    print("🔎 Dealer ラベル uniq:", sorted(out.loc[out["項目_ja"].str.contains("ディーラー販売価格", na=False), "項目_ja"].unique()))
+
+    bad_msrp = out.loc[out["項目_ja"].eq("メーカー希望小売価格"), out.columns[4:]].astype(str).stack().str.contains(r"(日本円|円|[¥￥]|JPY)", na=False)
+    print("❌ MSRPに円の痕跡（再生成前のゴミ）:", bad_msrp.sum(), "件")
+
+    bad_dealer = out.loc[out["項目_ja"].eq("ディーラー販売価格（元）"), out.columns[4:]].astype(str).stack().str.contains(r"(日本円|円|[¥￥]|JPY)", na=False)
+    print("❌ Dealerに円の痕跡（禁止）:", bad_dealer.sum(), "件")
 
     print(f"✅ Saved: {DST_PRIMARY.resolve()}")
     print(f"✅ Saved: {DST_SECONDARY.resolve()}")
