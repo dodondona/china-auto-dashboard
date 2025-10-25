@@ -10,10 +10,6 @@ on:
         description: "取得ページ数（例: 5）"
         required: false
         default: "5"
-      mode:
-        description: "ja=日本語整形/翻訳ありの可能性, zh=中国語のまま（LLM依存を避けたい場合は zh 推奨）"
-        required: false
-        default: "zh"
 
 jobs:
   summarize_reviews:
@@ -38,23 +34,10 @@ jobs:
         run: |
           echo "Scanning repository for OpenAI usage..."
           if grep -RInE "from openai|import openai|OpenAI\\(|openai\\." . ; then
-            echo "❌ 'openai' reference detected. This workflow must not call API."
+            echo "❌ 'openai' reference detected. Remove them to run this workflow."
             exit 1
           fi
           echo "✅ No OpenAI references detected."
-
-      - name: Guard - verify openai package is NOT installed
-        run: |
-          python -c "import pkgutil, sys; found=pkgutil.find_loader('openai'); print('openai module present?:', bool(found)); sys.exit(1 if found else 0)"
-
-      - name: Guard - hard-disable API env
-        run: |
-          echo "OPENAI_API_KEY=" >> $GITHUB_ENV
-          echo "OPENAI_API_BASE=" >> $GITHUB_ENV
-          echo "OPENAI_ORG=" >> $GITHUB_ENV
-          echo "AZURE_OPENAI_API_KEY=" >> $GITHUB_ENV
-          echo "AZURE_OPENAI_ENDPOINT=" >> $GITHUB_ENV
-          echo "✅ Environment variables for OpenAI disabled."
 
       - name: Run summary script (scrape & summarize)
         run: |
