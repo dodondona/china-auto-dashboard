@@ -1,0 +1,122 @@
+name: autohome_pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 1 3 * *"
+
+jobs:
+  autohome_pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CJK fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
+          fc-cache -f -v
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install playwright openai pandas beautifulsoup4 requests
+          python -m playwright install chromium
+
+      - name: Run stage scripts (ranking)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "Warm-up page to avoid font wait timeout..."
+          python - <<'PYCODE'
+          import asyncio
+          from playwright.async_api import async_playwright
+          async def main():
+              async with async_playwright() as p:
+                  b = await p.chromium.launch()
+                  page = await b.new_page()
+                  await page.goto("https://www.autohome.com.cn/rank/1", timeout=60000)
+                  await page.wait_for_load_state("networkidle", timeout=60000)
+                  await page.wait_for_timeout(2000)
+                  await b.close()
+          asyncio.run(main())
+          PYCODE
+
+          python tools/rank_capture_images_and_csv.py
+          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
+          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+
+      - name: Upload artifact (ranking csv)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-ranking-csvs
+          path: |
+            public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
+          if-no-files-found: warn
+
+      - name: Build series ids and links
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          csv="public/autohome_ranking_with_image_urls.csv"
+          if [ ! -s "$csv" ]; then
+            echo "missing: $csv" >&2
+            exit 1
+          fi
+          : > artifact/series_ids.txt
+          printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
+          awk -F',' '
+            NR==1{
+              for(i=1;i<=NF;i++){
+                h=$i; gsub(/^"|"$/, "", h)
+                if(h=="link") lc=i
+                if(h=="series_url") sc=i
+              }
+              next
+            }
+            {
+              col = (lc?lc:sc)
+              if(!col) next
+              url = $col
+              gsub(/^"|"$/, "", url)
+              if (match(url,/[0-9]{3,7}/,m)) {
+                sid=m[0]
+                if(!(sid in seen)){
+                  seen[sid]=1
+                  print sid >> "artifact/series_ids.txt"
+                  printf "%s,https://www.autohome.com.cn/%s,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
+                  n++
+                  if(n==100) exit
+                }
+              }
+            }
+          ' "$csv"
+
+      - name: Upload artifact (series ids and links)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-series-urls
+          path: artifact/
+          if-no-files-found: error
+
+      - name: Upload artifact (ranking images)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-ranking-images
+          path: |
+            public/**/*.jpg
+            public/**/*.jpeg
+            public/**/*.png
+          if-no-files-found: warn

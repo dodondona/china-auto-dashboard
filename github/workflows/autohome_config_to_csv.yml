@@ -1,0 +1,145 @@
+name: autohome_config_to_csv
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_run:
+    workflows: ["autohome_pipeline"]
+    types: [completed]
+
+jobs:
+  prepare_series_from_pipeline:
+    if: ${{ github.event_name == 'workflow_run' }}
+    runs-on: ubuntu-latest
+    outputs:
+      series: ${{ steps.mkjson.outputs.series }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq and unzip
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Wait for upstream artifacts to be ready
+        run: |
+          echo "Waiting 60 seconds for autohome-series-urls to finalize..."
+          sleep 60
+
+      - name: Download artifact (autohome-series-urls)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          run_id="${{ github.event.workflow_run.id }}"
+          api="https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}/artifacts"
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "$api" > artifacts.json
+          url=$(jq -r '.artifacts[] | select(.name=="autohome-series-urls") | .archive_download_url' artifacts.json)
+          test -n "$url"
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -L "$url" -o series_artifact.zip
+          mkdir -p artifact && unzip -o series_artifact.zip -d artifact
+          test -s artifact/series_ids.txt
+
+      - id: mkjson
+        name: Build matrix
+        run: |
+          set -euo pipefail
+          json=$(awk 'NF>0' artifact/series_ids.txt | sed 's/[^0-9]//g' | awk 'NF>0' | head -n 100 | jq -R -s -c 'split("\n")|map(select(length>0))')
+          echo "series=$json" >> "$GITHUB_OUTPUT"
+
+  autohome_config_from_pipeline:
+    if: ${{ github.event_name == 'workflow_run' }}
+    needs: prepare_series_from_pipeline
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install playwright beautifulsoup4 pandas openai
+          python -m playwright install chromium
+
+      - name: Run config crawler
+        run: |
+          set -euo pipefail
+          mkdir -p "output/autohome/${{ matrix.series }}"
+          echo "Processing series: ${{ matrix.series }}"
+          python tools/autohome_config_to_csv.py --series "${{ matrix.series }}" || echo "No config found for ${{ matrix.series }}"
+          ls -R output || true
+
+      - name: Translate columns (per series)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 必要なら為替を調整（既定: 21.0）
+          # EXRATE_CNY_TO_JPY: "21.0"
+        run: |
+          set -euo pipefail
+          IN="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv"
+          OUT="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv"
+          if [ -s "$IN" ]; then
+            export CSV_IN="$IN"
+            export CSV_OUT="$OUT"
+            python tools/translate_columns.py
+          else
+            echo "Skip translate: $IN not found."
+          fi
+
+      - name: Upload artifact (per series)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-config-csv-${{ matrix.series }}
+          path: |
+            output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv
+            output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
+          if-no-files-found: warn
+
+  # 旧(手動/スケジュール)の一括翻訳は維持。ただし workflow_run では実行しない
+  autohome_config_to_csv:
+    if: ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install pandas openai
+
+      - name: Translate columns (JA)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          # 従来運用: CSV_IN / CSV_OUT を外から与える or デフォルト(7578)を使う
+          python tools/translate_columns.py
+
+      - name: Upload artifact (config csvs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-config-csv
+          path: |
+            output/autohome/*/config_*.csv
+            output/autohome/*/config_*.ja.csv
+          if-no-files-found: warn
