@@ -39,22 +39,18 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          echo "Running ranking scripts with extended timeout..."
-
+          echo "Warm-up page to avoid font wait timeout..."
           python - <<'PYCODE'
           import asyncio
           from playwright.async_api import async_playwright
-
           async def main():
               async with async_playwright() as p:
-                  browser = await p.chromium.launch()
-                  page = await browser.new_page()
+                  b = await p.chromium.launch()
+                  page = await b.new_page()
                   await page.goto("https://www.autohome.com.cn/rank/1", timeout=60000)
                   await page.wait_for_load_state("networkidle", timeout=60000)
                   await page.wait_for_timeout(2000)
-                  await page.screenshot(path="public/test.png", full_page=True)
-                  await browser.close()
-
+                  await b.close()
           asyncio.run(main())
           PYCODE
 
