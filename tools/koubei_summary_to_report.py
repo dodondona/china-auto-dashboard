@@ -13,10 +13,10 @@ import os, sys, re, glob
 import pandas as pd
 
 # ---------- 基本ユーティリティ ----------
-def detect_files(vehicle_id: str|None):
+def detect_files(vehicle_id: str | None):
     if vehicle_id:
         csv = f"autohome_reviews_{vehicle_id}.csv"
-        txt  = f"autohome_reviews_{vehicle_id}_summary.txt"
+        txt = f"autohome_reviews_{vehicle_id}_summary.txt"
         if not os.path.exists(csv) or not os.path.exists(txt):
             raise FileNotFoundError(f"必要ファイルが見つかりません: {csv}, {txt}")
         return csv, txt
@@ -27,26 +27,33 @@ def detect_files(vehicle_id: str|None):
     # 同じIDのペアを優先
     for c in csvs:
         m = re.search(r"autohome_reviews_(\d+)\.csv$", c)
-        if not m: continue
+        if not m:
+            continue
         vid = m.group(1)
         t = f"autohome_reviews_{vid}_summary.txt"
         if t in txts or os.path.exists(t):
             return c, t
     return csvs[0], txts[0]
 
+
 def ratio(n, total):
-    return 0.0 if total <= 0 else round(n/total*100, 1)
+    return 0.0 if total <= 0 else round(n / total * 100, 1)
+
 
 def split_terms(series):
     s = series.dropna().astype(str).str.split(" / ").explode().str.strip()
-    return s[s!=""]
+    return s[s != ""]
+
 
 def top_k(series, k=5):
-    if series is None: return pd.Series(dtype=int)
+    if series is None:
+        return pd.Series(dtype=int)
     return split_terms(series).value_counts().head(k)
+
 
 def col_exists(df, *cols):
     return all(c in df.columns for c in cols)
+
 
 # ---------- 本体 ----------
 def main():
@@ -55,54 +62,53 @@ def main():
     df = pd.read_csv(csv_path)
 
     # どの列を使うか自動判定
-    if col_exists(df, "pros_ja","cons_ja","sentiment"):
+    if col_exists(df, "pros_ja", "cons_ja", "sentiment"):
         pros_col, cons_col = "pros_ja", "cons_ja"
         lang = "ja"
-    elif col_exists(df, "pros_zh","cons_zh","sentiment"):
+    elif col_exists(df, "pros_zh", "cons_zh", "sentiment"):
         pros_col, cons_col = "pros_zh", "cons_zh"
         lang = "zh"
-    elif col_exists(df, "pros","cons","sentiment"):
+    elif col_exists(df, "pros", "cons", "sentiment"):
         pros_col, cons_col = "pros", "cons"
-        # かな/カナがあれば日本語寄りとみなす
         text = " ".join(df["pros"].dropna().astype(str).head(40).tolist())
         lang = "ja" if re.search(r"[ぁ-ゟ゠-ヿ]", text) else "zh"
     else:
-        # どれも無ければ空で生成
         pros_col = cons_col = None
         lang = "ja"
 
     total = len(df)
-    pos = int((df["sentiment"].astype(str).str.lower()=="positive").sum()) if "sentiment" in df.columns else 0
-    mix = int((df["sentiment"].astype(str).str.lower()=="mixed").sum()) if "sentiment" in df.columns else 0
-    neg = int((df["sentiment"].astype(str).str.lower()=="negative").sum()) if "sentiment" in df.columns else 0
+    pos = int((df["sentiment"].astype(str).str.lower() == "positive").sum()) if "sentiment" in df.columns else 0
+    mix = int((df["sentiment"].astype(str).str.lower() == "mixed").sum()) if "sentiment" in df.columns else 0
+    neg = int((df["sentiment"].astype(str).str.lower() == "negative").sum()) if "sentiment" in df.columns else 0
 
     pros_top = top_k(df[pros_col]) if pros_col else pd.Series(dtype=int)
     cons_top = top_k(df[cons_col]) if cons_col else pd.Series(dtype=int)
 
     # 文面用ヘルパ
     def join_items(vc):
-        items = [f"「{t}」（{cnt}件・{ratio(cnt,total)}%）" for t, cnt in vc.items()]
-        if not items: return ""
-        if len(items)==1: return items[0]
+        items = [f"「{t}」（{cnt}件・{ratio(cnt, total)}%）" for t, cnt in vc.items()]
+        if not items:
+            return ""
+        if len(items) == 1:
+            return items[0]
         return "、".join(items)
 
     # エグゼクティブサマリー
     if total == 0:
         senti_line = "レビュー件数が極めて少なく、全体傾向は不明です。"
     else:
-        # 最多カテゴリで言い回しを変える
-        max_tag = max([("positive",pos),("mixed",mix),("negative",neg)], key=lambda x:x[1])[0]
-        if max_tag=="positive":
-            senti_line = f"全体として**好意的な声が多く**（Positive {pos}件・{ratio(pos,total)}%）、次いでMixed {mix}件（{ratio(mix,total)}%）、Negative {neg}件（{ratio(neg,total)}%）でした。"
-        elif max_tag=="mixed":
-            senti_line = f"全体として**評価はやや分かれ**（Mixed {mix}件・{ratio(mix,total)}%）、Positive {pos}件（{ratio(pos,total)}%）、Negative {neg}件（{ratio(neg,total)}%）が続きました。"
+        max_tag = max([("positive", pos), ("mixed", mix), ("negative", neg)], key=lambda x: x[1])[0]
+        if max_tag == "positive":
+            senti_line = f"全体として**好意的な声が多く**（Positive {pos}件・{ratio(pos, total)}%）、次いでMixed {mix}件（{ratio(mix, total)}%）、Negative {neg}件（{ratio(neg, total)}%）でした。"
+        elif max_tag == "mixed":
+            senti_line = f"全体として**評価はやや分かれ**（Mixed {mix}件・{ratio(mix, total)}%）、Positive {pos}件（{ratio(pos, total)}%）、Negative {neg}件（{ratio(neg, total)}%）が続きました。"
         else:
-            senti_line = f"全体として**否定的な声が目立ち**（Negative {neg}件・{ratio(neg,total)}%）、Mixed {mix}件（{ratio(mix,total)}%）、Positive {pos}件（{ratio(pos,total)}%）が続きました。"
+            senti_line = f"全体として**否定的な声が目立ち**（Negative {neg}件・{ratio(neg, total)}%）、Mixed {mix}件（{ratio(mix, total)}%）、Positive {pos}件（{ratio(pos, total)}%）が続きました。"
 
     pros_line = "（該当データなし）" if pros_top.empty else join_items(pros_top)
     cons_line = "（該当データなし）" if cons_top.empty else join_items(cons_top)
 
-    # “誰に向く/どこが注意”を定型で補う（軽いルール）
+    # “誰に向く/どこが注意”を定型で補う
     who_line = ""
     if not pros_top.empty:
         if any("取り回し" in t or "駐車" in t or "小さ" in t for t in pros_top.index.astype(str)):
@@ -118,8 +124,12 @@ def main():
         if any("静粛" in t or "内装" in t for t in cons_top.index.astype(str)):
             warn_line += "質感や静粛性はグレード差に注意。"
 
+    # vid抽出（安全版）
+    vid_match = re.search(r"autohome_reviews_(\d+)\.csv$", os.path.basename(csv_path))
+    vid = vid_match.group(1) if vid_match else (vehicle_id or "unknown")
+
     # レポート本文
-    header = f"【車両ID: {re.search(r'autohome_reviews_(\\d+)\\.csv$', os.path.basename(csv_path)).group(1)}】口コミサマリー（文章版）"
+    header = f"【車両ID: {vid}】口コミサマリー（文章版）"
     body_lines = [
         "■ エグゼクティブサマリー",
         senti_line,
@@ -139,14 +149,15 @@ def main():
         "※ 比率は本レポート対象の要約行を母数に算出。取得ページや時期により変動します。"
     ]
     txt = header + "\n\n" + "\n".join(body_lines) + "\n"
-    md  = f"# {header}\n\n" + "\n".join(body_lines) + "\n"
+    md = f"# {header}\n\n" + "\n".join(body_lines) + "\n"
 
-    vid = re.search(r"autohome_reviews_(\d+)\\.csv$", os.path.basename(csv_path)).group(1)
-    with open(f"autohome_reviews_{vid}_report.txt","w",encoding="utf-8") as f:
+    report_txt = f"autohome_reviews_{vid}_report.txt"
+    report_md = f"autohome_reviews_{vid}_report.md"
+    with open(report_txt, "w", encoding="utf-8") as f:
         f.write(txt)
-    with open(f"autohome_reviews_{vid}_report.md","w",encoding="utf-8") as f:
+    with open(report_md, "w", encoding="utf-8") as f:
         f.write(md)
-    print("✅ narrative report generated:", f"autohome_reviews_{vid}_report.txt")
+    print(f"✅ narrative report generated: {report_txt}")
 
 if __name__ == "__main__":
     main()
