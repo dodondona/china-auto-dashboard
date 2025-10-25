@@ -10,12 +10,8 @@ on:
         description: "取得ページ数（例: 5）"
         required: false
         default: "5"
-      mode:
-        description: "ja=日本語JSON構造 / zh=中国語高速"
-        required: false
-        default: "ja"
   schedule:
-    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC（不要なら消してください）
 
 jobs:
   summarize_reviews:
@@ -33,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade "openai==1.*" beautifulsoup4 requests pandas playwright
+          pip install --upgrade beautifulsoup4 requests pandas playwright
           python -m playwright install chromium
 
       - name: Print versions (debug)
@@ -43,43 +39,23 @@ jobs:
           print("python:", sys.version)
           PY
 
-      # ✅ スクレイピング＋要約（実処理）
+      # ✅ 実データ取得（Playwright版）
       - name: Run summary script (scrape & summarize)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python tools/koubei_summary_playwright.py \
             "${{ github.event.inputs.vehicle_id }}" \
             "${{ github.event.inputs.pages }}"
 
-      # ① 頻出要素を自然文レポに整形
-      - name: Build narrative report
+      # 安全チェック：次工程前に生成物を確認
+      - name: Assert outputs exist
         run: |
-          python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
+          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}.csv"
+          ls -l "autohome_reviews_${{ github.event.inputs.vehicle_id }}_summary.txt"
 
-      # ② ストーリー版（「良かった」核）
+      # ✅ “さっきの良かった” storywriter のみで成果物を作る
       - name: Build story-style summary
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" \
-            --pros 5 --cons 4 --quotes 2 --style executive
-
-      # ③ 超短文サマリー（2〜3文）
-      - name: Build 2-3 sentence brief
-        run: |
-          python tools/koubei_brief.py "${{ github.event.inputs.vehicle_id }}" --k 3
-
-      # ④ story.txt を構造化（CSV）
-      - name: Convert story.txt to CSV
-        run: |
-          python tools/story_to_csv.py "${{ github.event.inputs.vehicle_id }}"
-
-      # ⑤ story.txt を厚み付きの自然文に補強
-      - name: Enrich story (add depth + quotes)
-        run: |
-          python tools/story_enricher.py "${{ github.event.inputs.vehicle_id }}" \
-            --pos 3 --neg 3 --quotes 2
+          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}"
 
       - name: Upload results
         if: always()
@@ -87,7 +63,6 @@ jobs:
         with:
           name: koubei_summary
           path: |
-            autohome_reviews_*.csv
-            autohome_reviews_*.txt
-            autohome_reviews_*.md
-            autohome_reviews_*.json
+            autohome_reviews_${{ github.event.inputs.vehicle_id }}.csv
+            autohome_reviews_${{ github.event.inputs.vehicle_id }}_summary.txt
+            autohome_reviews_${{ github.event.inputs.vehicle_id }}_story.txt
