@@ -27,7 +27,14 @@ def translate_text(client, text, src_lang="zh", tgt_lang="ja"):
 # ===== メイン =====
 def main():
     series_id = os.environ.get("SERIES_ID") or "unknown"
-    SRC = OUTPUT_DIR / series_id / f"config_{series_id}.csv"
+    CSV_IN = os.environ.get("CSV_IN")
+
+    # 🔸 以前の仕様に戻す：CSV_IN が優先、なければ autohome フォルダ
+    if CSV_IN and Path(CSV_IN).exists():
+        SRC = Path(CSV_IN)
+    else:
+        SRC = OUTPUT_DIR / series_id / f"config_{series_id}.csv"
+
     DST_PRIMARY = OUTPUT_DIR / series_id / f"config_{series_id}.ja.csv"
     DST_SECONDARY = OUTPUT_DIR / series_id / f"config_{series_id}_ja.csv"
     CACHE_CN = CACHE_DIR / series_id / "cn.csv"
@@ -37,7 +44,6 @@ def main():
     print(f"📝 DST(primary): {DST_PRIMARY}")
     print(f"📝 DST(secondary): {DST_SECONDARY}")
 
-    # ここを修正
     if not Path(SRC).exists():
         print(f"⚠ 入力CSVが見つかりません（スキップ）: {SRC}")
         return
@@ -69,7 +75,7 @@ def main():
         itm = row.get("項目", "")
         sec_j, itm_j = None, None
 
-        # 既存キャッシュで一致する行があれば流用
+        # 既存キャッシュに一致行があれば流用
         if df_cn_prev is not None and df_ja_prev is not None:
             mask = (df_cn_prev["セクション"] == sec) & (df_cn_prev["項目"] == itm)
             if mask.any():
