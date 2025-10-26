@@ -1,9 +1,8 @@
-# .github/workflows/autohome_pipeline_to_koubei.yml
 name: autohome_pipeline_to_koubei
 
 on:
   workflow_run:
-    workflows: ["autohome_pipeline"]   # ← 上流Workflowの「name」と一致させる
+    workflows: ["autohome_pipeline"]   # ← 上流Workflowの name と一致させる
     types: [completed]
 
 jobs:
@@ -18,101 +17,67 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 上流の成果物（artifact）を全部落としておく
-      # └ autohome_config_to_csv 連携で使っているものと同等の置き場を想定
-      - name: Download all artifacts from upstream run
+      - name: Download artifacts from upstream
         uses: actions/download-artifact@v4
         with:
-          # 名前が分からない/複数あり得るので “全部”ダウンロード
-          # （個別指定にするなら autohome_config_to_csv と同じ artifact 名に合わせてください）
           path: artifacts
           merge-multiple: true
-          # if-no-files-found: ignore でもOK。ここではデフォルトでfailにして早期検知でも良いです。
 
-      - name: Build series id list
+      - name: Ensure jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Build series id list (no heredoc)
         id: build_matrix
         shell: bash
         run: |
           set -euo pipefail
-
-          # 収集対象の候補ファイルを幅広く探索（上流が何を吐くかに依存）
-          # 例）spec_links.jsonl / public/*.csv に series_url / url / href があるケースを想定
-          tmp_ids="$(mktemp)"
           shopt -s globstar nullglob
 
-          # 1) JSONL由来のID（{"series_id": 4745} or {"url": ".../series/4745.html"}）
-          for f in artifacts/**/*.jsonl public/**/*.jsonl; do
-            python - "$f" >>"$tmp_ids" << 'PY'
-import sys, json, re
-ids=set()
-for line in open(sys.argv[1], 'r', encoding='utf-8', errors='ignore'):
-    line=line.strip()
-    if not line: continue
-    try:
-        o=json.loads(line)
-    except Exception:
-        continue
-    if 'series_id' in o:
-        ids.add(str(o['series_id']))
-    if 'url' in o and isinstance(o['url'], str):
-        m=re.search(r'/series/(\d+)\.html|/(\d+)\.html', o['url'])
-        if m: ids.add(m.group(1) or m.group(2))
-print("\n".join(sorted(ids)))
-PY
-          done
+          : > series_ids.txt
 
-          # 2) CSV由来のID（ヘッダに series_url / url / href など）
-          for f in artifacts/**/*.csv public/**/*.csv; do
-            python - "$f" >>"$tmp_ids" << 'PY'
-import sys, csv, re
-ids=set()
-with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as fp:
-    try:
-        rdr=csv.DictReader(fp)
-    except Exception:
-        sys.exit(0)
-    for row in rdr:
-        for k in ('series_url','url','href'):
-            if k in row and row[k]:
-                m=re.search(r'/series/(\d+)\.html|/(\d+)\.html', row[k])
-                if m:
-                    ids.add(m.group(1) or m.group(2))
-print("\n".join(sorted(ids)))
-PY
-          done
+          # artifacts 内から抽出
+          if compgen -G "artifacts/**" > /dev/null; then
+            grep -RhoE '"series_id"\s*:\s*[0-9]+' artifacts/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+            grep -RhoE '/series/[0-9]+\.html'             artifacts/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+            grep -RhoE 'https?://k\.autohome\.com\.cn/[0-9]+' artifacts/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+          fi
 
-          # 整理（重複/空を除去）
-          sort -u "$tmp_ids" | grep -E '^[0-9]+$' > series_ids.txt || true
+          # public 内からも抽出（必要な場合）
+          if compgen -G "public/**" > /dev/null; then
+            grep -RhoE '"series_id"\s*:\s*[0-9]+' public/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+            grep -RhoE '/series/[0-9]+\.html'             public/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+            grep -RhoE 'https?://k\.autohome\.com\.cn/[0-9]+' public/** 2>/dev/null | grep -oE '[0-9]+' >> series_ids.txt || true
+          fi
 
           if [ ! -s series_ids.txt ]; then
-            echo "::error::No series IDs were found. Check upstream artifacts (spec_links.jsonl / public/*.csv etc.)."
+            echo "::error::No series IDs were found in artifacts/public."
             exit 1
           fi
 
-          echo "Found $(wc -l < series_ids.txt) series IDs:"
-          head -n 10 series_ids.txt
+          sort -u series_ids.txt > series_ids.uniq.txt
+          echo "Found $(wc -l < series_ids.uniq.txt) unique series IDs"
+          head -n 20 series_ids.uniq.txt || true
 
-          # Matrix用JSONへ（["4745","7806",...]）
-          ids_json=$(python - << 'PY'
-import json
-print(json.dumps([l.strip() for l in open("series_ids.txt","r",encoding="utf-8") if l.strip()]))
-PY
-)
-          echo "ids_json=$ids_json" >> "$GITHUB_OUTPUT"
+          # JSON配列に整形（["4745","7806",...])
+          ids_json="$(jq -R -s -c 'split("\n")|map(select(length>0))' series_ids.uniq.txt)"
+          echo "ids_json=${ids_json}" >> "$GITHUB_OUTPUT"
 
   run-koubei:
     needs: prepare-ids
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 6              # 上流と同程度/回線・サイト負荷を考慮して調整
+      max-parallel: 6
       matrix:
         series_id: ${{ fromJson(needs.prepare-ids.outputs.ids_json) }}
 
     steps:
-      - name: Call koubei_summary.yml for each series_id
+      - name: Call koubei_summary.yml for each ID
         uses: ./.github/workflows/koubei_summary.yml
         with:
-          series_id: ${{ matrix.series_id }}
-          pages: "5"               # 既定ページ数。必要に応じて変えてください
+          # ★あなたの現在の koubei_summary.yml の input 名に合わせています（vehicle_id）
+          vehicle_id: ${{ matrix.series_id }}
+          pages: "5"
         secrets: inherit
