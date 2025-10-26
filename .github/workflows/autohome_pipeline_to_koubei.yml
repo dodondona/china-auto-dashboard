@@ -64,20 +64,18 @@ jobs:
           ids_json="$(jq -R -s -c 'split("\n")|map(select(length>0))' series_ids.uniq.txt)"
           echo "ids_json=${ids_json}" >> "$GITHUB_OUTPUT"
 
+  # 🔽 再利用ワークフローは “job レベルで uses:”
   run-koubei:
     needs: prepare-ids
-    runs-on: ubuntu-latest
+    if: ${{ needs.prepare-ids.outputs.ids_json != '' }}
     strategy:
       fail-fast: false
       max-parallel: 6
       matrix:
         series_id: ${{ fromJson(needs.prepare-ids.outputs.ids_json) }}
-
-    steps:
-      - name: Call koubei_summary.yml for each ID
-        uses: ./.github/workflows/koubei_summary.yml
-        with:
-          # ★あなたの現在の koubei_summary.yml の input 名に合わせています（vehicle_id）
-          vehicle_id: ${{ matrix.series_id }}
-          pages: "5"
-        secrets: inherit
+    uses: ./.github/workflows/koubei_summary.yml
+    with:
+      # ★あなたの koubei_summary.yml の input 名に合わせる（vehicle_id で維持）
+      vehicle_id: ${{ matrix.series_id }}
+      pages: "5"
+    secrets: inherit
