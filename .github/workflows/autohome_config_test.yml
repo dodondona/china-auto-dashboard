@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: write  # ← push権限
+  contents: write  # push権限
 
 jobs:
   run:
@@ -33,6 +33,7 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests || true
           python -m playwright install chromium || true
 
+      # 1) 先にホームページからCSV生成
       - name: Run config crawler
         run: |
           set -euo pipefail
@@ -40,6 +41,7 @@ jobs:
           python tools/autohome_config_to_csv.py --series "${{ inputs.series_id }}" || echo "No config generated"
           ls -R output || true
 
+      # 2) 生成済みCSVがある時だけ翻訳（CSV_INを明示）
       - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
@@ -54,6 +56,7 @@ jobs:
             echo "Skip translate: $IN not found."
           fi
 
+      # 3) リポジトリに確実に残す（見える化）
       - name: Commit repo cache and outputs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,15 +65,15 @@ jobs:
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git add "cache_repo/series/${{ inputs.series_id }}/cn.csv" || true
-          git add "cache_repo/series/${{ inputs.series_id }}/ja.csv" || true
-          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv" || true
-          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv" || true
-          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv" || true
+          # cache と outputs を一括 add（存在しないときもエラーにしない）
+          mkdir -p "cache_repo/series/${{ inputs.series_id }}" || true
+          git add -A "cache_repo/series/${{ inputs.series_id }}/" || true
+          git add -A "output/autohome/${{ inputs.series_id }}/" || true
           git commit -m "update series ${{ inputs.series_id }} (CN/JA outputs & cache_repo)" || echo "No changes to commit"
           git pull --rebase || true
           git push
 
+      # 任意：Artifacts（必要なければ外してください）
       - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
