@@ -1,481 +1,280 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Autohome series CONFIG -> CSV extractor (no-API version)
+
+- 入力: シリーズID (例: 5213) もしくは config ページURL
+- 出力: output/autohome/<series_id>/ 以下に
+    - config.raw.json
+    - config.csv
+    - config_<series_id>.csv   ← YAMLを変えずに済むよう追設（互換）
+- Playwright を用いてページを開き、`window.CONFIG` を取得。
+- `networkidle` は使わず、`domcontentloaded` 待ち + 直取り/評価の二段構え（3回リトライ）。
+"""
+
 from __future__ import annotations
-import os, json, time, re
-from pathlib import Path
-import pandas as pd
-from openai import OpenAI
 
-# ====== 入出力（YAML変更なしで動くよう互換重視） ======
-SERIES_ID = os.environ.get("SERIES_ID", "").strip()
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+import time
+from typing import Any, Dict, List, Optional
 
-def resolve_src_dst():
-    csv_in  = os.environ.get("CSV_IN", "").strip()
-    csv_out = os.environ.get("CSV_OUT", "").strip()
+from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PWTimeoutError
 
-    def guess_paths_from_series(sid: str):
-        if not sid:
-            return None, None
-        base = f"output/autohome/{sid}/config_{sid}"
-        return Path(f"{base}.csv"), Path(f"{base}.ja.csv")  # 既定は .ja.csv
+# ---- 環境変数で調整可能なパラメータ -----------------------------
 
-    default_in  = Path("output/autohome/7578/config_7578.csv")
-    default_out = Path("output/autohome/7578/config_7578.ja.csv")
+NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "180000"))  # 既定 180 秒
+GOTO_WAIT_UNTIL = os.getenv("GOTO_WAIT_UNTIL", "domcontentloaded")  # networkidle は使用しない
+OUTPUT_BASE = os.getenv("OUTPUT_BASE", "output/autohome")
 
-    src = Path(csv_in)  if csv_in  else None
-    dst = Path(csv_out) if csv_out else None
+USER_AGENT = os.getenv(
+    "USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+)
 
-    if src is None or dst is None:
-        s2, d2 = guess_paths_from_series(SERIES_ID)
-        src = src or s2
-        dst = dst or d2
+BLOCK_HOSTS = tuple(
+    h.strip()
+    for h in os.getenv(
+        "BLOCK_HOSTS",
+        "googletagmanager.com,google-analytics.com,hm.baidu.com,baidu.com",
+    ).split(",")
+    if h.strip()
+)
 
-    src = src or default_in
-    dst = dst or default_out
-    return src, dst
+# -----------------------------------------------------------------
 
-SRC, DST_PRIMARY = resolve_src_dst()
+def log(*args: Any) -> None:
+    print(*args, flush=True)
 
-def make_secondary(dst: Path) -> Path:
-    s = dst.name
-    if s.endswith(".ja.csv"):
-        s2 = s.replace(".ja.csv", "_ja.csv")
-    elif s.endswith("_ja.csv"):
-        s2 = s.replace("_ja.csv", ".ja.csv")
-    else:
-        s2 = dst.stem + ".ja.csv"
-    return dst.parent / s2
+def is_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
 
-DST_SECONDARY = make_secondary(DST_PRIMARY)
+def build_series_url(arg: str) -> str:
+    """引数がIDならURLに、URLならそのまま返す"""
+    if is_url(arg):
+        return arg
+    series_id = str(int(arg))
+    return f"https://www.autohome.com.cn/config/series/{series_id}.html#pvareaid=3454437"
 
-# ====== OpenAI ======
-MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-API_KEY = os.environ.get("OPENAI_API_KEY")
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-# スイッチ
-TRANSLATE_VALUES   = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
-TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
-
-# 先頭車名を削る（既定ON）。明示パターンは SERIES_PREFIX（例: "駆逐艦05|驱逐舰05"）
-STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
-SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
-
-# 為替
-EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
-
-BATCH_SIZE  = 60
-RETRIES     = 3
-SLEEP_BASE  = 1.2
-
-# ====== クリーニング・辞書 ======
-NOISE_ANY = ["对比", "参数", "图片", "配置", "详情"]
-NOISE_PRICE_TAIL = ["询价", "计算器", "询底价", "报价", "价格询问", "価格問い合わせ", "起", "起售"]
-
-def clean_any_noise(s: str) -> str:
-    s = str(s) if s is not None else ""
-    for w in NOISE_ANY + NOISE_PRICE_TAIL:
-        s = s.replace(w, "")
-    s = re.sub(r"\s+", " ", s).strip(" 　-—–")
-    return s
-
-def clean_price_cell(s: str) -> str:
-    t = clean_any_noise(s)
-    for w in NOISE_PRICE_TAIL:
-        t = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", t)
-    return t.strip()
-
-# 円/JPY/¥/￥ を括弧内外ともに除去（MSRP再生成前/Dealer厳禁で使用）
-RE_PAREN_ANY_YEN = re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
-RE_ANY_YEN_TOKEN = re.compile(r"(日本円|JPY|[¥￥]|円)")
-
-def strip_any_yen_tokens(s: str) -> str:
-    t = str(s)
-    t = RE_PAREN_ANY_YEN.sub("", t)         # （日本円…）や（約¥…）などの括弧丸ごと削除
-    t = RE_ANY_YEN_TOKEN.sub("", t)         # 括弧外の「円/¥/￥/JPY/日本円」も削除
-    return re.sub(r"\s+", " ", t).strip()
-
-# ブランド正規化（BYDは翻訳しない）
-BRAND_MAP = {"BYD": "BYD", "比亚迪": "BYD"}
-
-# 固定訳（見出し）
-# ・MSRP見出し：通貨表記なし
-# ・ディーラー見出し：明示的に（元）
-FIX_JA_ITEMS = {
-    "厂商指导价":   "メーカー希望小売価格",      # ★（円/元）表記なし
-    "经销商参考价": "ディーラー販売価格（元）",
-    "经销商报价":   "ディーラー販売価格（元）",
-    "经销商":       "ディーラー販売価格（元）",
-    "被动安全":     "衝突安全",
-}
-FIX_JA_SECTIONS = {"被动安全": "衝突安全"}
-
-PRICE_ITEM_MSRP_CN    = {"厂商指导价"}
-PRICE_ITEM_MSRP_JA    = {"メーカー希望小売価格"}
-PRICE_ITEM_DEALER_CN  = {"经销商参考价", "经销商报价", "经销商"}
-PRICE_ITEM_DEALER_JA  = {"ディーラー販売価格（元）"}
-
-# ====== 価格整形 ======
-RE_WAN       = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
-RE_YUAN      = re.compile(r"(?P<num>[\d,]+)\s*元")
-
-def parse_cny(text: str):
-    """文字列から CNY 金額（元）を抽出。万→元 に換算。失敗時 None。"""
-    t = str(text)
-    m1 = RE_WAN.search(t)
-    if m1:
-        return float(m1.group("num")) * 10000.0
-    m2 = RE_YUAN.search(t)
-    if m2:
-        return float(m2.group("num").replace(",", ""))
-    return None
-
-def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
-    """
-    MSRPを「xx万元（日本円YYY円）」に**必ず**統一。
-    ・既存の円/¥/￥/JPY痕跡は括弧内外とも**完全除去**してから再生成
-    ・「11.98万」→「11.98万元（日本円251,580円）」
-      「129,800元」→「129,800元（日本円2,725,800円）」
-    """
-    t = strip_any_yen_tokens(clean_price_cell(cell))
-    if not t or t in {"-", "–", "—"}:
-        return t
-
-    cny = parse_cny(t)
-    if cny is None:
-        if ("元" not in t) and RE_WAN.search(t):
-            t = f"{t}元"
-        return t
-
-    # 表示用（元側）
-    m1 = RE_WAN.search(t)
-    if m1:
-        yuan_disp = f"{m1.group('num')}万元"
-    else:
-        if "元" not in t:
-            t = f"{t}元"
-        yuan_disp = t
-
-    jpy = int(round(cny * rate))
-    jpy_fmt = f"{jpy:,}"
-    return f"{yuan_disp}（日本円{jpy_fmt}円）"
-
-def dealer_to_yuan_only(cell: str) -> str:
-    """
-    ディーラー価格は「…元」だけ（円は絶対に付けない）。
-    既存の円/¥/￥/JPY痕跡は括弧内外とも完全除去。
-    """
-    t = strip_any_yen_tokens(clean_price_cell(cell))
-    if not t or t in {"-", "–", "—"}:
-        return t
-    if ("元" not in t) and RE_WAN.search(t):
-        t = f"{t}元"
-    return t
-
-# ====== LLM ======
-def uniq(seq):
-    s, out = set(), []
-    for x in seq:
-        if x not in s:
-            s.add(x); out.append(x)
-    return out
-
-def chunked(xs, n):
-    for i in range(0, len(xs), n):
-        yield xs[i:i+n]
-
-def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
-    try:
-        data = json.loads(content)
-        if isinstance(data, dict) and "translations" in data:
-            m = {}
-            for d in data["translations"]:
-                cn = str(d.get("cn", "")).strip()
-                ja = str(d.get("ja", "")).strip()
-                if cn:
-                    m[cn] = ja or cn
-            if m:
-                return m
-    except Exception:
-        pass
-    mjson = re.search(r"\{[\s\S]*\}", content)
-    if mjson:
-        try:
-            data = json.loads(mjson.group(0))
-            if isinstance(data, dict) and "translations" in data:
-                m = {}
-                for d in data["translations"]:
-                    cn = str(d.get("cn", "")).strip()
-                    ja = str(d.get("ja", "")).strip()
-                    if cn:
-                        m[cn] = ja or cn
-                if m:
-                    return m
-        except Exception:
-            pass
-    m = {}
-    for line in content.splitlines():
-        if "\t" in line:
-            cn, ja = line.split("\t", 1)
-            cn = cn.strip(); ja = ja.strip()
-            if cn:
-                m[cn] = ja or cn
-    for t in terms:
-        m.setdefault(t, t)
-    return m
-
-class Translator:
-    def __init__(self, model: str, api_key: str):
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
-        self.system = (
-            "あなたは自動車仕様表の専門翻訳者です。"
-            "入力は中国語の『セクション名/項目名/モデル名/セル値』の配列です。"
-            "自然で簡潔な日本語へ翻訳してください。数値・年式・排量・AT/MT等の記号は保持。"
-            "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
-        )
-
-    def translate_batch(self, terms: list[str]) -> dict[str, str]:
-        msgs = [
-            {"role": "system", "content": self.system},
-            {"role": "user", "content": json.dumps({"terms": terms}, ensure_ascii=False)},
-        ]
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=msgs,
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or ""
-        return parse_json_relaxed(content, terms)
-
-    def translate_unique(self, unique_terms: list[str]) -> dict[str, str]:
-        out = {}
-        for chunk in chunked(unique_terms, BATCH_SIZE):
-            for attempt in range(1, RETRIES+1):
-                try:
-                    out.update(self.translate_batch(chunk))
-                    break
-                except Exception:
-                    if attempt == RETRIES:
-                        for t in chunk:
-                            out.setdefault(t, t)
-                    time.sleep(SLEEP_BASE * attempt)
-        return out
-
-# ====== 先頭車名のルールベース削除（汎用化） ======
-YEAR_TOKEN_RE      = re.compile(r"(?:20\d{2}|19\d{2})|(?:\d{2}款|[上中下]市|改款|年款)")
-LEADING_TOKEN_RE   = re.compile(r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9\- ]{1,40}")
-
-def cut_before_year_or_kuan(s: str) -> str | None:
-    s = s.strip()
-    m = YEAR_TOKEN_RE.search(s)
-    if m:
-        return s[:m.start()].strip()
-    kuan = re.search(r"款", s)
-    if kuan:
-        return s[:kuan.start()].strip()
-    m2 = LEADING_TOKEN_RE.match(s)
-    return m2.group(0).strip() if m2 else None
-
-def detect_common_series_prefix(cols: list[str]) -> str | None:
-    cand = []
-    for c in cols:
-        p = cut_before_year_or_kuan(str(c))
-        if p and len(p) >= 2:
-            cand.append(p)
-    if not cand:
+def extract_config_from_text(html_text: str) -> Optional[Dict[str, Any]]:
+    """ページ全体テキストから window.CONFIG = {...}; を素直に抜く"""
+    m = re.search(r"window\.CONFIG\s*=\s*(\{.*?\})\s*;", html_text, re.S)
+    if not m:
         return None
-    from collections import Counter
-    top, ct = Counter(cand).most_common(1)[0]
-    if ct >= max(1, int(0.6 * len(cols))):
-        return re.escape(top)
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
+
+def goto_and_get_config(page, url: str) -> Optional[Dict[str, Any]]:
+    """
+    - domcontentloaded まで待機
+    - script:has-text("CONFIG") があれば page.content() から直取り
+    - ダメなら page.evaluate で window.CONFIG を見る
+    - 3回までリトライ
+    """
+    for attempt in range(3):
+        try:
+            page.goto(url, wait_until=GOTO_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
+            try:
+                page.wait_for_selector('script:has-text("CONFIG")', timeout=5000)
+            except PWTimeoutError:
+                pass
+
+            html = page.content()
+            cfg = extract_config_from_text(html)
+            if cfg:
+                return cfg
+
+            try:
+                js = page.evaluate("() => (window.CONFIG ? JSON.stringify(window.CONFIG) : null)")
+                if js:
+                    return json.loads(js)
+            except Exception:
+                pass
+
+        except PWTimeoutError:
+            time.sleep(2 + attempt * 3)
+            continue
     return None
 
-def strip_series_prefix_from_grades(grade_cols: list[str]) -> list[str]:
-    if not grade_cols or not STRIP_GRADE_PREFIX:
-        return grade_cols
-    pattern = SERIES_PREFIX_RE if SERIES_PREFIX_RE else detect_common_series_prefix(grade_cols)
-    if not pattern:
-        return grade_cols
-    regex = re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*", re.IGNORECASE)
-    cleaned = [regex.sub("", str(c)).strip() or c for c in grade_cols]
-    return cleaned
+def flatten_to_rows(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Autohome CONFIG から、主要な列をフラット化
+    - model_name（车型名）
+    - 厂商指导价（MSRP）
+    - 经销商报价/经销商参考价（ディーラー価格）
+    """
+    result = cfg.get("result") or cfg
 
-# ====== ★ 追加：辞書/キャッシュユーティリティ（セクション/項目専用） ======
-def _load_map_json(path: str | None) -> dict[str, str]:
-    if not path:
-        return {}
-    p = Path(path)
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return {str(k).strip(): str(v).strip() for k, v in data.items()}
-    except Exception:
-        return {}
+    specs: List[Dict[str, Any]] = result.get("specs") or result.get("speclist") or []
+    spec_ids: List[str] = []
+    spec_names: List[str] = []
 
-def _save_map_json(path: str | None, new_items: dict[str, str]):
-    if not path or not new_items:
-        return
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    old = _load_map_json(path)
-    old.update(new_items)
-    p.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+    for s in specs:
+        sid = str(s.get("id") or s.get("specid") or "")
+        name = str(s.get("name") or s.get("specname") or "").strip()
+        if sid:
+            spec_ids.append(sid)
+            spec_names.append(name)
 
-def translate_with_dict(unique_terms: list[str], *,
-                        base_dict_path: str | None,
-                        cache_path: str | None,
-                        translator: Translator) -> dict[str, str]:
-    """辞書→キャッシュ→（未ヒットのみ）API の順でセクション/項目だけを翻訳"""
-    base = _load_map_json(base_dict_path)
-    cache = _load_map_json(cache_path)
-    hit = {}
-    miss = []
-    for t in unique_terms:
-        key = str(t).strip()
-        if not key:
-            continue
-        if key in base:
-            hit[key] = base[key]
-        elif key in cache:
-            hit[key] = cache[key]
-        else:
-            miss.append(key)
+    price_msrp_per_spec: Dict[int, str] = {}
+    price_dealer_per_spec: Dict[int, str] = {}
 
-    api_gained = translator.translate_unique(miss) if miss else {}
-    # キャッシュへ追記（新規分のみ）
-    new_for_cache = {k: v for k, v in api_gained.items() if k not in cache and k not in base}
-    _save_map_json(cache_path, new_for_cache)
+    def assign_param_values(param_name: str, dest: Dict[int, str], items: List[Dict[str, Any]]):
+        for param in items:
+            name = str(param.get("name") or "").strip()
+            if name != param_name:
+                continue
+            vals = param.get("valueitems") or []
+            for idx, vi in enumerate(vals):
+                v = str(vi.get("value") or "").strip()
+                if v:
+                    dest[idx] = v
 
-    out = {}
-    out.update(hit)
-    out.update(api_gained)
-    return out
+    paramtypeitems = result.get("paramtypeitems") or []
+    for group in paramtypeitems:
+        items = group.get("paramitems") or []
+        assign_param_values("厂商指导价", price_msrp_per_spec, items)
+        assign_param_values("经销商报价", price_dealer_per_spec, items)
+        assign_param_values("经销商参考价", price_dealer_per_spec, items)
 
-# ====== main ======
-def main():
-    print(f"🔎 SRC: {SRC}")
-    print(f"📝 DST(primary): {DST_PRIMARY}")
-    print(f"📝 DST(secondary): {DST_SECONDARY}")
+    rows: List[Dict[str, Any]] = []
+    count = max(len(spec_ids), len(spec_names))
+    for i in range(count):
+        row = {
+            "spec_id": spec_ids[i] if i < len(spec_ids) else "",
+            "model_name": spec_names[i] if i < len(spec_names) else "",
+            "厂商指导价": price_msrp_per_spec.get(i, ""),
+            "经销商价": price_dealer_per_spec.get(i, ""),
+        }
+        rows.append(row)
 
-    if not Path(SRC).exists():
-        print("⚠ 入力CSVが見つかりません。近傍のCSVを探索します…")
-        for p in Path("output").glob("**/config_*.csv"):
-            print("  -", p)
-        raise FileNotFoundError(f"入力CSVが見つかりません: {SRC}")
+    return rows
 
-    df = pd.read_csv(SRC, encoding="utf-8-sig")
-    df = df.map(clean_any_noise)
+def write_json(path: str, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-    # 列ヘッダのブランド正規化
-    df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
+def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        rows = [{"spec_id": "", "model_name": "", "厂商指导价": "", "经销商价": ""}]
+    fieldnames = list(rows[0].keys())
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
-    # セクション/項目 翻訳（★辞書＋キャッシュ優先：未ヒットのみ従来API）
-    uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("").tolist() if str(x).strip()])
-    uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("").tolist() if str(x).strip()])
+def get_series_id_from_arg(arg: str) -> str:
+    if is_url(arg):
+        m = re.search(r"/series/(\d+)\.html", arg)
+        if m:
+            return m.group(1)
+        return re.sub(r"\W+", "_", arg)[:32]
+    return str(int(arg))
 
-    tr = Translator(MODEL, API_KEY)
+def process_one_series(arg: str) -> None:
+    url = build_series_url(arg)
+    series_id = get_series_id_from_arg(arg)
+    outdir = os.path.join(OUTPUT_BASE, series_id)
+    ensure_dir(outdir)
 
-    # ★ 追加 env（無指定ならキャッシュは cache/*.json に自動保存）
-    DICT_SECTIONS = os.environ.get("DICT_SECTIONS", "").strip()
-    DICT_ITEMS    = os.environ.get("DICT_ITEMS", "").strip()
-    CACHE_SECTIONS = os.environ.get("CACHE_SECTIONS", "cache/sections.ja.json").strip()
-    CACHE_ITEMS    = os.environ.get("CACHE_ITEMS", "cache/items.ja.json").strip()
+    log(f"Processing series: {series_id}")
+    log(f"Loading: {url}")
 
-    sec_map  = translate_with_dict(uniq_sec,  base_dict_path=DICT_SECTIONS, cache_path=CACHE_SECTIONS, translator=tr)
-    item_map = translate_with_dict(uniq_item, base_dict_path=DICT_ITEMS,    cache_path=CACHE_ITEMS,    translator=tr)
-
-    # 固定訳で上書き（MSRP見出し/ディーラー見出し）
-    sec_map.update(FIX_JA_SECTIONS)
-    item_map.update(FIX_JA_ITEMS)
-
-    out = df.copy()
-    out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
-    out.insert(3, "項目_ja",     out["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
-
-    # --- 見出し(項目_ja)の正規化：通貨や括弧書きを落として統一 ---
-    PAREN_CURR_RE = re.compile(r"（\s*(?:円|元|人民元|CNY|RMB|JPY)[^）]*）")
-    out["項目_ja"] = out["項目_ja"].astype(str).str.replace(PAREN_CURR_RE, "", regex=True).str.strip()
-    # 「メーカー希望小売価格」で始まるものは完全に統一
-    out.loc[out["項目_ja"].str.match(r"^メーカー希望小売価格.*$", na=False), "項目_ja"] = "メーカー希望小売価格"
-    # ディーラーも強制統一
-    out.loc[out["項目_ja"].str.contains(r"ディーラー販売価格", na=False), "項目_ja"] = "ディーラー販売価格（元）"
-
-    # 列ヘッダ（グレード）翻訳＆先頭車名削除（汎用化）※従来通り API 直呼び（キャッシュ不使用）
-    if TRANSLATE_COLNAMES:
-        orig_cols   = list(out.columns)
-        fixed_cols  = orig_cols[:4]
-        grade_cols  = orig_cols[4:]
-        grade_cols_norm     = [BRAND_MAP.get(c, c) for c in grade_cols]
-        grade_cols_stripped = strip_series_prefix_from_grades(grade_cols_norm)
-        uniq_grades = uniq([str(c).strip() for c in grade_cols_stripped])
-        grade_map   = tr.translate_unique(uniq_grades)
-        translated  = [grade_map.get(g, g) or g for g in grade_cols_stripped]
-        out.columns = fixed_cols + translated
-    else:
-        if STRIP_GRADE_PREFIX:
-            orig_cols   = list(out.columns)
-            fixed_cols  = orig_cols[:4]
-            grade_cols  = orig_cols[4:]
-            out.columns = fixed_cols + strip_series_prefix_from_grades(grade_cols)
-
-    # ===== 価格セル整形（従来通り） =====
-    MSRP_JA_RE   = re.compile(r"^メーカー希望小売価格$")
-    DEALER_JA_RE = re.compile(r"^ディーラー販売価格（元）$")
-
-    is_msrp_row   = out["項目"].isin(PRICE_ITEM_MSRP_CN)   | out["項目_ja"].fillna("").str.match(MSRP_JA_RE)
-    is_dealer_row = out["項目"].isin(PRICE_ITEM_DEALER_CN) | out["項目_ja"].fillna("").str.match(DEALER_JA_RE)
-
-    for col in out.columns[4:]:
-        # MSRP: 「xx万元（日本円YYY円）」に強制統一（円痕跡は全削除の上で再生成）
-        out.loc[is_msrp_row, col] = out.loc[is_msrp_row, col].map(
-            lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-gpu"])
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            locale="zh-CN",
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
         )
-        # Dealer: 「…元」だけ（円は厳禁、痕跡は完全除去）
-        out.loc[is_dealer_row, col] = out.loc[is_dealer_row, col].map(
-            lambda s: dealer_to_yuan_only(s)
-        )
+        page = context.new_page()
 
-    # 値セルの翻訳（価格行は対象外）※従来通り API 直呼び（キャッシュ不使用）
-    if TRANSLATE_VALUES:
-        values = []
-        numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        non_price_mask = ~(is_msrp_row | is_dealer_row)
-        for col in out.columns[4:]:
-            for v in out.loc[non_price_mask, col].astype(str).tolist():
-                vv = v.strip()
-                if vv in {"", "●", "○", "–", "-", "—"}:
-                    continue
-                if numeric_like.fullmatch(vv):
-                    continue
-                values.append(vv)
-        uniq_vals = uniq(values)
-        val_map = tr.translate_unique(uniq_vals)
-        for col in out.columns[4:]:
-            out.loc[non_price_mask, col] = out.loc[non_price_mask, col].map(
-                lambda s: val_map.get(str(s).strip(), str(s).strip())
-            )
+        def _route_handler(route):
+            req_url = route.request.url
+            if any(h in req_url for h in BLOCK_HOSTS):
+                return route.abort()
+            return route.continue_()
 
-    # 出力（Artifacts 揺れ対策で二重書き）
-    DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(DST_PRIMARY, index=False, encoding="utf-8-sig")
-    out.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
+        page.route("**/*", _route_handler)
 
-    # ===== 仕上げチェック（ログ） =====
-    print("🔎 MSRP ラベル uniq:", sorted(out.loc[out["項目_ja"].str.contains("メーカー希望小売価格", na=False), "項目_ja"].unique()))
-    print("🔎 Dealer ラベル uniq:", sorted(out.loc[out["項目_ja"].str.contains("ディーラー販売価格", na=False), "項目_ja"].unique()))
+        cfg = goto_and_get_config(page, url)
 
-    bad_msrp = out.loc[out["項目_ja"].eq("メーカー希望小売価格"), out.columns[4:]].astype(str).stack().str.contains(r"(日本円|円|[¥￥]|JPY)", na=False)
-    print("❌ MSRPに円の痕跡（再生成前のゴミ）:", bad_msrp.sum(), "件")
+        if not cfg:
+            log(f"No config found for {series_id}")
+            write_json(os.path.join(outdir, "config.raw.json"), {"error": "CONFIG not found"})
+            # 下流互換のため「両方のCSV名」を空で出す
+            write_csv(os.path.join(outdir, "config.csv"), [])
+            write_csv(os.path.join(outdir, f"config_{series_id}.csv"), [])
+            context.close()
+            browser.close()
+            return
 
-    bad_dealer = out.loc[out["項目_ja"].eq("ディーラー販売価格（元）"), out.columns[4:]].astype(str).stack().str.contains(r"(日本円|円|[¥￥]|JPY)", na=False)
-    print("❌ Dealerに円の痕跡（禁止）:", bad_dealer.sum(), "件")
+        write_json(os.path.join(outdir, "config.raw.json"), cfg)
 
-    print(f"✅ Saved: {DST_PRIMARY.resolve()}")
-    print(f"✅ Saved: {DST_SECONDARY.resolve()}")
-    print(f"📦 Exists (primary)? {DST_PRIMARY.exists()}")
-    print(f"📦 Exists (secondary)? {DST_SECONDARY.exists()}")
+        rows = flatten_to_rows(cfg)
+        # 互換のため、2つのファイル名で書き出し
+        write_csv(os.path.join(outdir, "config.csv"), rows)
+        write_csv(os.path.join(outdir, f"config_{series_id}.csv"), rows)
+
+        context.close()
+        browser.close()
+
+    # あなたのログ風の確認出力
+    top = OUTPUT_BASE
+    log("output:")
+    for root in sorted({top, os.path.join(top, series_id)}):
+        log(root + ":" if root.endswith(series_id) else root)
+        if root.endswith(series_id):
+            for name in sorted(os.listdir(root)):
+                path = os.path.join(root, name)
+                log(f"{path}:" if os.path.isdir(path) else f"{path}")
+
+def parse_args() -> List[str]:
+    """
+    YMLを変更せずに使えるように、以下の両方を受け付ける:
+      - 位置引数:  python autohome_config_to_csv.py 5714 8042
+      - オプション: python autohome_config_to_csv.py --series 5714 8042
+    """
+    parser = argparse.ArgumentParser(description="Autohome CONFIG -> CSV")
+    parser.add_argument("series_positional", nargs="*", help="シリーズID もしくは config URL（複数可）")
+    parser.add_argument("--series", dest="series_opt", nargs="+", help="(互換) シリーズID/URL（複数可）")
+    args = parser.parse_args()
+
+    series_list: List[str] = []
+    if args.series_opt:
+        series_list.extend(args.series_opt)
+    if args.series_positional:
+        series_list.extend(args.series_positional)
+
+    if not series_list:
+        parser.error("series が指定されていません（位置引数 または --series を使ってください）")
+    return series_list
+
+def main() -> None:
+    series_list = parse_args()
+    for s in series_list:
+        try:
+            process_one_series(s)
+        except Exception as e:
+            log(f"[ERROR] series={s}: {e}")
+            series_id = get_series_id_from_arg(s)
+            outdir = os.path.join(OUTPUT_BASE, series_id)
+            ensure_dir(outdir)
+            write_json(os.path.join(outdir, "config.raw.json"), {"error": str(e)})
+            write_csv(os.path.join(outdir, "config.csv"), [])
+            write_csv(os.path.join(outdir, f"config_{series_id}.csv"), [])
 
 if __name__ == "__main__":
     main()
