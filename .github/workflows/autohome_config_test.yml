@@ -26,11 +26,11 @@ jobs:
           python -m pip install --upgrade pip
           # 翻訳に必要
           pip install pandas openai
-          # クローラに必要（tools/autohome_config_to_csv.py が使う想定）
-          pip install playwright beautifulsoup4 lxml requests
-          python -m playwright install chromium
+          # クローラに必要（必要な場合のみ）
+          pip install playwright beautifulsoup4 lxml requests || true
+          python -m playwright install chromium || true
 
-      # ← ここが不足していた：まずホームページからCSVを作る
+      # まずホームページからCSV生成（crawler）
       - name: Run config crawler
         run: |
           set -euo pipefail
@@ -39,7 +39,7 @@ jobs:
           python tools/autohome_config_to_csv.py --series "${{ inputs.series_id }}" || echo "No config generated"
           ls -R output || true
 
-      # CSV があるときだけ翻訳（CSV_IN を明示して実行）
+      # 生成されたCSVがある場合のみ翻訳（CSV_INを明示）
       - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
@@ -56,14 +56,7 @@ jobs:
             echo "Skip translate: $IN not found."
           fi
 
-      # ここからはそのまま（キャッシュと成果物）
-      - name: Upload repo cache (CN/JA)
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-cache-${{ inputs.series_id }}
-          path: cache_repo/series/${{ inputs.series_id }}/
-          if-no-files-found: warn
-
+      # リポジトリ内キャッシュをコミット＆プッシュ（Artifactsは任意）
       - name: Commit repo cache (CN/JA)
         run: |
           set -e
@@ -74,11 +67,12 @@ jobs:
           git commit -m "cache_repo update: series ${{ inputs.series_id }}" || echo "No changes to commit"
           git push || echo "No changes to push"
 
-      - name: Upload artifacts
+      - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-config-csv-${{ inputs.series_id }}
           path: |
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv
+            cache_repo/series/${{ inputs.series_id }}/
           if-no-files-found: warn
