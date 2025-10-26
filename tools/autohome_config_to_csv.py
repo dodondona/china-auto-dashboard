@@ -25,8 +25,7 @@ ICON_MAP_LEGACY = {
 }
 
 def _cell_text_enriched(cell):
-    """1セルをテキスト化（iconfontやunitを含む）"""
-    base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
+    base = (cell.inner_text() or "").replace("\u00a0", " ").strip()
     mark = ""
     try:
         for k in cell.query_selector_all("i, span, em"):
@@ -54,16 +53,18 @@ def _cell_text_enriched(cell):
 
     if not base:
         try:
-            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0"," ").strip()
+            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0", " ").strip()
         except Exception:
             pass
 
     parts = []
-    if mark: parts.append(mark)
-    if base: parts.append(base)
+    if mark:
+        parts.append(mark)
+    if base:
+        parts.append(base)
     if unit and not base.endswith(unit):
         parts.append(unit)
-    return " ".join(parts).strip().replace("－","-")
+    return " ".join(parts).strip().replace("－", "-")
 
 def extract_matrix_from_table(table):
     rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
@@ -73,7 +74,7 @@ def extract_matrix_from_table(table):
         c = 0
         while True:
             if c >= len(grid[ridx]):
-                grid[ridx].extend([""]*(c - len(grid[ridx]) + 1))
+                grid[ridx].extend([""] * (c - len(grid[ridx]) + 1))
             if grid[ridx][c] == "":
                 return c
             c += 1
@@ -87,7 +88,7 @@ def extract_matrix_from_table(table):
             col = next_free(ri)
             need = col + cs
             if need > len(grid[ri]):
-                grid[ri].extend([""]*(need - len(grid[ri])))
+                grid[ri].extend([""] * (need - len(grid[ri])))
             grid[ri][col] = txt
             if rs > 1:
                 for k in range(1, rs):
@@ -95,12 +96,12 @@ def extract_matrix_from_table(table):
                     while rr >= len(grid):
                         grid.append([])
                     if len(grid[rr]) < need:
-                        grid[rr].extend([""]*(need - len(grid[rr])))
+                        grid[rr].extend([""] * (need - len(grid[rr])))
             max_cols = max(max_cols, need)
 
     for i in range(len(grid)):
         if len(grid[i]) < max_cols:
-            grid[i].extend([""]*(max_cols - len(grid[i])))
+            grid[i].extend([""] * (max_cols - len(grid[i])))
     return grid
 
 def save_csv_matrix(matrix, outpath: Path):
@@ -114,7 +115,6 @@ def save_csv_matrix(matrix, outpath: Path):
 # --------------------------------
 def parse_div_layout_to_wide_csv(html: str):
     soup = BeautifulSoup(html, "html.parser")
-
     head = soup.select_one('[class*="style_table_head__"]')
     if not head:
         return None
@@ -172,7 +172,6 @@ def parse_div_layout_to_wide_csv(html: str):
     records = []
     current_section = ""
     children = [c for c in container.find_all(recursive=False) if getattr(c, "name", None)]
-
     for ch in children:
         if ch is head:
             continue
@@ -184,7 +183,7 @@ def parse_div_layout_to_wide_csv(html: str):
             if not kids:
                 continue
             left = norm_space(kids[0].get_text(" ", strip=True))
-            cells = kids[1:1+n_models]
+            cells = kids[1:1 + n_models]
             if len(cells) < n_models:
                 cells = cells + [soup.new_tag("div")] * (n_models - len(cells))
             elif len(cells) > n_models:
@@ -194,7 +193,6 @@ def parse_div_layout_to_wide_csv(html: str):
 
     if not records:
         return None
-
     header = ["セクション", "項目"] + model_names
     return [header] + records
 
@@ -223,29 +221,40 @@ def main():
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/122.0.0.0 Safari/537.36")
         )
+        context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_())
         page = context.new_page()
+
         print("Loading:", url)
+        nav_targets = [
+            (url, "networkidle", 120000),
+            (url, "load", 150000),
+            (MOBILE_URL.format(series=series), "load", 150000),
+        ]
 
-        # ✅ リトライ1回だけ追加
-        try:
-            page.goto(url, wait_until="networkidle", timeout=120000)
-        except Exception as e:
-            print(f"⚠️ page.goto failed once ({e}), retrying...")
-            page.goto(url, wait_until="networkidle", timeout=120000)
-
-        last_h = 0
-        for _ in range(40):
-            page.mouse.wheel(0, 1400)
-            page.wait_for_timeout(700)
-            h = page.evaluate("document.scrollingElement.scrollHeight")
-            if h == last_h:
+        last_err = None
+        for idx, (u, wait_state, to) in enumerate(nav_targets, 1):
+            try:
+                if idx > 1:
+                    print(f"↻ retry {idx-1}: goto {u} (wait_until={wait_state}, timeout={to}ms)")
+                page.goto(u, wait_until=wait_state, timeout=to)
+                try:
+                    page.wait_for_selector("[class*='style_table_head__'], table", timeout=30000)
+                except Exception:
+                    page.mouse.wheel(0, 1200)
+                    page.wait_for_timeout(1200)
+                    page.wait_for_selector("[class*='style_table_head__'], table", timeout=15000)
+                last_err = None
                 break
-            last_h = h
-        page.wait_for_timeout(5000)
+            except Exception as e:
+                print(f"⚠️ page.goto failed once ({e}), retrying...")
+                last_err = e
+                continue
+
+        if last_err:
+            print(f"⚠️ navigation failed after retries: {last_err}")
 
         html = page.content()
         wide_matrix = parse_div_layout_to_wide_csv(html)
-
         if wide_matrix:
             out_csv = outdir / f"config_{series}.csv"
             with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
