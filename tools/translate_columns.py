@@ -5,12 +5,12 @@
 Autohome series CONFIG -> CSV extractor (no-API version)
 
 - 入力: シリーズID (例: 5213) もしくは config ページURL
-- 出力: output/autohome/<series_id>/ 以下に
+- 出力: output/autohome/<series_id>/ に
     - config.raw.json
     - config.csv
-    - config_<series_id>.csv   ← YAMLを変えずに済むよう追設（互換）
-- Playwright を用いてページを開き、`window.CONFIG` を取得。
-- `networkidle` は使わず、`domcontentloaded` 待ち + 直取り/評価の二段構え（3回リトライ）。
+    - config_<series_id>.csv   ← 互換用（翻訳テストYMLが参照）
+- Playwrightでページを開き `window.CONFIG` を取得してCSV化。
+- 取得安定化: networkidleは使わず、domcontentloaded＋直取り/evaluate＋リトライ。
 """
 
 from __future__ import annotations
@@ -27,10 +27,17 @@ from typing import Any, Dict, List, Optional
 from playwright.sync_api import sync_playwright
 from playwright.sync_api import TimeoutError as PWTimeoutError
 
+# ---------------------------------------------------------------------
+# 互換シム: YML側が `--series` を付けて実行しても受け入れる（argparse前で除去）
+if "--series" in sys.argv:
+    idx = sys.argv.index("--series")
+    sys.argv.pop(idx)  # 残りはそのまま位置引数として解釈される
+# ---------------------------------------------------------------------
+
 # ---- 環境変数で調整可能なパラメータ -----------------------------
 
 NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "180000"))  # 既定 180 秒
-GOTO_WAIT_UNTIL = os.getenv("GOTO_WAIT_UNTIL", "domcontentloaded")  # networkidle は使用しない
+GOTO_WAIT_UNTIL = os.getenv("GOTO_WAIT_UNTIL", "domcontentloaded")  # networkidleは使用しない
 OUTPUT_BASE = os.getenv("OUTPUT_BASE", "output/autohome")
 
 USER_AGENT = os.getenv(
@@ -57,7 +64,6 @@ def is_url(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 def build_series_url(arg: str) -> str:
-    """引数がIDならURLに、URLならそのまま返す"""
     if is_url(arg):
         return arg
     series_id = str(int(arg))
@@ -67,7 +73,6 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 def extract_config_from_text(html_text: str) -> Optional[Dict[str, Any]]:
-    """ページ全体テキストから window.CONFIG = {...}; を素直に抜く"""
     m = re.search(r"window\.CONFIG\s*=\s*(\{.*?\})\s*;", html_text, re.S)
     if not m:
         return None
@@ -77,12 +82,7 @@ def extract_config_from_text(html_text: str) -> Optional[Dict[str, Any]]:
         return None
 
 def goto_and_get_config(page, url: str) -> Optional[Dict[str, Any]]:
-    """
-    - domcontentloaded まで待機
-    - script:has-text("CONFIG") があれば page.content() から直取り
-    - ダメなら page.evaluate で window.CONFIG を見る
-    - 3回までリトライ
-    """
+    """domcontentloadedで遷移→HTML直取り→だめならwindow.CONFIGをevaluate。最大3リトライ。"""
     for attempt in range(3):
         try:
             page.goto(url, wait_until=GOTO_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
@@ -109,12 +109,6 @@ def goto_and_get_config(page, url: str) -> Optional[Dict[str, Any]]:
     return None
 
 def flatten_to_rows(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Autohome CONFIG から、主要な列をフラット化
-    - model_name（车型名）
-    - 厂商指导价（MSRP）
-    - 经销商报价/经销商参考价（ディーラー価格）
-    """
     result = cfg.get("result") or cfg
 
     specs: List[Dict[str, Any]] = result.get("specs") or result.get("speclist") or []
@@ -142,8 +136,7 @@ def flatten_to_rows(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if v:
                     dest[idx] = v
 
-    paramtypeitems = result.get("paramtypeitems") or []
-    for group in paramtypeitems:
+    for group in result.get("paramtypeitems") or []:
         items = group.get("paramitems") or []
         assign_param_values("厂商指导价", price_msrp_per_spec, items)
         assign_param_values("经销商报价", price_dealer_per_spec, items)
@@ -214,7 +207,7 @@ def process_one_series(arg: str) -> None:
         if not cfg:
             log(f"No config found for {series_id}")
             write_json(os.path.join(outdir, "config.raw.json"), {"error": "CONFIG not found"})
-            # 下流互換のため「両方のCSV名」を空で出す
+            # 互換: 両方のCSV名で空を出す
             write_csv(os.path.join(outdir, "config.csv"), [])
             write_csv(os.path.join(outdir, f"config_{series_id}.csv"), [])
             context.close()
@@ -224,7 +217,7 @@ def process_one_series(arg: str) -> None:
         write_json(os.path.join(outdir, "config.raw.json"), cfg)
 
         rows = flatten_to_rows(cfg)
-        # 互換のため、2つのファイル名で書き出し
+        # 互換: 両方のファイル名で保存
         write_csv(os.path.join(outdir, "config.csv"), rows)
         write_csv(os.path.join(outdir, f"config_{series_id}.csv"), rows)
 
@@ -241,30 +234,12 @@ def process_one_series(arg: str) -> None:
                 path = os.path.join(root, name)
                 log(f"{path}:" if os.path.isdir(path) else f"{path}")
 
-def parse_args() -> List[str]:
-    """
-    YMLを変更せずに使えるように、以下の両方を受け付ける:
-      - 位置引数:  python autohome_config_to_csv.py 5714 8042
-      - オプション: python autohome_config_to_csv.py --series 5714 8042
-    """
+def main() -> None:
     parser = argparse.ArgumentParser(description="Autohome CONFIG -> CSV")
-    parser.add_argument("series_positional", nargs="*", help="シリーズID もしくは config URL（複数可）")
-    parser.add_argument("--series", dest="series_opt", nargs="+", help="(互換) シリーズID/URL（複数可）")
+    parser.add_argument("series", nargs="+", help="シリーズID もしくは config URL（複数可）")
     args = parser.parse_args()
 
-    series_list: List[str] = []
-    if args.series_opt:
-        series_list.extend(args.series_opt)
-    if args.series_positional:
-        series_list.extend(args.series_positional)
-
-    if not series_list:
-        parser.error("series が指定されていません（位置引数 または --series を使ってください）")
-    return series_list
-
-def main() -> None:
-    series_list = parse_args()
-    for s in series_list:
+    for s in args.series:
         try:
             process_one_series(s)
         except Exception as e:
