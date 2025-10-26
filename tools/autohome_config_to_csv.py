@@ -1,278 +1,291 @@
-# tools/autohome_config_to_csv.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Autohome series CONFIG -> CSV extractor (no-API version)
+
+- 入力: シリーズID (例: 5213) もしくは config ページURL
+- 出力: output/autohome/<series_id>/ 以下に
+    - config.raw.json  : 抽出した window.CONFIG の生JSON
+    - config.csv       : 主要カラムをフラット化したCSV
+- Playwright を用いてページを開き、`window.CONFIG` を取得。
+- `networkidle` は使わず、`domcontentloaded` 待ち + 直取り/評価の二段構え。
+- 主要カラム: 车型名（model_name）、厂商指导价、经销商报价(または经销商参考价)
+"""
+
+from __future__ import annotations
+
 import argparse
 import csv
+import json
+import os
 import re
-from pathlib import Path
+import sys
+import time
+from typing import Any, Dict, List, Optional
+
 from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup  # requires: beautifulsoup4
+from playwright.sync_api import TimeoutError as PWTimeoutError
 
-# --------------------------------
-# 共通設定
-# --------------------------------
-PC_URL = "https://www.autohome.com.cn/config/series/{series}.html#pvareaid=3454437"
-MOBILE_URL = "https://m.autohome.com.cn/config/series/{series}.html"
+# ---- 環境変数で調整可能なパラメータ（必要最小限） -----------------------------
 
-def norm_space(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "180000"))  # 既定 180 秒
+GOTO_WAIT_UNTIL = os.getenv("GOTO_WAIT_UNTIL", "domcontentloaded")  # networkidle は使用しない
+OUTPUT_BASE = os.getenv("OUTPUT_BASE", "output/autohome")
 
-# --------------------------------
-# 旧テーブル(<table>)用：行列展開
-# --------------------------------
-ICON_MAP_LEGACY = {
-    "icon-point-on": "●",
-    "icon-point-off": "○",
-    "icon-point-none": "-",
-}
+USER_AGENT = os.getenv(
+    "USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+)
 
-def _cell_text_enriched(cell):
-    """1セルをテキスト化（iconfontやunitを含む）"""
-    base = (cell.inner_text() or "").replace("\u00a0"," ").strip()
-    mark = ""
+# ブロック対象（描画軽量化; 必須ではない）
+BLOCK_HOSTS = tuple(
+    h.strip()
+    for h in os.getenv(
+        "BLOCK_HOSTS",
+        "googletagmanager.com,google-analytics.com,hm.baidu.com,baidu.com",
+    ).split(",")
+    if h.strip()
+)
+
+# -----------------------------------------------------------------------------
+
+def log(*args: Any) -> None:
+    print(*args, flush=True)
+
+
+def is_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def build_series_url(arg: str) -> str:
+    """引数がIDならURLに、URLならそのまま返す"""
+    if is_url(arg):
+        return arg
+    series_id = str(int(arg))
+    return f"https://www.autohome.com.cn/config/series/{series_id}.html#pvareaid=3454437"
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def extract_config_from_text(html_text: str) -> Optional[Dict[str, Any]]:
+    """
+    ページ全体テキストから window.CONFIG = {...}; を素直に抜く
+    """
+    m = re.search(r"window\.CONFIG\s*=\s*(\{.*?\})\s*;", html_text, re.S)
+    if not m:
+        return None
     try:
-        for k in cell.query_selector_all("i, span, em"):
-            cls = (k.get_attribute("class") or "")
-            for key, sym in ICON_MAP_LEGACY.items():
-                if key in cls:
-                    mark = sym
-                    break
-            if mark:
-                break
+        return json.loads(m.group(1))
     except Exception:
-        pass
-
-    unit = ""
-    for sel in (".unit", "[data-unit]", "[class*='unit']"):
-        try:
-            u = cell.query_selector(sel)
-            if u:
-                t = (u.inner_text() or "").strip()
-                if t and t not in ("-", "—"):
-                    unit = t
-                    break
-        except Exception:
-            continue
-
-    if not base:
-        try:
-            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0"," ").strip()
-        except Exception:
-            pass
-
-    parts = []
-    if mark: parts.append(mark)
-    if base: parts.append(base)
-    if unit and not base.endswith(unit):
-        parts.append(unit)
-    return " ".join(parts).strip().replace("－","-")
-
-def extract_matrix_from_table(table):
-    rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-    grid, max_cols = [], 0
-
-    def next_free(ridx):
-        c = 0
-        while True:
-            if c >= len(grid[ridx]):
-                grid[ridx].extend([""]*(c - len(grid[ridx]) + 1))
-            if grid[ridx][c] == "":
-                return c
-            c += 1
-
-    for ri, r in enumerate(rows):
-        grid.append([])
-        for cell in r.query_selector_all("th,td"):
-            txt = _cell_text_enriched(cell)
-            rs = int(cell.get_attribute("rowspan") or "1")
-            cs = int(cell.get_attribute("colspan") or "1")
-            col = next_free(ri)
-            need = col + cs
-            if need > len(grid[ri]):
-                grid[ri].extend([""]*(need - len(grid[ri])))
-            grid[ri][col] = txt
-            if rs > 1:
-                for k in range(1, rs):
-                    rr = ri + k
-                    while rr >= len(grid):
-                        grid.append([])
-                    if len(grid[rr]) < need:
-                        grid[rr].extend([""]*(need - len(grid[rr])))
-            max_cols = max(max_cols, need)
-
-    for i in range(len(grid)):
-        if len(grid[i]) < max_cols:
-            grid[i].extend([""]*(max_cols - len(grid[i])))
-    return grid
-
-def save_csv_matrix(matrix, outpath: Path):
-    outpath.parent.mkdir(parents=True, exist_ok=True)
-    with open(outpath, "w", newline="", encoding="utf-8-sig") as f:
-        csv.writer(f).writerows(matrix)
-    print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
-
-# --------------------------------
-# 新レイアウト(divベース)用
-# --------------------------------
-def parse_div_layout_to_wide_csv(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-
-    head = soup.select_one('[class*="style_table_head__"]')
-    if not head:
         return None
 
-    head_cells = [c for c in head.find_all(recursive=False) if getattr(c, "name", None)]
-    def clean_model_name(t):
-        t = norm_space(t)
-        t = re.sub(r"^\s*钉在左侧\s*", "", t)
-        t = re.sub(r"\s*对比\s*$", "", t)
-        return norm_space(t)
 
-    model_names = [clean_model_name(c.get_text(" ", strip=True)) for c in head_cells[1:]]
-    n_models = len(model_names)
+def goto_and_get_config(page, url: str) -> Optional[Dict[str, Any]]:
+    """
+    - domcontentloaded まで待機
+    - script:has-text("CONFIG") があれば page.content() から直取り
+    - ダメなら page.evaluate で window.CONFIG を見る
+    - 3回までリトライ
+    """
+    for attempt in range(3):
+        try:
+            page.goto(url, wait_until=GOTO_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
 
-    def find_container_with(head_node):
-        p = head_node
-        for _ in range(12):
-            p = p.parent
-            if not p:
-                break
-            if p.find(class_=re.compile(r"style_table_title__")) and p.find(class_=re.compile(r"style_row__")):
-                return p
-        return head_node.parent
+            # 軽くCONFIGっぽいscript出現を待つ（無くても後でcontentで拾う）
+            try:
+                page.wait_for_selector('script:has-text("CONFIG")', timeout=5000)
+            except PWTimeoutError:
+                pass
 
-    container = find_container_with(head)
-    if not container:
-        return None
+            html = page.content()
+            cfg = extract_config_from_text(html)
+            if cfg:
+                return cfg
 
-    def is_section_title(node):
-        cls = " ".join(node.get("class", []))
-        return "style_table_title__" in cls
+            # 直接参照
+            try:
+                js = page.evaluate("() => (window.CONFIG ? JSON.stringify(window.CONFIG) : null)")
+                if js:
+                    return json.loads(js)
+            except Exception:
+                pass
 
-    def get_section_from_title(node):
-        sticky = node.find(class_=re.compile(r"table_title_col"))
-        sec = norm_space(sticky.get_text(" ", strip=True) if sticky else node.get_text(" ", strip=True))
-        # ✅ セクション名を簡潔化
-        sec = re.sub(r"\s*标配.*$", "", sec)
-        sec = re.sub(r"\s*选配.*$", "", sec)
-        sec = re.sub(r"\s*- 无.*$", "", sec)
-        return norm_space(sec)
-
-    def is_data_row(node):
-        cls = " ".join(node.get("class", []))
-        return "style_row__" in cls
-
-    def cell_value(td):
-        is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
-        is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
-        txt = norm_space(td.get_text(" ", strip=True))
-        if is_solid and not is_outline:
-            return "●" if txt in ("", "●", "○") else f"● {txt}"
-        if is_outline and not is_solid:
-            return "○" if txt in ("", "●", "○") else f"○ {txt}"
-        return txt if txt else "–"
-
-    records = []
-    current_section = ""
-    children = [c for c in container.find_all(recursive=False) if getattr(c, "name", None)]
-
-    for ch in children:
-        if ch is head:
+        except PWTimeoutError:
+            time.sleep(2 + attempt * 3)
             continue
-        if is_section_title(ch):
-            current_section = get_section_from_title(ch)
-            continue
-        if is_data_row(ch):
-            kids = [k for k in ch.find_all(recursive=False) if getattr(k, "name", None)]
-            if not kids:
+    return None
+
+
+def flatten_to_rows(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Autohome CONFIG から、主要な列をフラット化
+    - model_name（车型名）
+    - 厂商指导价（MSRP）
+    - 经销商报价 or 经销商参考价（ディーラー価格）
+    可能な範囲で汎用に取得。未知の構造でも壊れないように防御的に実装。
+    """
+    result = cfg.get("result") or cfg
+
+    # スペック（各车型）の一覧を得る
+    # 代表的には result["specs"] に [{id,name,...}, ...]
+    specs: List[Dict[str, Any]] = result.get("specs") or result.get("speclist") or []
+    spec_ids: List[str] = []
+    spec_names: List[str] = []
+
+    for s in specs:
+        sid = str(s.get("id") or s.get("specid") or "")
+        name = str(s.get("name") or s.get("specname") or "").strip()
+        if sid:
+            spec_ids.append(sid)
+            spec_names.append(name)
+
+    # 値のマトリクス化: パラメータ名 -> spec_index -> 値
+    # 典型構造: result["paramtypeitems"] -> [{ "paramitems": [ { "name": "厂商指导价", "valueitems": [ {"value":"11.98万"}, ... ] }, ... ] }]
+    price_msrp_per_spec: Dict[int, str] = {}      # 厂商指导价
+    price_dealer_per_spec: Dict[int, str] = {}    # 经销商报价 / 经销商参考价
+
+    def assign_param_values(param_name: str, dest: Dict[int, str], items: List[Dict[str, Any]]):
+        for param in items:
+            name = str(param.get("name") or "").strip()
+            if name != param_name:
                 continue
-            left = norm_space(kids[0].get_text(" ", strip=True))
-            cells = kids[1:1+n_models]
-            if len(cells) < n_models:
-                cells = cells + [soup.new_tag("div")] * (n_models - len(cells))
-            elif len(cells) > n_models:
-                cells = cells[:n_models]
-            vals = [cell_value(td) for td in cells]
-            records.append([current_section, left] + vals)
+            vals = param.get("valueitems") or []
+            for idx, vi in enumerate(vals):
+                v = str(vi.get("value") or "").strip()
+                if v:
+                    dest[idx] = v
 
-    if not records:
-        return None
+    paramtypeitems = result.get("paramtypeitems") or []
+    for group in paramtypeitems:
+        items = group.get("paramitems") or []
+        # 厂商指导价
+        assign_param_values("厂商指导价", price_msrp_per_spec, items)
+        # 经销商报价 or 经销商参考价
+        assign_param_values("经销商报价", price_dealer_per_spec, items)
+        assign_param_values("经销商参考价", price_dealer_per_spec, items)
 
-    header = ["セクション", "項目"] + model_names
-    return [header] + records
+    rows: List[Dict[str, Any]] = []
+    count = max(len(spec_ids), len(spec_names))
+    for i in range(count):
+        row = {
+            "spec_id": spec_ids[i] if i < len(spec_ids) else "",
+            "model_name": spec_names[i] if i < len(spec_names) else "",
+            "厂商指导价": price_msrp_per_spec.get(i, ""),
+            "经销商价": price_dealer_per_spec.get(i, ""),  # 列名は1本化（後段で翻訳・整形）
+        }
+        rows.append(row)
 
-# --------------------------------
-# メイン
-# --------------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--series", type=str, required=True, help="Autohome series id (e.g., 6814)")
-    ap.add_argument("--outdir", type=str, default="output/autohome", help="Output base dir")
-    ap.add_argument("--mobile", action="store_true", help="Use mobile site")
-    args = ap.parse_args()
+    return rows
 
-    series = args.series.strip()
-    outdir = Path(args.outdir) / series
-    outdir.mkdir(parents=True, exist_ok=True)
-    url = (MOBILE_URL if args.mobile else PC_URL).format(series=series)
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+def write_json(path: str, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        # 空でもヘッダは出す（後段の列変換がコケないように）
+        rows = [{"spec_id": "", "model_name": "", "厂商指导价": "", "经销商价": ""}]
+    fieldnames = list(rows[0].keys())
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def get_series_id_from_arg(arg: str) -> str:
+    if is_url(arg):
+        m = re.search(r"/series/(\d+)\.html", arg)
+        if m:
+            return m.group(1)
+        # URL だがIDが取れない場合はフォルダ名用に数字以外を除去して短縮
+        return re.sub(r"\W+", "_", arg)[:32]
+    return str(int(arg))
+
+
+def process_one_series(arg: str) -> None:
+    url = build_series_url(arg)
+    series_id = get_series_id_from_arg(arg)
+    outdir = os.path.join(OUTPUT_BASE, series_id)
+    ensure_dir(outdir)
+
+    log(f"Processing series: {series_id}")
+    log(f"Loading: {url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=["--disable-gpu"])
         context = browser.new_context(
+            user_agent=USER_AGENT,
             locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1366, "height": 900},
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36")
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
         )
         page = context.new_page()
-        print("Loading:", url)
-        page.goto(url, wait_until="networkidle", timeout=120000)
 
-        last_h = 0
-        for _ in range(40):
-            page.mouse.wheel(0, 1400)
-            page.wait_for_timeout(700)
-            h = page.evaluate("document.scrollingElement.scrollHeight")
-            if h == last_h:
-                break
-            last_h = h
-        page.wait_for_timeout(5000)
+        # 軽量化（任意）
+        def _route_handler(route):
+            req_url = route.request.url
+            if any(h in req_url for h in BLOCK_HOSTS):
+                return route.abort()
+            return route.continue_()
 
-        html = page.content()
-        wide_matrix = parse_div_layout_to_wide_csv(html)
+        page.route("**/*", _route_handler)
 
-        if wide_matrix:
-            out_csv = outdir / f"config_{series}.csv"
-            with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerows(wide_matrix)
-            print(f"✅ Saved (div-layout wide): {out_csv} ({len(wide_matrix)-1} rows)")
+        cfg = goto_and_get_config(page, url)
+
+        if not cfg:
+            log(f"No config found for {series_id}")
+            # 何も取れなかった場合でも空のJSON/CSVを出す（後段が落ちないように）
+            write_json(os.path.join(outdir, "config.raw.json"), {"error": "CONFIG not found"})
+            write_csv(os.path.join(outdir, "config.csv"), [])
+            context.close()
             browser.close()
             return
 
-        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
-        print(f"Found {len(tables)} table(s)")
-        if not tables:
-            print("❌ No tables found.")
-            browser.close()
-            return
+        # 保存
+        write_json(os.path.join(outdir, "config.raw.json"), cfg)
 
-        biggest = (None, 0, -1)
-        for idx, t in enumerate(tables, start=1):
-            rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-            rcount = len(rows)
-            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
-            score = rcount * ccount
-            mat = extract_matrix_from_table(t)
-            out_csv = outdir / f"table_{idx:02d}.csv"
-            save_csv_matrix(mat, out_csv)
-            if score > biggest[1]:
-                biggest = (mat, score, idx)
+        # フラット化してCSV
+        rows = flatten_to_rows(cfg)
+        write_csv(os.path.join(outdir, "config.csv"), rows)
 
-        if biggest[0] is not None:
-            out_csv_std = outdir / f"config_{series}.csv"
-            save_csv_matrix(biggest[0], out_csv_std)
-
+        context.close()
         browser.close()
+
+    # 親ディレクトリを列挙（あなたのログと同じ見え方）
+    top = OUTPUT_BASE
+    log("output:")
+    for root in sorted({top, os.path.join(top, series_id)}):
+        log(root + ":" if root.endswith(series_id) else root)
+        if root.endswith(series_id):
+            # 下位も一段だけ表示
+            for name in sorted(os.listdir(root)):
+                log(f"{os.path.join(root, name)}:" if os.path.isdir(os.path.join(root, name)) else f"{os.path.join(root, name)}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Autohome CONFIG -> CSV")
+    parser.add_argument("series", nargs="+", help="シリーズID もしくは config URL（複数可）")
+    args = parser.parse_args()
+
+    # 1件ずつ処理（ジョブ分割の都合上、単発呼び出しが基本だが複数指定にも対応）
+    for s in args.series:
+        try:
+            process_one_series(s)
+        except Exception as e:
+            # どのシリーズで落ちたかがログからわかるように、握って続行
+            log(f"[ERROR] series={s}: {e}")
+            # 失敗しても空ファイルを出す（後段が落ちないように）
+            series_id = get_series_id_from_arg(s)
+            outdir = os.path.join(OUTPUT_BASE, series_id)
+            ensure_dir(outdir)
+            write_json(os.path.join(outdir, "config.raw.json"), {"error": str(e)})
+            write_csv(os.path.join(outdir, "config.csv"), [])
+
 
 if __name__ == "__main__":
     main()
