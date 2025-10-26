@@ -2,254 +2,263 @@
 # -*- coding: utf-8 -*-
 
 """
-Autohome series CONFIG -> CSV extractor (no-API version)
+Translate/normalize columns & values for Autohome config CSV.
 
-- 入力: シリーズID (例: 5213) もしくは config ページURL
-- 出力: output/autohome/<series_id>/ に
-    - config.raw.json
-    - config.csv
-    - config_<series_id>.csv   ← 互換用（翻訳テストYMLが参照）
-- Playwrightでページを開き `window.CONFIG` を取得してCSV化。
-- 取得安定化: networkidleは使わず、domcontentloaded＋直取り/evaluate＋リトライ。
+使い方:
+    python tools/translate_columns.py output/autohome/5714/config_5714.csv
+
+挙動:
+- 引数で受け取った CSV が存在しなければ
+    "Skip translate: <path> not found." と出して 0 終了（ジョブを落とさない）
+- 既定の日本語見出しへ変換:
+    "厂商指导价" -> "メーカー希望小売価格"
+    "经销商报价"/"经销商参考价"/"经销商价" -> "ディーラー販売価格（元）"
+    "model_name" -> "モデル名"
+    "spec_id" -> "仕様ID"
+- 値の整形:
+    - MSRP（元データが "11.98万" 等）を
+        "11.98万元（日本円X,XXX,XXX円）" に整形（為替: 環境 EXRATE_CNY_TO_JPY、既定 21.0）
+    - ディーラー価格は常に「…元」表記（円は付けない）。"询价/价格咨询" などのノイズ除去。
+- メーカー名の日本語化:
+    - 列 "manufacturer" があれば "manufacturer_ja" を追加（辞書優先、なければそのまま）
+    - OPENAI_API_KEY が設定され、辞書未ヒットの場合のみ LLM で補完（安全にオフ可）
+- 出力:
+    入力ファイルの隣に <basename>.ja.csv を生成（例: config_5714.csv → config_5714.ja.csv）
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
-import json
 import os
 import re
 import sys
-import time
-from typing import Any, Dict, List, Optional
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, List, Tuple, Optional
 
-from playwright.sync_api import sync_playwright
-from playwright.sync_api import TimeoutError as PWTimeoutError
+# ---- 為替など可変パラメータ --------------------------------------
+EXRATE_CNY_TO_JPY = Decimal(os.getenv("EXRATE_CNY_TO_JPY", "21.0"))  # 1元あたりの円
+ROUNDING = os.getenv("JPY_ROUND", "1")  # 1円単位で丸め
+# ------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# 互換シム: YML側が `--series` を付けて実行しても受け入れる（argparse前で除去）
-if "--series" in sys.argv:
-    idx = sys.argv.index("--series")
-    sys.argv.pop(idx)  # 残りはそのまま位置引数として解釈される
-# ---------------------------------------------------------------------
+# 既知メーカーの簡易辞書（必要に応じて拡張）
+MAKER_JA: Dict[str, str] = {
+    "比亚迪": "BYD",
+    "BYD": "BYD",
+    "上汽大众": "上汽-フォルクスワーゲン",
+    "一汽大众": "一汽-フォルクスワーゲン",
+    "长安汽车": "長安汽車",
+    "吉利汽车": "吉利汽車",
+    "广汽本田": "広汽ホンダ",
+    "东风本田": "東風ホンダ",
+    "东风日产": "東風日産",
+    "广汽丰田": "広汽トヨタ",
+    "一汽丰田": "一汽トヨタ",
+    "小米": "小米汽車",
+    "蔚来": "NIO",
+    "理想": "Li Auto",
+    "小鹏": "Xpeng",
+}
 
-# ---- 環境変数で調整可能なパラメータ -----------------------------
+# 見出しマップ
+HEADER_MAP = {
+    "spec_id": "仕様ID",
+    "model_name": "モデル名",
+    "厂商指导价": "メーカー希望小売価格",
+    "经销商报价": "ディーラー販売価格（元）",
+    "经销商参考价": "ディーラー販売価格（元）",
+    "经销商价": "ディーラー販売価格（元）",
+    "manufacturer": "manufacturer",  # オリジナルも保持（右に _ja を追加）
+}
 
-NAV_TIMEOUT_MS = int(os.getenv("NAV_TIMEOUT_MS", "180000"))  # 既定 180 秒
-GOTO_WAIT_UNTIL = os.getenv("GOTO_WAIT_UNTIL", "domcontentloaded")  # networkidleは使用しない
-OUTPUT_BASE = os.getenv("OUTPUT_BASE", "output/autohome")
+NOISE_PATTERNS = [
+    r"价格?咨询", r"询价", r"暂无报价", r"--", r"—", r"─", r"－", r"无", r"^$",
+]
 
-USER_AGENT = os.getenv(
-    "USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-)
+def jpy_format(n: Decimal) -> str:
+    s = f"{int(n):,}"
+    return f"{s}円"
 
-BLOCK_HOSTS = tuple(
-    h.strip()
-    for h in os.getenv(
-        "BLOCK_HOSTS",
-        "googletagmanager.com,google-analytics.com,hm.baidu.com,baidu.com",
-    ).split(",")
-    if h.strip()
-)
+def clean_text(v: str) -> str:
+    if not v:
+        return ""
+    v2 = v.strip()
+    for pat in NOISE_PATTERNS:
+        v2 = re.sub(pat, "", v2, flags=re.IGNORECASE)
+    return v2.strip()
 
-# -----------------------------------------------------------------
-
-def log(*args: Any) -> None:
-    print(*args, flush=True)
-
-def is_url(s: str) -> bool:
-    return s.startswith("http://") or s.startswith("https://")
-
-def build_series_url(arg: str) -> str:
-    if is_url(arg):
-        return arg
-    series_id = str(int(arg))
-    return f"https://www.autohome.com.cn/config/series/{series_id}.html#pvareaid=3454437"
-
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
-
-def extract_config_from_text(html_text: str) -> Optional[Dict[str, Any]]:
-    m = re.search(r"window\.CONFIG\s*=\s*(\{.*?\})\s*;", html_text, re.S)
-    if not m:
+def parse_price_to_yuan(value: str) -> Optional[Decimal]:
+    """
+    "11.98万" -> 119800
+    "9.88-12.98万" -> 9.88万 を採用（最小値）
+    "15.38万元" -> 153800
+    "129800元" -> 129800
+    """
+    if not value:
         return None
-    try:
-        return json.loads(m.group(1))
-    except Exception:
-        return None
+    s = value.replace(",", "").replace("　", "").strip()
+    # レンジは先頭側を採用
+    s = re.split(r"[～\-~–to至]", s)[0].strip()
 
-def goto_and_get_config(page, url: str) -> Optional[Dict[str, Any]]:
-    """domcontentloadedで遷移→HTML直取り→だめならwindow.CONFIGをevaluate。最大3リトライ。"""
-    for attempt in range(3):
-        try:
-            page.goto(url, wait_until=GOTO_WAIT_UNTIL, timeout=NAV_TIMEOUT_MS)
-            try:
-                page.wait_for_selector('script:has-text("CONFIG")', timeout=5000)
-            except PWTimeoutError:
-                pass
+    # 万元表記
+    m = re.search(r"(\d+(?:\.\d+)?)\s*万", s)
+    if m:
+        return (Decimal(m.group(1)) * Decimal(10000)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
-            html = page.content()
-            cfg = extract_config_from_text(html)
-            if cfg:
-                return cfg
+    # 元表記
+    m = re.search(r"(\d{1,9})(?:\.\d+)?\s*元", s)
+    if m:
+        return Decimal(m.group(1)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
-            try:
-                js = page.evaluate("() => (window.CONFIG ? JSON.stringify(window.CONFIG) : null)")
-                if js:
-                    return json.loads(js)
-            except Exception:
-                pass
+    # 純数字のみ（元）とみなす
+    m = re.fullmatch(r"\d{1,9}", s)
+    if m:
+        return Decimal(m.group(0))
 
-        except PWTimeoutError:
-            time.sleep(2 + attempt * 3)
-            continue
     return None
 
-def flatten_to_rows(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    result = cfg.get("result") or cfg
+def format_msrp(value: str) -> str:
+    """
+    MSRP列の正規化:
+      - 表示は常に「<X.XX>万元（日本円<#,###,###円>）」に統一
+      - 入力が元単位でも “万元” に直してから表記
+    """
+    raw = clean_text(value)
+    if not raw:
+        return ""
 
-    specs: List[Dict[str, Any]] = result.get("specs") or result.get("speclist") or []
-    spec_ids: List[str] = []
-    spec_names: List[str] = []
+    yuan = parse_price_to_yuan(raw)
+    if yuan is None:
+        # 解釈できなければそのまま返す（安全第一）
+        return raw
 
-    for s in specs:
-        sid = str(s.get("id") or s.get("specid") or "")
-        name = str(s.get("name") or s.get("specname") or "").strip()
-        if sid:
-            spec_ids.append(sid)
-            spec_names.append(name)
+    wan = (yuan / Decimal(10000)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    jpy = (yuan * EXRATE_CNY_TO_JPY).quantize(Decimal(ROUNDING), rounding=ROUND_HALF_UP)
+    return f"{wan}万元（日本円{jpy_format(jpy)}）"
 
-    price_msrp_per_spec: Dict[int, str] = {}
-    price_dealer_per_spec: Dict[int, str] = {}
+def format_dealer_price(value: str) -> str:
+    """
+    ディーラー価格の正規化:
+      - ノイズ語を除去
+      - 常に「...元」表記（円は付けない）
+      - レンジは先頭側を採用
+    """
+    raw = clean_text(value)
+    if not raw:
+        return ""
+    yuan = parse_price_to_yuan(raw)
+    if yuan is None:
+        # “面议”等は空にする
+        return ""
+    return f"{int(yuan):,}元"
 
-    def assign_param_values(param_name: str, dest: Dict[int, str], items: List[Dict[str, Any]]):
-        for param in items:
-            name = str(param.get("name") or "").strip()
-            if name != param_name:
-                continue
-            vals = param.get("valueitems") or []
-            for idx, vi in enumerate(vals):
-                v = str(vi.get("value") or "").strip()
-                if v:
-                    dest[idx] = v
+def translate_header(h: str) -> str:
+    return HEADER_MAP.get(h, h)
 
-    for group in result.get("paramtypeitems") or []:
-        items = group.get("paramitems") or []
-        assign_param_values("厂商指导价", price_msrp_per_spec, items)
-        assign_param_values("经销商报价", price_dealer_per_spec, items)
-        assign_param_values("经销商参考价", price_dealer_per_spec, items)
-
-    rows: List[Dict[str, Any]] = []
-    count = max(len(spec_ids), len(spec_names))
-    for i in range(count):
-        row = {
-            "spec_id": spec_ids[i] if i < len(spec_ids) else "",
-            "model_name": spec_names[i] if i < len(spec_names) else "",
-            "厂商指导价": price_msrp_per_spec.get(i, ""),
-            "经销商价": price_dealer_per_spec.get(i, ""),
-        }
-        rows.append(row)
-
-    return rows
-
-def write_json(path: str, data: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
-    if not rows:
-        rows = [{"spec_id": "", "model_name": "", "厂商指导价": "", "经销商价": ""}]
-    fieldnames = list(rows[0].keys())
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-def get_series_id_from_arg(arg: str) -> str:
-    if is_url(arg):
-        m = re.search(r"/series/(\d+)\.html", arg)
-        if m:
-            return m.group(1)
-        return re.sub(r"\W+", "_", arg)[:32]
-    return str(int(arg))
-
-def process_one_series(arg: str) -> None:
-    url = build_series_url(arg)
-    series_id = get_series_id_from_arg(arg)
-    outdir = os.path.join(OUTPUT_BASE, series_id)
-    ensure_dir(outdir)
-
-    log(f"Processing series: {series_id}")
-    log(f"Loading: {url}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--disable-gpu"])
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            locale="zh-CN",
-            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+def translate_manufacturer_ja(v: str) -> str:
+    v = (v or "").strip()
+    if not v:
+        return ""
+    if v in MAKER_JA:
+        return MAKER_JA[v]
+    # OpenAI補完（任意）
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return v  # キー未設定ならそのまま返す（オフでも動作させる）
+    try:
+        # 遅延 import（未使用なら依存不要）
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+        prompt = f"次の中国の自動車メーカー名を日本語の一般的な表記に変換してください。略称は英字ブランドを優先（例: 比亚迪→BYD）。\n\nメーカー: {v}\n\n出力は変換後の名前のみ。"
+        resp = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
         )
-        page = context.new_page()
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text.splitlines()[0].strip()
+    except Exception:
+        pass
+    return v
 
-        def _route_handler(route):
-            req_url = route.request.url
-            if any(h in req_url for h in BLOCK_HOSTS):
-                return route.abort()
-            return route.continue_()
+def process_file(input_path: str) -> int:
+    if not os.path.exists(input_path):
+        print(f"Skip translate: {input_path} not found.")
+        return 0
 
-        page.route("**/*", _route_handler)
+    out_path = re.sub(r"\.csv$", ".ja.csv", input_path)
+    rows_in: List[Dict[str, str]] = []
 
-        cfg = goto_and_get_config(page, url)
+    with open(input_path, "r", encoding="utf-8-sig", newline="") as f:
+        rdr = csv.DictReader(f)
+        fieldnames_in = rdr.fieldnames or []
+        for r in rdr:
+            rows_in.append({k: (r.get(k) or "").strip() for k in fieldnames_in})
 
-        if not cfg:
-            log(f"No config found for {series_id}")
-            write_json(os.path.join(outdir, "config.raw.json"), {"error": "CONFIG not found"})
-            # 互換: 両方のCSV名で空を出す
-            write_csv(os.path.join(outdir, "config.csv"), [])
-            write_csv(os.path.join(outdir, f"config_{series_id}.csv"), [])
-            context.close()
-            browser.close()
-            return
+    # ヘッダ変換準備
+    fieldnames_out: List[str] = []
+    for h in (rows_in[0].keys() if rows_in else []):
+        fieldnames_out.append(translate_header(h))
 
-        write_json(os.path.join(outdir, "config.raw.json"), cfg)
+    # manufacturer_ja の列を追加（manufacturer列がある場合のみ右隣）
+    if "manufacturer" in (rows_in[0].keys() if rows_in else []):
+        idx = fieldnames_out.index("manufacturer")
+        fieldnames_out.insert(idx + 1, "manufacturer_ja")
 
-        rows = flatten_to_rows(cfg)
-        # 互換: 両方のファイル名で保存
-        write_csv(os.path.join(outdir, "config.csv"), rows)
-        write_csv(os.path.join(outdir, f"config_{series_id}.csv"), rows)
+    # 値変換
+    rows_out: List[Dict[str, str]] = []
+    for r in rows_in:
+        o: Dict[str, str] = {}
+        # 先に全コピー（元ヘッダ名で）
+        for k, v in r.items():
+            o[translate_header(k)] = v
 
-        context.close()
-        browser.close()
+        # MSRP
+        for k_cn in ("厂商指导价",):
+            if translate_header(k_cn) in o:
+                o[translate_header(k_cn)] = format_msrp(r.get(k_cn, ""))
 
-    # あなたのログ風の確認出力
-    top = OUTPUT_BASE
-    log("output:")
-    for root in sorted({top, os.path.join(top, series_id)}):
-        log(root + ":" if root.endswith(series_id) else root)
-        if root.endswith(series_id):
-            for name in sorted(os.listdir(root)):
-                path = os.path.join(root, name)
-                log(f"{path}:" if os.path.isdir(path) else f"{path}")
+        # ディーラー価格（どれが来ても1列に集約されている前提）
+        for k_cn in ("经销商报价", "经销商参考价", "经销商价"):
+            if k_cn in r and r.get(k_cn):
+                o["ディーラー販売価格（元）"] = format_dealer_price(r.get(k_cn, ""))
+
+        # manufacturer_ja
+        if "manufacturer" in r:
+            o["manufacturer_ja"] = translate_manufacturer_ja(r.get("manufacturer", ""))
+
+        rows_out.append(o)
+
+    # 書き出し
+    if not rows_out:
+        # 空行でもヘッダは出す
+        if not fieldnames_out:
+            fieldnames_out = ["仕様ID", "モデル名", "メーカー希望小売価格", "ディーラー販売価格（元）"]
+        with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames_out)
+            w.writeheader()
+        print(f"Wrote (empty): {out_path}")
+        return 0
+
+    # フィールド名は rows_out から再構成（manufacturer_ja を含む）
+    fieldnames_final: List[str] = []
+    for h in rows_out[0].keys():
+        if h not in fieldnames_final:
+            fieldnames_final.append(h)
+
+    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames_final)
+        w.writeheader()
+        w.writerows(rows_out)
+
+    print(f"Wrote: {out_path}")
+    return 0
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Autohome CONFIG -> CSV")
-    parser.add_argument("series", nargs="+", help="シリーズID もしくは config URL（複数可）")
-    args = parser.parse_args()
-
-    for s in args.series:
-        try:
-            process_one_series(s)
-        except Exception as e:
-            log(f"[ERROR] series={s}: {e}")
-            series_id = get_series_id_from_arg(s)
-            outdir = os.path.join(OUTPUT_BASE, series_id)
-            ensure_dir(outdir)
-            write_json(os.path.join(outdir, "config.raw.json"), {"error": str(e)})
-            write_csv(os.path.join(outdir, "config.csv"), [])
-            write_csv(os.path.join(outdir, f"config_{series_id}.csv"), [])
+    if len(sys.argv) < 2:
+        print("usage: translate_columns.py <input_csv_path>")
+        sys.exit(0)
+    sys.exit(process_file(sys.argv[1]))
 
 if __name__ == "__main__":
     main()
