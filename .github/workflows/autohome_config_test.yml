@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: write   # ← これが無いと push できない
+  contents: write  # ← push権限
 
 jobs:
   run:
@@ -33,16 +33,13 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests || true
           python -m playwright install chromium || true
 
-      # まずホームページからCSV生成（crawler）
       - name: Run config crawler
         run: |
           set -euo pipefail
           mkdir -p "output/autohome/${{ inputs.series_id }}"
-          echo "Processing series: ${{ inputs.series_id }}"
           python tools/autohome_config_to_csv.py --series "${{ inputs.series_id }}" || echo "No config generated"
           ls -R output || true
 
-      # 生成されたCSVがある場合のみ翻訳（CSV_INを明示）
       - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
@@ -57,7 +54,6 @@ jobs:
             echo "Skip translate: $IN not found."
           fi
 
-      # リポジトリ内キャッシュ・成果をコミット＆プッシュ（“視認できる”状態に残す）
       - name: Commit repo cache and outputs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,7 +71,6 @@ jobs:
           git pull --rebase || true
           git push
 
-      # （任意）Artifacts も残す
       - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
