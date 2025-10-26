@@ -34,18 +34,20 @@ def write_csv(path, rows):
 
 
 def goto_and_get_config(page, url: str):
-    """PlaywrightでCONFIG抽出（networkidleは使わず、最大3回リトライ）"""
+    """PlaywrightでCONFIG抽出（networkidle使用・最大3回リトライ）"""
     for attempt in range(3):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=120000)
+            page.goto(url, wait_until="networkidle", timeout=120000)
             html = page.content()
             cfg = extract_config_json(html)
             if cfg:
                 return cfg
+
             # JS評価でも試す
             js = page.evaluate("() => window.CONFIG ? JSON.stringify(window.CONFIG) : null")
             if js:
                 return json.loads(js)
+
         except PWTimeoutError:
             print(f"[WARN] Timeout at attempt {attempt+1}, retrying...", flush=True)
             time.sleep(2 + attempt * 3)
