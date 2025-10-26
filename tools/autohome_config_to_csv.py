@@ -150,7 +150,6 @@ def parse_div_layout_to_wide_csv(html: str):
     def get_section_from_title(node):
         sticky = node.find(class_=re.compile(r"table_title_col"))
         sec = norm_space(sticky.get_text(" ", strip=True) if sticky else node.get_text(" ", strip=True))
-        # ✅ セクション名を簡潔化
         sec = re.sub(r"\s*标配.*$", "", sec)
         sec = re.sub(r"\s*选配.*$", "", sec)
         sec = re.sub(r"\s*- 无.*$", "", sec)
@@ -226,7 +225,13 @@ def main():
         )
         page = context.new_page()
         print("Loading:", url)
-        page.goto(url, wait_until="networkidle", timeout=120000)
+
+        # ✅ リトライ1回だけ追加
+        try:
+            page.goto(url, wait_until="networkidle", timeout=120000)
+        except Exception as e:
+            print(f"⚠️ page.goto failed once ({e}), retrying...")
+            page.goto(url, wait_until="networkidle", timeout=120000)
 
         last_h = 0
         for _ in range(40):
