@@ -91,8 +91,8 @@ jobs:
               if(!col) next
               url = $col
               gsub(/^"|"$/, "", url)
-              if (match(url,/[0-9]{3,7}/,m)) {
-                sid=m[0]
+              if (match(url,/autohome\.com\.cn\/([0-9]+)/,m)) {
+                sid=m[1]
                 if(!(sid in seen)){
                   seen[sid]=1
                   print sid >> "artifact/series_ids.txt"
