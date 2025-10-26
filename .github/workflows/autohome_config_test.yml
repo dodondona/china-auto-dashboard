@@ -22,18 +22,41 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -e
           python -m pip install --upgrade pip
+          # 翻訳に必要
           pip install pandas openai
+          # クローラに必要（tools/autohome_config_to_csv.py が使う想定）
+          pip install playwright beautifulsoup4 lxml requests
+          python -m playwright install chromium
 
-      - name: Run translate_columns
+      # ← ここが不足していた：まずホームページからCSVを作る
+      - name: Run config crawler
+        run: |
+          set -euo pipefail
+          mkdir -p "output/autohome/${{ inputs.series_id }}"
+          echo "Processing series: ${{ inputs.series_id }}"
+          python tools/autohome_config_to_csv.py --series "${{ inputs.series_id }}" || echo "No config generated"
+          ls -R output || true
+
+      # CSV があるときだけ翻訳（CSV_IN を明示して実行）
+      - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -e
-          python tools/translate_columns.py
+          set -euo pipefail
+          IN="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv"
+          OUT="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv"
+          if [ -f "$IN" ]; then
+            export CSV_IN="$IN"
+            export CSV_OUT="$OUT"
+            python tools/translate_columns.py
+          else
+            echo "Skip translate: $IN not found."
+          fi
 
-      # === 追加ステップ ===
+      # ここからはそのまま（キャッシュと成果物）
       - name: Upload repo cache (CN/JA)
         uses: actions/upload-artifact@v4
         with:
