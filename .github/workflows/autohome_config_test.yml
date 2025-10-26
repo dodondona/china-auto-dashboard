@@ -77,6 +77,23 @@ jobs:
             export CSV_IN="$IN"
             export CSV_OUT="$OUT"
             python tools/translate_columns.py
+          - name: Upload repo cache (CN/JA)
+            uses: actions/upload-artifact@v4
+            with:
+              name: repo-cache-${{ matrix.series }}
+              path: cache_repo/series/${{ matrix.series }}/
+              if-no-files-found: warn
+
+          - name: Commit repo cache (CN/JA)
+            run: |
+              set -e
+              git config user.name  "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add cache_repo/series/${{ matrix.series }}/cn.csv || true
+              git add cache_repo/series/${{ matrix.series }}/ja.csv || true
+              git commit -m "cache_repo update: series ${{ matrix.series }}" || echo "No changes to commit"
+              git push || echo "No changes to push"
+
           else
             echo "Skip translate: $IN not found."
           fi
