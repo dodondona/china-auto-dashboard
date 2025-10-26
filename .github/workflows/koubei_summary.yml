@@ -1,4 +1,3 @@
-# .github/workflows/koubei_summary.yml
 name: koubei_summary
 
 on:
@@ -9,10 +8,12 @@ on:
         required: true
         type: string
       pages:
-        description: "Number of pages to fetch"
+        description: "Number of review pages to fetch"
         required: false
         default: "5"
         type: string
+
+  # 上流Workflowから呼び出せるように追加
   workflow_call:
     inputs:
       series_id:
@@ -26,26 +27,43 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (Playwright + project)
+      - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt || true
           pip install playwright
           python -m playwright install chromium
+          pip install -r requirements.txt || true
 
-      - name: Run koubei summary
+      - name: Run koubei summary scraper
         env:
-          # もしスクリプトが環境変数を使うならここで渡す
+          # 必要に応じてシークレットを利用
           # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # HTTP(S)_PROXY: ${{ secrets.HTTP_PROXY }}
-          # ...
         run: |
           set -euo pipefail
-          python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
+          series_id="${{ inputs.series_id }}"
+          pages="${{ inputs.pages }}"
+          echo "▶️ Running koubei summary for series ${series_id}, pages=${pages}"
+
+          # koubei_summary_playwright.py が既に存在している想定
+          # URL生成: https://k.autohome.com.cn/{series_id}#pvareaid=3454440
+          python tools/koubei_summary_playwright.py "${series_id}" "${pages}"
+
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_summary_${{ inputs.series_id }}
+          path: |
+            output/koubei_summary_${{ inputs.series_id }}.csv
+            output/koubei_summary_${{ inputs.series_id }}.json
+          if-no-files-found: ignore
