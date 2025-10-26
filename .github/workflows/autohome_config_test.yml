@@ -8,12 +8,17 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write   # ← これが無いと push できない
+
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,9 +29,7 @@ jobs:
         run: |
           set -e
           python -m pip install --upgrade pip
-          # 翻訳に必要
           pip install pandas openai
-          # クローラに必要（必要な場合のみ）
           pip install playwright beautifulsoup4 lxml requests || true
           python -m playwright install chromium || true
 
@@ -47,31 +50,38 @@ jobs:
         run: |
           set -euo pipefail
           IN="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv"
-          OUT="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv"
           if [ -f "$IN" ]; then
             export CSV_IN="$IN"
-            export CSV_OUT="$OUT"
             python tools/translate_columns.py
           else
             echo "Skip translate: $IN not found."
           fi
 
-      # リポジトリ内キャッシュをコミット＆プッシュ（Artifactsは任意）
-      - name: Commit repo cache (CN/JA)
+      # リポジトリ内キャッシュ・成果をコミット＆プッシュ（“視認できる”状態に残す）
+      - name: Commit repo cache and outputs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cache_repo/series/${{ inputs.series_id }}/cn.csv || true
-          git add cache_repo/series/${{ inputs.series_id }}/ja.csv || true
-          git commit -m "cache_repo update: series ${{ inputs.series_id }}" || echo "No changes to commit"
-          git push || echo "No changes to push"
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git add "cache_repo/series/${{ inputs.series_id }}/cn.csv" || true
+          git add "cache_repo/series/${{ inputs.series_id }}/ja.csv" || true
+          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv" || true
+          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv" || true
+          git add "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv" || true
+          git commit -m "update series ${{ inputs.series_id }} (CN/JA outputs & cache_repo)" || echo "No changes to commit"
+          git pull --rebase || true
+          git push
 
+      # （任意）Artifacts も残す
       - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-config-csv-${{ inputs.series_id }}
           path: |
+            output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv
             cache_repo/series/${{ inputs.series_id }}/
