@@ -27,7 +27,7 @@ jobs:
         run: |
           set -e
           python -m pip install --upgrade pip
-          pip install pandas beautifulsoup4 lxml requests playwright
+          pip install pandas beautifulsoup4 lxml requests playwright openai
           python -m playwright install chromium
 
       - name: Run config crawler
