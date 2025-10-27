@@ -22,80 +22,40 @@ def resolve_src_dst():
 
     src = Path(csv_in)  if csv_in  else None
     dst = Path(csv_out) if csv_out else None
-
     if src is None or dst is None:
         s2, d2 = guess_paths_from_series(SERIES_ID)
         src = src or s2
         dst = dst or d2
-
     src = src or default_in
     dst = dst or default_out
     return src, dst
 
 SRC, DST_PRIMARY = resolve_src_dst()
-
-def make_secondary(dst: Path) -> Path:
-    s = dst.name
-    if s.endswith(".ja.csv"):
-        s2 = s.replace(".ja.csv", "_ja.csv")
-    elif s.endswith("_ja.csv"):
-        s2 = s.replace("_ja.csv", ".ja.csv")
-    else:
-        s2 = dst.stem + ".ja.csv"
-    return dst.parent / s2
-
-DST_SECONDARY = make_secondary(DST_PRIMARY)
+DST_SECONDARY = DST_PRIMARY.parent / DST_PRIMARY.name.replace(".ja.csv", "_ja.csv")
 
 # ====== 設定 ======
 MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 API_KEY = os.environ.get("OPENAI_API_KEY")
-
-TRANSLATE_VALUES   = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
-TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
-STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
-SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
-EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
-
-CACHE_REPO_DIR     = os.environ.get("CACHE_REPO_DIR", "cache").strip()
-
+CACHE_REPO_DIR = os.environ.get("CACHE_REPO_DIR", "cache").strip()
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
-
-# ====== クリーニング ======
-NOISE_ANY = ["对比","参数","图片","配置","详情"]
-def clean_any_noise(s:str)->str:
-    s=str(s) if s is not None else ""
-    for w in NOISE_ANY:
-        s=s.replace(w,"")
-    return re.sub(r"\s+"," ",s).strip(" 　-—–")
-
-def uniq(seq):
-    s, out = set(), []
-    for x in seq:
-        if x not in s:
-            s.add(x); out.append(x)
-    return out
-
-def chunked(xs, n):
-    for i in range(0, len(xs), n):
-        yield xs[i:i+n]
 
 # ====== LLM ======
 class Translator:
     def __init__(self, model: str, api_key: str):
-        if not (api_key and api_key.strip()):
-            raise RuntimeError("OPENAI_API_KEY is not set")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY missing")
         self.client = OpenAI(api_key=api_key)
         self.model = model
         self.system = (
             "あなたは自動車仕様表の専門翻訳者です。"
-            "入力は中国語の『セクション名/項目名/セル値』の配列です。"
-            "自然で簡潔な日本語へ翻訳してください。"
-            "数値・年式・排量・AT/MT等の記号は保持。"
-            "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
+            "入力は中国語の『セル値』の配列です。"
+            "自然で簡潔な日本語に翻訳してください。"
+            "数値・記号・年式はそのまま保持し、JSONで返してください。"
+            "出力は{'translations':[{'cn':'原文','ja':'訳文'}]}のみ。"
         )
         print(f"🟢 Translator ready: model={self.model}")
 
-    def translate_batch(self, terms: list[str]) -> dict[str,str]:
+    def translate_batch(self, terms:list[str])->dict[str,str]:
         if not terms: return {}
         msgs=[
             {"role":"system","content":self.system},
@@ -107,23 +67,37 @@ class Translator:
                 response_format={"type":"json_object"},
             )
             content=resp.choices[0].message.content or ""
-            d=json.loads(content)
-            return {t["cn"]:t["ja"] for t in d.get("translations",[]) if t.get("cn")}
+            data=json.loads(content)
+            return {t["cn"]:t["ja"] for t in data.get("translations",[]) if t.get("cn")}
         except Exception as e:
-            print("❌ OpenAI error:", repr(e))
+            print("❌ API error:",repr(e))
             return {t:t for t in terms}
 
-    def translate_unique(self, unique_terms:list[str])->dict[str,str]:
+    def translate_unique(self, terms:list[str])->dict[str,str]:
         out={}
-        for chunk in chunked(unique_terms,BATCH_SIZE):
+        for chunk_i in range(0,len(terms),BATCH_SIZE):
+            chunk=terms[chunk_i:chunk_i+BATCH_SIZE]
             for attempt in range(1,RETRIES+1):
                 try:
                     out.update(self.translate_batch(chunk))
                     break
                 except Exception as e:
-                    print(f"retry {attempt} {e}")
+                    print(f"retry {attempt}",repr(e))
                     time.sleep(SLEEP_BASE*attempt)
         return out
+
+# ====== 共通 ======
+def clean_any_noise(s:str)->str:
+    s=str(s) if s is not None else ""
+    s=re.sub(r"\s+"," ",s)
+    return s.strip(" 　-—–")
+
+def uniq(seq):
+    seen=set();out=[]
+    for x in seq:
+        if x not in seen:
+            seen.add(x);out.append(x)
+    return out
 
 # ====== main ======
 def main():
@@ -131,65 +105,63 @@ def main():
     print(f"📝 DST(primary): {DST_PRIMARY}")
     print(f"📝 DST(secondary): {DST_SECONDARY}")
 
-    if not Path(SRC).exists():
-        raise FileNotFoundError(f"入力CSVが見つかりません: {SRC}")
+    if not SRC.exists():
+        raise FileNotFoundError(SRC)
 
-    df = pd.read_csv(SRC, encoding="utf-8-sig").map(clean_any_noise)
+    df=pd.read_csv(SRC,encoding="utf-8-sig").map(clean_any_noise)
 
-    cn_snap_path = Path(CACHE_REPO_DIR) / f"{SERIES_ID}/cn.csv"
-    ja_prev_path = Path(CACHE_REPO_DIR) / f"{SERIES_ID}/ja.csv"
+    cache_cn=Path(CACHE_REPO_DIR)/f"{SERIES_ID}/cn.csv"
+    cache_ja=Path(CACHE_REPO_DIR)/f"{SERIES_ID}/ja.csv"
+    cache_cn.parent.mkdir(parents=True,exist_ok=True)
+    reuse=cache_cn.exists() and cache_ja.exists()
 
-    cn_exists = cn_snap_path.exists()
-    ja_exists = ja_prev_path.exists()
-    reuse = cn_exists and ja_exists
+    prev_cn=prev_ja=None
+    if reuse:
+        prev_cn=pd.read_csv(cache_cn,encoding="utf-8-sig")
+        prev_ja=pd.read_csv(cache_ja,encoding="utf-8-sig")
     print(f"♻️ reuse={reuse}")
 
-    prev_cn, prev_ja = None, None
-    if reuse:
-        prev_cn = pd.read_csv(cn_snap_path, encoding="utf-8-sig")
-        prev_ja = pd.read_csv(ja_prev_path, encoding="utf-8-sig")
+    tr=Translator(MODEL,API_KEY)
+    out=df.copy()
 
-    tr = Translator(MODEL, API_KEY)
-
-    out = df.copy()
-    to_translate = []
+    values_to_translate=[]
     if reuse and prev_cn is not None:
         for i in range(len(df)):
             for j in range(len(df.columns)):
-                if j<4: continue
-                a,b=str(df.iat[i,j]).strip(), str(prev_cn.iat[i,j]).strip()
-                if a!=b: to_translate.append(a)
+                a,b=str(df.iat[i,j]).strip(),str(prev_cn.iat[i,j]).strip()
+                if a!=b:
+                    values_to_translate.append(a)
+                    # 同位置更新対象
+                    out.iat[i,j]=a
     else:
-        for j in range(len(df.columns)):
-            if j<4: continue
-            for i in range(len(df)):
-                s=str(df.iat[i,j]).strip()
-                if s: to_translate.append(s)
+        for i in range(len(df)):
+            for j in range(len(df.columns)):
+                values_to_translate.append(str(df.iat[i,j]).strip())
 
-    uniq_vals = uniq(to_translate)
+    uniq_vals=uniq([v for v in values_to_translate if v and v not in {"","●","○","–","-","—"}])
     print(f"🌐 to_translate={len(uniq_vals)}")
-    val_map = tr.translate_unique(uniq_vals) if uniq_vals else {}
 
-    for i in range(len(df)):
-        for j in range(len(df.columns)):
-            if j<4: continue
-            s=str(df.iat[i,j]).strip()
-            if s: out.iat[i,j] = val_map.get(s,s)
+    val_map=tr.translate_unique(uniq_vals) if uniq_vals else {}
 
-    # ===== 出力 =====
-    DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
-    out_save = out.drop(columns=["セクション","項目"], errors="ignore")
+    for i in range(len(out)):
+        for j in range(len(out.columns)):
+            s=str(out.iat[i,j]).strip()
+            if s in val_map:
+                out.iat[i,j]=val_map[s]
 
-    out_save.to_csv(DST_PRIMARY, index=False, encoding="utf-8-sig")
-    out_save.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
+    # 出力：セクション,項目は削除（_jaは残す）
+    out_save=out.drop(columns=["セクション","項目"],errors="ignore")
+    DST_PRIMARY.parent.mkdir(parents=True,exist_ok=True)
+    out_save.to_csv(DST_PRIMARY,index=False,encoding="utf-8-sig")
+    out_save.to_csv(DST_SECONDARY,index=False,encoding="utf-8-sig")
 
-    cn_snap_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(cn_snap_path, index=False, encoding="utf-8-sig")
-    out.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
+    # キャッシュ更新
+    df.to_csv(cache_cn,index=False,encoding="utf-8-sig")
+    out.to_csv(cache_ja,index=False,encoding="utf-8-sig")
 
     print(f"✅ Saved: {DST_PRIMARY}")
-    print(f"📦 Repo cache CN: {cn_snap_path}")
-    print(f"📦 Repo cache JA: {ja_prev_path}")
+    print(f"📦 cache CN: {cache_cn}")
+    print(f"📦 cache JA: {cache_ja}")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
