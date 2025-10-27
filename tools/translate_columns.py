@@ -413,20 +413,26 @@ def main():
             if not s: continue
             out.iat[i,j]=val_map.get(s,s)
 
-    # ------- 出力（CN列は出力だけ削除） -------
+        # ------- 出力 -------
+    # 出力CSVでは「セクション」「項目」を必ず除外（列順変動・大文字小文字等にも強い形でガード）
+    cols_no_cn = [c for c in out.columns if str(c) not in ("セクション", "項目")]
+    out_save = out.loc[:, cols_no_cn]
+
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
-    out_save = out.drop(columns=["セクション", "項目"], errors="ignore")
+
+    # 2系統とも CN 列なしの out_save を保存（上書き安全）
     out_save.to_csv(DST_PRIMARY, index=False, encoding="utf-8-sig")
     out_save.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
 
-    # リポジトリ内に CN/JA を保存（次回比較＆人手編集用） ※フル列で保存
+    # リポジトリのキャッシュは “フル列” のまま残す（次回の差分検出・再利用用）
     cn_snap_path.parent.mkdir(parents=True, exist_ok=True)
     pd.read_csv(SRC, encoding="utf-8-sig").to_csv(cn_snap_path, index=False, encoding="utf-8-sig")
     out.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
 
-    print(f"✅ Saved: {DST_PRIMARY}")
+    print(f"✅ Saved (CN cols dropped): {DST_PRIMARY}")
     print(f"📦 Repo cache CN: {cn_snap_path}")
     print(f"📦 Repo cache JA: {ja_prev_path}")
+
 
 if __name__ == "__main__":
     main()
