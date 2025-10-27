@@ -417,21 +417,14 @@ def main():
             if not s: continue
             out_full.iat[i,j]=val_map.get(s,s)
 
-    # ------- 出力 -------
-    # 出力用は「セクション_ja」「項目_ja」＋グレード列だけで最初から組み立てる
-    # グレード列は、CN/JA どちらでもなく "4列目以降" を採用（すでにヘッダ翻訳済み）
-    grade_cols = [c for c in out_full.columns if c not in ("セクション", "セクション_ja", "項目", "項目_ja")]
+        # ------- 出力 -------
+    # 位置ベースで確実に: [0]=セクション, [1]=セクション_ja, [2]=項目, [3]=項目_ja, [4:]=グレード列
+    # ⇒ 出力は [1], [3], [4:] のみ（CN列はそもそも選ばない）
+    ja_core = out_full.iloc[:, [1, 3]]
+    grades  = out_full.iloc[:, 4:]
+    final_out = pd.concat([ja_core, grades], axis=1)
 
-    # 出力DataFrameを“新規”に作る（CN列は最初から持たない）
-    final_out = pd.concat(
-        [
-            out_full.loc[:, ["セクション_ja", "項目_ja"]],
-            out_full.loc[:, grade_cols],
-        ],
-        axis=1
-    )
-
-    # 念のための最終ガード（CN列が紛れ込んでいたら確実に落とす）
+    # 念のための最終ガード（あっても無視されるが保険）
     final_out = final_out.drop(columns=["セクション", "項目"], errors="ignore")
 
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
