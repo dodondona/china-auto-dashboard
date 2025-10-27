@@ -2,114 +2,68 @@
 # -*- coding: utf-8 -*-
 
 """
-translate_columns.py
+translate_columns.py  (cacheless + dict-first + batch translation)
 
 目的:
   - Autohome の設定CSVを日本語化し、最終出力(.ja.csv)を生成する。
-  - 差分再利用: 「前回のCNスナップショット(cache/<id>/cn.csv)」と「前回の最終出力(.ja.csv)」を突き合わせ、
-    変更されていないセルは前回のJAをコピー、変更セルのみ翻訳する。
-  - cache は CN スナップショットのみを保存（JAの別枠キャッシュは保存しない）。
-  - 後方互換: 過去に cache/<id>/ja.csv がある場合は参照は可能（保存はしない）。
+  - ファイルキャッシュは一切使わない/作らない（毎回フル処理でも高速）。
+  - コスト節約のため:
+      * セクション/項目は辞書優先（APIを呼ばない）
+      * 重複語を in-memory で集約し、まとめてバッチ翻訳
+      * 数値・記号・ダッシュ等は翻訳スキップ
+  - 既存仕様を壊さない:
+      * 出力列は「セクション_ja」「項目_ja」+ グレード列（ヘッダは翻訳しない）
+      * 価格等の表記ルールや用語は変更しない
+      * YAMLのヒア構文等は不要（ここは純Python）
 
-入出力(環境変数):
-  - CSV_IN         : 入力CSV(必須)
-  - CSV_OUT        : 互換エイリアス。なければ DST_PRIMARY を参照
-  - DST_PRIMARY    : 最終出力(推奨)。CSV_OUTが未設定ならこちらを必須とみなす
-  - DST_SECONDARY  : 追加出力(任意)。指定されていれば同一内容を書き出す
-  - SERIES_ID      : キャッシュ保存先のサブフォルダ名に使用 (cache/<SERIES_ID>/)
+環境変数:
+  - CSV_IN (必須)
+  - DST_PRIMARY もしくは CSV_OUT（どちらか必須）
+  - DST_SECONDARY（任意）
+  - OPENAI_API_KEY（任意）: 未設定なら恒等（翻訳しない）
+  - OPENAI_MODEL（任意・既定: gpt-4o-mini）
+  - BATCH_SIZE（任意・既定: 80）
+  - TIMEOUT_SEC（任意・既定: 25）
 
-前提となるCSV構造(最低限):
-  - 列: 「セクション」「項目」+ 複数のグレード列 (CN表示)
-  - 最終出力では: 「セクション_ja」「項目_ja」を追加し、グレード列の中身はJA化、列見出しも可能ならJAへ
-
-翻訳について:
-  - 本スクリプトは差分再利用を最優先。翻訳器はあくまでフォールバック。
-  - OPENAI_API_KEY が設定されている場合に限り、簡易のOpenAI API呼び出しをサポート（オプション）。
-    未設定/失敗時は、恒等(=原文返し)でフォールバックします。
-  - 実運用の翻訳は既存の上流ステップ/別スクリプトに任せてOK。ここでは“壊さないこと”を最優先。
-
-注意:
-  - 既存パイプラインとの互換を重視し、列名・エンコーディング(utf-8-sig)・例外時挙動を保守的に実装。
+入出力:
+  入力: 先頭2列が「セクション」「項目」、以降がグレード列（CN）
+  出力: 「セクション_ja」「項目_ja」＋グレード列（ヘッダそのまま、中身を必要に応じ翻訳）
 """
 
 from __future__ import annotations
 import os
 import re
-import csv
-import json
 from pathlib import Path
-from typing import Optional, Dict, List
-
+from typing import Dict, List
 import pandas as pd
 
-# ----------------------------
-# 環境変数とパス解決
-# ----------------------------
+# ====== 環境変数 ======
 SRC = os.environ.get("CSV_IN", "").strip()
 DST_PRIMARY = os.environ.get("DST_PRIMARY", "").strip()
-CSV_OUT = os.environ.get("CSV_OUT", "").strip()  # 互換
+CSV_OUT = os.environ.get("CSV_OUT", "").strip()
 DST_SECONDARY = os.environ.get("DST_SECONDARY", "").strip()
-SERIES_ID = os.environ.get("SERIES_ID", "").strip()
 
 if not SRC:
     raise SystemExit("CSV_IN が未設定です。")
 
 if not DST_PRIMARY:
-    # 互換: CSV_OUT 優先。無ければエラー
     if CSV_OUT:
         DST_PRIMARY = CSV_OUT
     else:
         raise SystemExit("DST_PRIMARY か CSV_OUT のいずれかを設定してください。")
 
-# cache/<id>/cn.csv
-def infer_series_id() -> str:
-    if SERIES_ID:
-        return SERIES_ID
-    # 入力CSVパスから series_id を推定（数字連続を優先）
-    name = Path(SRC).stem
-    m = re.search(r"(\d{3,})", name)
-    if m:
-        return m.group(1)
-    # ディレクトリ名等からも試す
-    m2 = re.search(r"(\d{3,})", str(Path(SRC).parent))
-    if m2:
-        return m2.group(1)
-    return "unknown"
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "80"))
+TIMEOUT_SEC = int(os.environ.get("TIMEOUT_SEC", "25"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 
-_SERIES = infer_series_id()
-CACHE_DIR = Path("cache") / _SERIES
-CN_SNAP = CACHE_DIR / "cn.csv"
-# 後方互換: 旧来のJAキャッシュ(参照のみ) ※新規保存はしない
-JA_CACHE_LEGACY = CACHE_DIR / "ja.csv"
-
-# ----------------------------
-# ユーティリティ
-# ----------------------------
-def read_csv(path: Path) -> Optional[pd.DataFrame]:
-    try:
-        return pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:
-        return None
+# ====== ユーティリティ ======
+def read_csv(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path, encoding="utf-8-sig")
 
 def write_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
-
-def norm_cn_cell(x: str) -> str:
-    """CNセル比較用に正規化（空白統一・全角空白除去・改行等の空白化）"""
-    if x is None:
-        return ""
-    s = str(x)
-    s = s.replace("\u3000", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def same_shape_and_headers(a: pd.DataFrame, b: pd.DataFrame) -> bool:
-    if a is None or b is None:
-        return False
-    if a.shape != b.shape:
-        return False
-    return list(a.columns) == list(b.columns)
 
 def ensure_required_columns(df: pd.DataFrame) -> None:
     need = ["セクション", "項目"]
@@ -117,199 +71,231 @@ def ensure_required_columns(df: pd.DataFrame) -> None:
         if col not in df.columns:
             raise ValueError(f"入力CSVに必須列 {col} が見当たりません。列名: {list(df.columns)}")
 
-# ----------------------------
-# 翻訳器（最小限/フォールバック安全）
-# ----------------------------
-_OPENAI_READY = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-def translate_text_ja(s: str) -> str:
-    """安全第一: 既訳再利用が効かなかった時の最終フォールバック。
-       基本は恒等返し（壊さない）。OPENAI_API_KEY がある場合のみAPI試行。
-    """
-    s = str(s or "").strip()
-    if not s:
-        return s
-    if not _OPENAI_READY:
-        return s  # 恒等
-    try:
-        # ここは“使えるなら使う”に留める。API仕様は変わりやすいので最小限。
-        import requests
-        key = os.environ["OPENAI_API_KEY"].strip()
-        endpoint = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1/chat/completions")
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        prompt = f"次の中国語（または英語）を日本語に簡潔に訳してください：\n{s}"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-        }
-        r = requests.post(endpoint, headers=headers, json=payload, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        cand = data["choices"][0]["message"]["content"].strip()
-        return cand or s
-    except Exception:
-        return s  # 失敗しても壊さない
+def is_trivial_no_translate(s: str) -> bool:
+    """数値/記号/ダッシュ系は翻訳不要"""
+    if s is None:
+        return True
+    x = str(s).strip()
+    if not x:
+        return True
+    if re.fullmatch(r"[-—–·\.\/\s]+", x):
+        return True
+    # 数値（万/千/k 含む）、単位付き（元/円/¥）
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?(?:\s*[万千kK])?(?:\s*[元円¥])?", x):
+        return True
+    return False
 
-# ----------------------------
-# メイン処理
-# ----------------------------
+# ====== 固定辞書（まずここを優先） ======
+# 必要に応じて増やせます。既存ルールを壊さない安全な語のみ。
+SECTION_DICT: Dict[str, str] = {
+    "基本参数": "基本情報",
+    "车身": "車体",
+    "车身参数": "車体寸法",
+    "外部配置": "外装装備",
+    "内部配置": "内装装備",
+    "座椅配置": "シート",
+    "安全配置": "安全装備",
+    "主/被动安全": "主/受動安全",
+    "操控配置": "走行/操縦",
+    "智驾辅助": "運転支援",
+    "驾驶辅助": "運転支援",
+    "灯光配置": "ライト",
+    "多媒体配置": "マルチメディア",
+    "空调/冰箱": "空調/冷蔵",
+    "动力系统": "パワートレイン",
+    "发动机": "エンジン",
+    "电机": "モーター",
+    "变速箱": "トランスミッション",
+    "底盘转向": "シャシー/ステアリング",
+    "车轮制动": "ホイール/ブレーキ",
+    "保修政策": "保証",
+    "整车质保": "車両保証",
+}
+
+ITEM_DICT: Dict[str, str] = {
+    "厂商指导价": "メーカー希望小売価格",
+    "经销商报价": "ディーラー販売価格",
+    "排量(L)": "排気量(L)",
+    "最大功率(kW)": "最大出力(kW)",
+    "最大扭矩(N·m)": "最大トルク(N·m)",
+    "变速箱类型": "変速機形式",
+    "前悬架类型": "フロントサスペンション",
+    "后悬架类型": "リアサスペンション",
+    "驱动方式": "駆動方式",
+    "车身结构": "ボディ構造",
+    "长*宽*高(mm)": "全長×全幅×全高(mm)",
+    "轴距(mm)": "ホイールベース(mm)",
+    "整车质保": "車両保証",
+    "主/副驾驶安全气囊": "運転席/助手席エアバッグ",
+    "前/后排头部气囊(气帘)": "前/後席カーテンエアバッグ",
+    "车道保持辅助系统": "レーンキープアシスト",
+    "自适应巡航": "アダプティブクルーズ",
+    "并线辅助": "ブラインドスポットモニター",
+    "自动驻车": "オートホールド",
+    "电动天窗": "電動サンルーフ",
+    "全景天窗": "パノラマサンルーフ",
+    "LED日间行车灯": "LEDデイタイムランニングライト",
+    "大灯自动开闭": "オートライト",
+    "车内中控锁": "集中ドアロック",
+    "无钥匙进入系统": "キーレスエントリー",
+    "无钥匙启动系统": "プッシュスタート",
+    "多功能方向盘": "マルチファンクションステアリング",
+    "定速巡航": "クルーズコントロール",
+    "座椅材质": "シート素材",
+    "主驾驶座椅调节": "運転席シート調整",
+    "副驾驶座椅调节": "助手席シート調整",
+    "前/后排座椅加热": "前/後席シートヒーター",
+    "自动空调": "オートエアコン",
+    "后座出风口": "後席エアアウトレット",
+}
+
+# ====== OpenAI: バッチ翻訳（未設定なら恒等） ======
+def batch_translate_unique(values: List[str]) -> Dict[str, str]:
+    """
+    重複排除→バッチ翻訳→dict で返す。
+    OPENAI_API_KEY が無ければ恒等返し。
+    """
+    # 事前フィルタ＆ユニーク化
+    uniq: List[str] = []
+    for v in values:
+        x = (v or "").strip()
+        if not x or is_trivial_no_translate(x):
+            continue
+        if x not in uniq:
+            uniq.append(x)
+
+    if not uniq or not OPENAI_API_KEY:
+        # 恒等返し
+        return {u: u for u in uniq}
+
+    import requests
+    out_map: Dict[str, str] = {}
+    for i in range(0, len(uniq), BATCH_SIZE):
+        chunk = uniq[i:i+BATCH_SIZE]
+        # プロンプトは短文/項目想定・最小限
+        sys_prompt = (
+            "以下の各項目を日本語に短く自然に訳し、順番どおりに1行ずつ出力してください。"
+            "数値・単位・記号は維持してください。余計な説明は一切不要です。"
+        )
+        user_payload = "\n".join(f"- {s}" for s in chunk)
+        try:
+            r = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": OPENAI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    "temperature": 0.2,
+                },
+                timeout=TIMEOUT_SEC,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"].strip()
+            # 出力は1行1訳を期待。万一箇条書き記号が返っても削ぎ落す。
+            lines = [ln.strip(" -•\t") for ln in text.splitlines() if ln.strip()]
+            if len(lines) != len(chunk):
+                # 行数ズレは安全に補完
+                # （壊さない：不足分は原文で埋める）
+                while len(lines) < len(chunk):
+                    lines.append(chunk[len(lines)])
+                if len(lines) > len(chunk):
+                    lines = lines[:len(chunk)]
+        except Exception:
+            # 失敗時は原文返し（壊さない）
+            lines = chunk
+
+        for src, ja in zip(chunk, lines):
+            out_map[src] = (ja or src).strip()
+
+    return out_map
+
+# ====== メイン ======
 def main():
-    # 1) 入力読込
     df = read_csv(Path(SRC))
-    if df is None:
-        raise SystemExit(f"入力CSVが読めません: {SRC}")
     ensure_required_columns(df)
 
-    # 2) 既存キャッシュ/前回出力の取得
-    prev_cn_df = read_csv(CN_SNAP)
-    prev_out_df = read_csv(Path(DST_PRIMARY))  # 前回の最終出力(.ja.csv)
-    # 後方互換: 旧来の cache/<id>/ja.csv を参照（存在時のみ）
-    prev_ja_df = read_csv(JA_CACHE_LEGACY)
+    # 出力器の骨格（ヘッダは既存仕様を維持）
+    out = pd.DataFrame(index=df.index)
+    out["セクション"] = df["セクション"]
+    out["項目"] = df["項目"]
+    out["セクション_ja"] = ""
+    out["項目_ja"] = ""
 
-    # 差分再利用フラグ
-    enable_reuse = (prev_cn_df is not None) and same_shape_and_headers(df, prev_cn_df) and (
-        (prev_out_df is not None) or (prev_ja_df is not None)
-    )
-
-    # 3) 出力器の骨格: out_full をCN列で初期化 → 後で見出し/中身をJAに置換
-    #    列構成: [セクション, 項目, セクション_ja, 項目_ja] + grade列(CNヘッダのまま)
-    out_full = pd.DataFrame(index=df.index)
-    out_full["セクション"] = df["セクション"]
-    out_full["項目"] = df["項目"]
-    out_full["セクション_ja"] = ""
-    out_full["項目_ja"] = ""
-    grade_cols: List[str] = [c for c in df.columns if c not in ["セクション", "項目"]]
+    # グレード列（ヘッダは翻訳しない = そのまま）
+    grade_cols = [c for c in df.columns if c not in ["セクション", "項目"]]
     for c in grade_cols:
-        out_full[c] = df[c]
+        out[c] = df[c]
 
-    # 4) 既訳再利用マップ（セクション/項目）
-    sec_map_old: Dict[str, str] = {}
-    item_map_old: Dict[str, str] = {}
+    # --- 1) セクション/項目: 辞書 → in-memory → APIバッチ ---
+    # まず辞書適用
+    sec_src = df["セクション"].astype(str).tolist()
+    item_src = df["項目"].astype(str).tolist()
 
-    def build_maps_from_prev_out():
-        # prev_out_df: [セクション_ja, 項目_ja, grade...], CN列は無い前提
-        # 行対応は prev_cn_df と df が形状一致なので、同じ index 順で比較OK
-        if prev_out_df is None or prev_cn_df is None:
-            return
-        if ("セクション_ja" not in prev_out_df.columns) or ("項目_ja" not in prev_out_df.columns):
-            return
-        # セクション
-        for cur, old_cn, old_ja in zip(df["セクション"].astype(str),
-                                       prev_cn_df["セクション"].astype(str),
-                                       prev_out_df["セクション_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                sec_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
-        # 項目
-        for cur, old_cn, old_ja in zip(df["項目"].astype(str),
-                                       prev_cn_df["項目"].astype(str),
-                                       prev_out_df["項目_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                item_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
+    sec_ja = [SECTION_DICT.get(s, None) for s in sec_src]
+    item_ja = [ITEM_DICT.get(s, None) for s in item_src]
 
-    def build_maps_from_legacy_cache():
-        if prev_ja_df is None or prev_cn_df is None:
-            return
-        if ("セクション_ja" not in prev_ja_df.columns) or ("項目_ja" not in prev_ja_df.columns):
-            return
-        for cur, old_cn, old_ja in zip(df["セクション"].astype(str),
-                                       prev_cn_df["セクション"].astype(str),
-                                       prev_ja_df["セクション_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                sec_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
-        for cur, old_cn, old_ja in zip(df["項目"].astype(str),
-                                       prev_cn_df["項目"].astype(str),
-                                       prev_ja_df["項目_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                item_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
+    # 未確定だけをAPI候補に集約（短期キャッシュ: seen）
+    seen: Dict[str, str] = {}
+    need_sec = [s for s, ja in zip(sec_src, sec_ja) if not ja and not is_trivial_no_translate(s)]
+    need_item = [s for s, ja in zip(item_src, item_ja) if not ja and not is_trivial_no_translate(s)]
 
-    if enable_reuse:
-        if prev_out_df is not None:
-            build_maps_from_prev_out()
-        elif prev_ja_df is not None:
-            build_maps_from_legacy_cache()
+    # バッチ翻訳
+    trans_map = batch_translate_unique(need_sec + need_item)
+    seen.update(trans_map)
 
-    # 5) セクション/項目のJA埋め
-    def map_or_translate(d: Dict[str, str], src: str) -> str:
-        src = str(src or "").strip()
-        if not src:
-            return src
-        if src in d:
-            return d[src]
-        # 既訳が無ければ最終手段で翻訳器（恒等フォールバック）
-        ja = translate_text_ja(src)
-        d[src] = ja
-        return ja
+    # 確定（辞書 > seen > 恒等）
+    out["セクション_ja"] = [
+        SECTION_DICT.get(s) or seen.get(s) or (s if is_trivial_no_translate(s) else s)
+        for s in sec_src
+    ]
+    out["項目_ja"] = [
+        ITEM_DICT.get(s) or seen.get(s) or (s if is_trivial_no_translate(s) else s)
+        for s in item_src
+    ]
 
-    out_full["セクション_ja"] = df["セクション"].map(lambda x: map_or_translate(sec_map_old, x))
-    out_full["項目_ja"]       = df["項目"].map(lambda x: map_or_translate(item_map_old, x))
+    # --- 2) グレード列のセル中身（必要に応じ：今回はコスト節約のため最小限） ---
+    # 既存仕様を壊さないため、ここでは“必須そうな語”のみを翻訳候補にする。
+    # （完全自動で全セルを訳すとコストとリスクが上がる。要件に応じて拡張可）
+    # ここでは、ひらがな/カタカナ/漢字が混在しうるため、数値と記号だけスキップし、
+    # それ以外は重複をまとめてバッチで処理する（ただし列ヘッダは触らない）。
+    grade_values: List[str] = []
+    for col in grade_cols:
+        series = df[col].astype(str)
+        for v in series:
+            if not v or is_trivial_no_translate(v):
+                continue
+            grade_values.append(v.strip())
 
-    # 6) グレード列の「列見出し（ヘッダ）」のJA再利用
-    #    prev_out_df があれば、そのヘッダ(セクション_ja/項目_jaを含む)を踏襲するのが安全。
-    if enable_reuse and (prev_out_df is not None):
-        # prev_out_df: [セクション_ja, 項目_ja, <grade_ja>...]
-        # out_full   : [セクション, 項目, セクション_ja, 項目_ja, <grade_cn>...]
-        fixed = list(out_full.columns)[:4]  # ["セクション", "項目", "セクション_ja", "項目_ja"]
-        ja_grade_headers = list(prev_out_df.columns)[2:]  # セクション_ja/項目_ja の後ろがグレード列
-        if len(ja_grade_headers) == len(grade_cols):
-            out_full.columns = fixed + ja_grade_headers
-        # もし数が合わなければそのまま（安全優先）
-    else:
-        # ヘッダ翻訳を強行しない（安全運用）。必要ならここに独自辞書や正規化を差し込む。
-        pass
+    # 既存 seen を活かして不足分だけ翻訳
+    pending = [v for v in grade_values if v not in seen]
+    if pending:
+        seen.update(batch_translate_unique(pending))
 
-    # 7) グレード列の「セルの中身」再利用/翻訳
-    #    prev_out_df があれば「変更なしセル」は prev_out_df から流用。
-    if enable_reuse and (prev_cn_df is not None):
-        # prev_out_df が優先 / なければ legacy
-        ja_source = prev_out_df if prev_out_df is not None else prev_ja_df
-        # インデックスで同じ行、列位置は:
-        # - prev_out_df には CN列が無いので、CN→JAの列シフトが必要
-        # - prev_ja_df(legacy) は out_full と同じ列だった想定（互換的に扱う）
-        for i in range(len(df)):
-            for j, col in enumerate(grade_cols, start=0):
-                cur = norm_cn_cell(df.iat[i, 2 + j])  # df: [セクション, 項目, grade0, grade1...]
-                old = norm_cn_cell(prev_cn_df.iat[i, 2 + j])
-                out_col_idx = 4 + j  # out_full: [sec, item, sec_ja, item_ja, grade...]
-                if cur == old and ja_source is not None:
-                    try:
-                        if ja_source is prev_out_df:
-                            # prev_out_df は CN列が無いぶん、2列左に詰まっている
-                            out_full.iat[i, out_col_idx] = ja_source.iat[i, out_col_idx - 2]
-                        else:
-                            # legacy: 列構造が out_full と一致していた想定
-                            out_full.iat[i, out_col_idx] = ja_source.iat[i, out_col_idx]
-                        continue
-                    except Exception:
-                        # ずれがあれば翻訳へフォールバック
-                        pass
-                # 変更あり or 参照失敗 → 翻訳（恒等フォールバック）
-                out_full.iat[i, out_col_idx] = translate_text_ja(df.iat[i, 2 + j])
-    else:
-        # 再利用不可（初回/列変動など） → すべて翻訳（恒等フォールバック）
-        for i in range(len(df)):
-            for j, col in enumerate(grade_cols, start=0):
-                out_full.iat[i, 4 + j] = translate_text_ja(df.iat[i, 2 + j])
+    # 反映（原文維持ポリシー：訳があれば使う、なければ原文）
+    for col in grade_cols:
+        src_series = df[col].astype(str)
+        out[col] = [
+            seen.get(x.strip(), x) if not is_trivial_no_translate(x) else x
+            for x in src_series
+        ]
 
-    # 8) 最終出力（CN列は出力しない = 軽量版）
-    final_out = out_full[["セクション_ja", "項目_ja"] + list(out_full.columns[4:])].copy()
+    # --- 3) 最終出力（CN列は出さない＝既存仕様）
+    final_out = out[["セクション_ja", "項目_ja"] + grade_cols].copy()
 
-    # 9) 書き出し
+    # --- 4) 保存 ---
     write_csv(final_out, Path(DST_PRIMARY))
     if DST_SECONDARY:
         write_csv(final_out, Path(DST_SECONDARY))
 
-    # 10) キャッシュ保存（CNのみ）/ JAキャッシュは保存しない
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    # 入力そのものをスナップショット（CN）
-    write_csv(df, CN_SNAP)
-
     print(f"✅ Wrote: {DST_PRIMARY}")
     if DST_SECONDARY:
         print(f"✅ Wrote: {DST_SECONDARY}")
-    print(f"📦 Repo cache CN: {CN_SNAP}")
-    # 旧来: JAキャッシュは保存しません（参照のみ）
-    # print(f"📦 Repo cache JA: {JA_CACHE_LEGACY} (not saved anymore)")
 
 if __name__ == "__main__":
     main()
