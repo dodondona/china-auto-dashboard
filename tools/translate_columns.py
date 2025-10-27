@@ -349,62 +349,69 @@ def main():
         out.loc[is_msrp,col]=out.loc[is_msrp,col].map(lambda s:msrp_to_yuan_and_jpy(s,EXRATE_CNY_TO_JPY))
         out.loc[is_dealer,col]=out.loc[is_dealer,col].map(lambda s:dealer_to_yuan_only(s))
 
-    # ------- 値セル：変更セルのみ翻訳（列の“位置”で比較・コピー） -------
+       # ------- 値セル：変更セルのみ翻訳（列の“位置”で比較・コピー） -------
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         non_price_mask = ~(is_msrp | is_dealer)
 
-        grade_cols_cn  = list(df.columns[4:])                                  # CN 側
-        grade_cols_out = list(out.columns[4:])                                 # 出力側（JA名になっている可能性あり）
-        grade_cols_prev_ja = list(prev_ja_df.columns[4:]) if (enable_reuse and prev_ja_df is not None) else [None]*len(grade_cols_out)
+        grade_cols_cn  = list(df.columns[4:])                                   # CN 側
+        grade_cols_out = list(out.columns[4:])                                  # 出力側（JA名になっている可能性あり）
+        grade_cols_prev_ja = list(prev_ja_df.columns[4:]) if (enable_reuse and prev_ja_df is not None) else []
+
+        # 3者の重なり範囲だけを扱う（列数不一致でも落ちない）
+        min_len = min(len(grade_cols_out), len(grade_cols_cn)) if enable_reuse else len(grade_cols_out)
 
         values_to_translate = []
 
         if enable_reuse and (prev_cn_df is not None) and (prev_ja_df is not None):
-            for idx in range(len(grade_cols_out)):
-                col_out = grade_cols_out[idx]
-                col_cn  = grade_cols_cn[idx]
+            for idx in range(min_len):
+                col_out = grade_cols_out[idx]           # out の列（書き込み先）
+                col_cn  = grade_cols_cn[idx]            # df/prev_cn_df の列（比較元）
                 col_prev_ja = grade_cols_prev_ja[idx] if idx < len(grade_cols_prev_ja) else None
 
+                # CN同士で差分判定（列名はCN名を使う）
                 cur_col = df[col_cn].astype(str).map(norm_cn_cell)
                 old_col = prev_cn_df[col_cn].astype(str).map(norm_cn_cell)
                 changed = (cur_col != old_col)
 
+                # 未変更は前回JAを“同じ列位置”からコピー（存在する時のみ）
                 if (col_prev_ja is not None) and (col_prev_ja in prev_ja_df.columns):
                     m = non_price_mask & (~changed)
                     out.loc[m, col_out] = prev_ja_df.loc[m, col_prev_ja]
 
+                # 変更セルだけ収集（翻訳候補）
                 for i in out.index:
-                    if not (non_price_mask[i] and changed[i]): 
+                    if not (non_price_mask[i] and changed[i]):
                         continue
                     vv = str(out.at[i, col_out]).strip()
-                    if vv in {"","●","○","–","-","—"}: 
+                    if vv in {"", "●", "○", "–", "-", "—"}:
                         continue
-                    if numeric_like.fullmatch(vv): 
+                    if numeric_like.fullmatch(vv):
                         continue
                     values_to_translate.append(vv)
         else:
-            for idx in range(len(grade_cols_out)):
-                col_out = grade_cols_out[idx]
+            # 初回などキャッシュなし。出力列だけ見て収集
+            for col_out in grade_cols_out:
                 for v in out.loc[non_price_mask, col_out].astype(str):
                     vv = v.strip()
-                    if vv in {"","●","○","–","-","—"}: 
+                    if vv in {"", "●", "○", "–", "-", "—"}:
                         continue
-                    if numeric_like.fullmatch(vv): 
+                    if numeric_like.fullmatch(vv):
                         continue
                     values_to_translate.append(vv)
 
         print(f"🗂️  values candidates before-uniq = {len(values_to_translate)}")
-        uniq_vals=uniq(values_to_translate)
+        uniq_vals = uniq(values_to_translate)
         print(f"🌐 to_translate: values={len(uniq_vals)}")
-        val_map=tr.translate_unique(uniq_vals) if uniq_vals else {}
-        for idx in range(len(grade_cols_out)):
-            col_out = grade_cols_out[idx]
+        val_map = tr.translate_unique(uniq_vals) if uniq_vals else {}
+
+        # 置換（非価格セルのみ）
+        for col_out in grade_cols_out:
             for i in out.index:
-                if not non_price_mask[i]: 
+                if not non_price_mask[i]:
                     continue
-                s=str(out.at[i,col_out]).strip()
-                out.at[i,col_out]=val_map.get(s,s)
+                s = str(out.at[i, col_out]).strip()
+                out.at[i, col_out] = val_map.get(s, s)
 
     # ------- 出力 -------
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
