@@ -14,17 +14,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+...
       - name: Install dependencies
         run: |
           set -e
@@ -50,12 +40,13 @@ jobs:
         run: |
           set -euo pipefail
           IN="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv"
-          echo "CSV_IN check: $IN"
-          if [ -f "$IN" ]; then
+...
             # 直前のキャッシュ状況も表示（存在していても翻訳ロジックは従来通り）
             echo "Pre-run cache listing:"
             ls -l "cache/${{ inputs.series_id }}" || echo "(no cache dir)"
             export CSV_IN="$IN"
+            export DST_PRIMARY="${IN%.csv}.ja.csv"
+            export DST_SECONDARY="${IN%.csv}_ja.csv"
             python tools/translate_columns.py
           else
             echo "Skip translate: $IN not found."
@@ -66,7 +57,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
