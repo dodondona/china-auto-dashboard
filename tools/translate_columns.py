@@ -64,6 +64,7 @@ BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 # ====== クリーニング・固定訳 ======
 NOISE_ANY = ["对比","参数","图片","配置","详情"]
 NOISE_PRICE_TAIL = ["询价","计算器","询底价","报价","价格询问","起","起售","到店","经销商"]
+
 def clean_any_noise(s:str)->str:
     s=str(s) if s is not None else ""
     for w in NOISE_ANY+NOISE_PRICE_TAIL:
@@ -260,7 +261,7 @@ def main():
 
     # 原文（CN）読込・ノイズ掃除
     df = pd.read_csv(SRC, encoding="utf-8-sig").map(clean_any_noise)
-    # 列ヘッダのブランド正規化（グレード列の先頭ブランド）
+    # 列ヘッダのブランド正規化
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
     # 前回 CN/JA をリポジトリ内から読込
@@ -273,7 +274,7 @@ def main():
     # 翻訳器
     tr = Translator(MODEL, API_KEY)
 
-    # ------- セクション/項目：差分検出（未変更→旧JA、変更→翻訳） -------
+    # ------- セクション/項目：差分検出 -------
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
     print(f"🔢 uniq_sec={len(uniq_sec)}, uniq_item={len(uniq_item)}")
@@ -312,68 +313,73 @@ def main():
     sec_map.update(FIX_JA_SECTIONS)
     item_map.update(FIX_JA_ITEMS)
 
-    out = df.copy()
-    out.insert(1, "セクション_ja", out["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
-    out.insert(3, "項目_ja",     out["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
+    # out_full：内部処理・キャッシュ用（CN/JA 両方持つフル）
+    out_full = df.copy()
+    out_full.insert(1, "セクション_ja", out_full["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
+    out_full.insert(3, "項目_ja",     out_full["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
 
     # 見出し(項目_ja)の統一
     PAREN_CURR_RE=re.compile(r"（\s*(?:円|元|人民元|CNY|RMB|JPY)[^）]*）")
-    out["項目_ja"]=out["項目_ja"].astype(str).str.replace(PAREN_CURR_RE,"",regex=True).str.strip()
-    out.loc[out["項目_ja"].str.match(r"^メーカー希望小売価格.*$",na=False),"項目_ja"]="メーカー希望小売価格"
-    out.loc[out["項目_ja"].str.contains(r"ディーラー販売価格",na=False),"項目_ja"]="ディーラー販売価格（元）"
+    out_full["項目_ja"]=out_full["項目_ja"].astype(str).str.replace(PAREN_CURR_RE,"",regex=True).str.strip()
+    out_full.loc[out_full["項目_ja"].str.match(r"^メーカー希望小売価格.*$",na=False),"項目_ja"]="メーカー希望小売価格"
+    out_full.loc[out_full["項目_ja"].str.contains(r"ディーラー販売価格",na=False),"項目_ja"]="ディーラー販売価格（元）"
 
     # ------- 列ヘッダ（グレード） -------
     if TRANSLATE_COLNAMES:
-        orig_cols=list(out.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
-        grades_norm=[BRAND_MAP.get(c,c) for c in grades]  # 先頭ブランドの正規化
+        orig_cols=list(out_full.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
+        grades_norm=[BRAND_MAP.get(c,c) for c in grades]
+        def strip_series_prefix_from_grades(grade_cols:list[str])->list[str]:
+            if not grade_cols or not STRIP_GRADE_PREFIX:return grade_cols
+            pattern=SERIES_PREFIX_RE or detect_common_series_prefix(grade_cols)
+            if not pattern:return grade_cols
+            regex=re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*",re.IGNORECASE)
+            return [regex.sub("",str(c)).strip() or c for c in grade_cols]
         grades_stripped=strip_series_prefix_from_grades(grades_norm)
 
         reuse_headers=False
         if enable_reuse:
             reuse_headers = list(prev_cn_df.columns[4:]) == list(df.columns[4:])
         print(f"🧾 headers_reuse={reuse_headers}")
-        if reuse_headers and prev_ja_df is not None and list(prev_ja_df.columns[:4])==list(out.columns[:4]):
-            out.columns = list(prev_ja_df.columns)
+        if reuse_headers and prev_ja_df is not None and list(prev_ja_df.columns[:4])==list(out_full.columns[:4]):
+            out_full.columns = list(prev_ja_df.columns)
         else:
             uniq_grades=uniq([str(c).strip() for c in grades_stripped])
             grade_map=tr.translate_unique(uniq_grades) if uniq_grades else {}
             translated=[grade_map.get(g,g) for g in grades_stripped]
-            out.columns=fixed+translated
+            out_full.columns=fixed+translated
     else:
         if STRIP_GRADE_PREFIX:
-            orig_cols=list(out.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
-            out.columns=fixed+strip_series_prefix_from_grades(grades)
+            orig_cols=list(out_full.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
+            out_full.columns=fixed+strip_series_prefix_from_grades(grades)
 
     # ------- 価格セル 整形（翻訳しない） -------
     MSRP_JA_RE=re.compile(r"^メーカー希望小売価格$")
     DEALER_JA_RE=re.compile(r"^ディーラー販売価格（元）$")
-    is_msrp  = out["項目"].isin(PRICE_ITEM_MSRP_CN)  | out["項目_ja"].str.match(MSRP_JA_RE,na=False)
-    is_dealer= out["項目"].isin(PRICE_ITEM_DEALER_CN)| out["項目_ja"].str.match(DEALER_JA_RE,na=False)
+    is_msrp   = out_full["項目"].isin(PRICE_ITEM_MSRP_CN)  | out_full["項目_ja"].str.match(MSRP_JA_RE,na=False)
+    is_dealer = out_full["項目"].isin(PRICE_ITEM_DEALER_CN)| out_full["項目_ja"].str.match(DEALER_JA_RE,na=False)
+    for col in out_full.columns[4:]:
+        out_full.loc[is_msrp,  col]=out_full.loc[is_msrp,  col].map(lambda s:msrp_to_yuan_and_jpy(s,EXRATE_CNY_TO_JPY))
+        out_full.loc[is_dealer,col]=out_full.loc[is_dealer,col].map(lambda s:dealer_to_yuan_only(s))
 
-    # 値セル前に価格整形（日本円併記 or 元のみに統一）
-    for col in out.columns[4:]:
-        out.loc[is_msrp,  col]=out.loc[is_msrp,  col].map(lambda s:msrp_to_yuan_and_jpy(s,EXRATE_CNY_TO_JPY))
-        out.loc[is_dealer,col]=out.loc[is_dealer,col].map(lambda s:dealer_to_yuan_only(s))
-
-    # ------- 値セル：セル位置ベース差分のみ翻訳（価格行は除外） -------
+    # ------- 値セル：セル位置ベース差分のみ翻訳（価格行除外） -------
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        non_price_mask = ~(is_msrp | is_dealer)   # 行単位のブールSeries
+        non_price_mask = ~(is_msrp | is_dealer)
 
         values_to_translate=[]
         coords_to_update=[]
 
         if enable_reuse and (prev_cn_df is not None) and (prev_ja_df is not None):
             if prev_cn_df.shape == df.shape and list(prev_cn_df.columns)==list(df.columns):
-                diff_mask=(df!=prev_cn_df)  # セル単位
+                diff_mask=(df!=prev_cn_df)
                 for i in range(len(df)):
-                    if not non_price_mask.iloc[i]:  # 価格行は除外
+                    if not non_price_mask.iloc[i]:
                         continue
                     for j in range(4, len(df.columns)):
                         cur=str(df.iat[i,j]).strip()
                         if not diff_mask.iat[i,j]:
-                            # 未変更は旧JAをコピー
-                            out.iat[i,j]=prev_ja_df.iat[i,j]
+                            # 未変更は前回JAをコピー
+                            out_full.iat[i,j]=prev_ja_df.iat[i,j]
                             continue
                         if cur in {"","●","○","–","-","—"}: continue
                         if numeric_like.fullmatch(cur): continue
@@ -382,7 +388,7 @@ def main():
             else:
                 print("⚠️ shape/headers mismatch: full translate for non-price rows")
                 for i in range(len(df)):
-                    if not non_price_mask.iloc[i]:  # 価格行は除外
+                    if not non_price_mask.iloc[i]:
                         continue
                     for j in range(4,len(df.columns)):
                         v=str(df.iat[i,j]).strip()
@@ -391,7 +397,6 @@ def main():
                         values_to_translate.append(v)
                         coords_to_update.append((i,j))
         else:
-            # 初回：非価格行の全セルを対象
             for i in range(len(df)):
                 if not non_price_mask.iloc[i]:
                     continue
@@ -407,32 +412,28 @@ def main():
         print(f"🌐 to_translate: values={len(uniq_vals)}")
         val_map=tr.translate_unique(uniq_vals) if uniq_vals else {}
 
-        # 置換（非価格セルのみ）
         for (i, j) in coords_to_update:
             s=str(df.iat[i,j]).strip()
             if not s: continue
-            out.iat[i,j]=val_map.get(s,s)
+            out_full.iat[i,j]=val_map.get(s,s)
 
-        # ------- 出力 -------
-    # 出力CSVでは「セクション」「項目」を必ず除外（列順変動・大文字小文字等にも強い形でガード）
-    cols_no_cn = [c for c in out.columns if str(c) not in ("セクション", "項目")]
-    out_save = out.loc[:, cols_no_cn]
+    # ======= 出力 =======
+    # 出力CSVには「セクション_ja」「項目_ja」とグレード列“のみ”を明示指定で出す（CN列は最初から作らない扱い）
+    grade_cols = list(out_full.columns[4:])
+    out_save = out_full.loc[:, ["セクション_ja", "項目_ja"] + grade_cols]
 
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
-
-    # 2系統とも CN 列なしの out_save を保存（上書き安全）
-    out_save.to_csv(DST_PRIMARY, index=False, encoding="utf-8-sig")
+    out_save.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
     out_save.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
 
-    # リポジトリのキャッシュは “フル列” のまま残す（次回の差分検出・再利用用）
+    # キャッシュはフル列（CN/JA両方）で保存して次回差分用に使う
     cn_snap_path.parent.mkdir(parents=True, exist_ok=True)
     pd.read_csv(SRC, encoding="utf-8-sig").to_csv(cn_snap_path, index=False, encoding="utf-8-sig")
-    out.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
+    out_full.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
 
-    print(f"✅ Saved (CN cols dropped): {DST_PRIMARY}")
+    print(f"✅ Saved (CN cols not created in output): {DST_PRIMARY}")
     print(f"📦 Repo cache CN: {cn_snap_path}")
     print(f"📦 Repo cache JA: {ja_prev_path}")
-
 
 if __name__ == "__main__":
     main()
