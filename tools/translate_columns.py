@@ -417,15 +417,51 @@ def main():
             if not s: continue
             out_full.iat[i,j]=val_map.get(s,s)
 
-        # ------- 出力 -------
-    # 位置ベースで確実に: [0]=セクション, [1]=セクション_ja, [2]=項目, [3]=項目_ja, [4:]=グレード列
-    # ⇒ 出力は [1], [3], [4:] のみ（CN列はそもそも選ばない）
-    ja_core = out_full.iloc[:, [1, 3]]
-    grades  = out_full.iloc[:, 4:]
-    final_out = pd.concat([ja_core, grades], axis=1)
+    # ------- 出力 -------
+    # 列名の不可視文字を除去して正規化（\u200b, \ufeff, NBSP, 全角/半角スペース等）
+    def _norm(s: str) -> str:
+        s = str(s)
+        # ゼロ幅/FEFF/NBSP/全角/半角スペースを全削除
+        s = re.sub(r"[\u200b\ufeff\u00A0\u3000 \t]+", "", s)
+        return s
 
-    # 念のための最終ガード（あっても無視されるが保険）
+    cols = list(out_full.columns)
+    cols_norm = [_norm(c) for c in cols]
+
+    # JA列の実インデックスを正規化名で特定（列順が動いてもOK）
+    try:
+        idx_sec_ja  = cols_norm.index("セクション_ja")
+        idx_item_ja = cols_norm.index("項目_ja")
+    except ValueError:
+        # 念のためのフォールバック（トリミングのみ）
+        idx_sec_ja  = next(i for i,c in enumerate(cols) if str(c).strip()=="セクション_ja")
+        idx_item_ja = next(i for i,c in enumerate(cols) if str(c).strip()=="項目_ja")
+
+    # 出力対象は：JA2列 + 「CN列ではない」残り（= グレード列）
+    CN_KEYS_NORM = {"セクション", "項目"}
+    take_grade_idxs = []
+    for i, n in enumerate(cols_norm):
+        if i in (idx_sec_ja, idx_item_ja):
+            continue
+        if n in CN_KEYS_NORM:                  # 正規化後にCN名と一致するものは除外
+            continue
+        take_grade_idxs.append(i)
+
+    final_out = pd.concat(
+        [out_full.iloc[:, [idx_sec_ja, idx_item_ja]],
+         out_full.iloc[:, take_grade_idxs]],
+        axis=1
+    )
+
+    # 最終保険：同名列が紛れ込んでいたら落とす
     final_out = final_out.drop(columns=["セクション", "項目"], errors="ignore")
+
+    # 失敗に気づけるよう、保存直前にアサート&ログ
+    bad = [c for c in final_out.columns if _norm(c) in CN_KEYS_NORM]
+    if bad:
+        print("❌ CN-like columns still present (normalized):", [str(c) for c in bad])
+        print("ALL OUTPUT COLS (raw):", [str(c) for c in final_out.columns])
+        raise RuntimeError("CN columns still present in output")
 
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
     final_out.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
@@ -439,6 +475,7 @@ def main():
     print(f"✅ Saved (output has NO CN columns): {DST_PRIMARY}")
     print(f"📦 Repo cache CN: {cn_snap_path}")
     print(f"📦 Repo cache JA: {ja_prev_path}")
+
 
 if __name__ == "__main__":
     main()
