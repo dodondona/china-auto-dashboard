@@ -2,7 +2,6 @@ from __future__ import annotations
 import os, json, time, re
 from pathlib import Path
 import pandas as pd
-from openai import OpenAI
 
 # ====== 入出力 ======
 SERIES_ID = os.environ.get("SERIES_ID", "").strip()
@@ -48,16 +47,13 @@ DST_SECONDARY = make_secondary(DST_PRIMARY)
 
 # ====== 設定 ======
 MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-API_KEY = os.environ.get("OPENAI_API_KEY")
+API_KEY = os.environ.get("OPENAI_API_KEY")  # 未知語が無い場合は未設定でもOK
 
 TRANSLATE_VALUES   = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
 TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
 STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
 SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
 EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
-
-# リポジトリに保存するスナップショット（編集可）
-CACHE_REPO_DIR     = os.environ.get("CACHE_REPO_DIR", "cache").strip()
 
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 
@@ -90,21 +86,300 @@ BRAND_MAP={
     "奔驰":"メルセデス・ベンツ","梅赛德斯-奔驰":"メルセデス・ベンツ",
 }
 
-FIX_JA_ITEMS={
-    "厂商指导价":"メーカー希望小売価格",
-    "经销商参考价":"ディーラー販売価格（元）",
-    "经销商报价":"ディーラー販売価格（元）",
-    "经销商":"ディーラー販売価格（元）",
-    "被动安全":"衝突安全",
+# ====== 固定辞書（技術文書的な日本語・CSVサンプルに基づく） ======
+FIX_JA_SECTIONS = {
+    "基本参数": "基本仕様",
+    "车身": "ボディ",
+    "发动机": "エンジン",
+    "变速箱": "トランスミッション",
+    "底盘转向": "シャシー／ステアリング",
+    "车轮制动": "ホイール／ブレーキ",
+    "被动安全": "受動安全装置",
+    "主动安全": "能動安全装置",
+    "驾驶操控": "ドライビング／操縦",
+    "驾驶硬件": "運転支援ハードウェア",
+    "驾驶功能": "運転支援機能",
+    "外观/防盗": "外装／防盗",
+    "车外灯光": "車外照明",
+    "天窗/玻璃": "サンルーフ／ウインドウ",
+    "外后视镜": "ドアミラー",
+    "屏幕/系统": "ディスプレイ／車載システム",
+    "智能化配置": "コネクテッド／電子装備",
+    "方向盘/内后视镜": "ステアリング／ルームミラー",
+    "车内充电": "車内充電",
+    "座椅配置": "シート",
+    "音响/车内灯光": "オーディオ／室内照明",
+    "空调/冰箱": "空調／冷蔵",
+    "颜色": "カラー",
+    "选装包": "オプションパッケージ",
 }
-FIX_JA_SECTIONS={"被动安全":"衝突安全"}
 
-PRICE_ITEM_MSRP_CN={"厂商指导价"}
-PRICE_ITEM_MSRP_JA={"メーカー希望小売価格"}
-PRICE_ITEM_DEALER_CN={"经销商参考价","经销商报价","经销商"}
-PRICE_ITEM_DEALER_JA={"ディーラー販売価格（元）"}
+FIX_JA_ITEMS = {
+    # 価格・販売
+    "厂商指导价": "メーカー希望小売価格",
+    "厂商指导价(元)": "メーカー希望小売価格",
+    "经销商报价": "ディーラー販売価格（元）",
+    "经销商参考价": "ディーラー販売価格（元）",
+    "经销商": "ディーラー販売価格（元）",
 
-# ====== 金額整形 ======
+    # 基本仕様
+    "厂商": "メーカー",
+    "级别": "車格",
+    "能源类型": "燃料種別",
+    "环保标准": "排出ガス基準",
+    "上市时间": "発売時期",
+    "整车质保": "車両保証",
+    "整备质量(kg)": "車両重量（kg）",
+    "最大满载质量(kg)": "最大総重量（kg）",
+
+    # 寸法
+    "长*宽*高(mm)": "全長×全幅×全高（mm）",
+    "长度(mm)": "全長（mm）",
+    "宽度(mm)": "全幅（mm）",
+    "高度(mm)": "全高（mm）",
+    "轴距(mm)": "ホイールベース（mm）",
+    "前轮距(mm)": "フロントトレッド（mm）",
+    "后轮距(mm)": "リアトレッド（mm）",
+    "接近角(°)": "アプローチアングル（°）",
+    "离去角(°)": "デパーチャーアングル（°）",
+    "车身结构": "ボディ構造",
+    "车门开启方式": "ドア開閉方式",
+    "车门数(个)": "ドア数（枚）",
+    "座位数(个)": "乗車定員（名）",
+    "油箱容积(L)": "燃料タンク容量（L）",
+    "后备厢容积(L)": "ラゲッジ容量（L）",
+    "风阻系数(Cd)": "空気抵抗係数（Cd）",
+
+    # エンジン
+    "发动机": "エンジン",
+    "发动机型号": "エンジン型式",
+    "排量(mL)": "総排気量（mL）",
+    "排量(L)": "総排気量（L）",
+    "进气形式": "過給方式",
+    "发动机布局": "エンジン配置",
+    "气缸排列形式": "シリンダー配列",
+    "气缸数(个)": "シリンダー数（個）",
+    "每缸气门数(个)": "1気筒当たりバルブ数（個）",
+    "配气机构": "バルブ機構",
+    "最大马力(Ps)": "最高出力（Ps）",
+    "最大功率(kW)": "最大出力（kW）",
+    "最大功率转速(rpm)": "最大出力回転数（rpm）",
+    "最大扭矩(N·m)": "最大トルク（N·m）",
+    "最大扭矩转速(rpm)": "最大トルク回転数（rpm）",
+    "最大净功率(kW)": "最大正味出力（kW）",
+    "燃油标号": "推奨燃料オクタン価",
+    "供油方式": "燃料供給方式",
+    "缸盖材料": "シリンダーヘッド材質",
+    "缸体材料": "シリンダーブロック材質",
+
+    # 走行性能・燃費
+    "官方0-100km/h加速(s)": "0-100km/h加速（公式）（s）",
+    "最高车速(km/h)": "最高速度（km/h）",
+    "WLTC综合油耗(L/100km)": "WLTC総合燃費（L/100km）",
+
+    # 変速機
+    "简称": "略称",
+    "挡位个数": "段数",
+    "变速箱": "トランスミッション",
+    "变速箱类型": "トランスミッション形式",
+
+    # 駆動／シャシー
+    "驱动方式": "駆動方式",
+    "四驱形式": "四輪駆動方式",
+    "中央差速器结构": "センターデフ構造",
+    "前悬架类型": "フロントサスペンション形式",
+    "后悬架类型": "リアサスペンション形式",
+    "助力类型": "ステアリングアシスト方式",
+    "车体结构": "フレーム構造",
+
+    # ブレーキ・タイヤ
+    "前制动器类型": "フロントブレーキ形式",
+    "后制动器类型": "リアブレーキ形式",
+    "驻车制动类型": "パーキングブレーキ形式",
+    "前轮胎规格": "フロントタイヤサイズ",
+    "后轮胎规格": "リアタイヤサイズ",
+    "备胎规格": "スペアタイヤ仕様",
+
+    # 受動安全
+    "主/副驾驶座安全气囊": "運転席／助手席エアバッグ",
+    "前/后排侧气囊": "前席／後席サイドエアバッグ",
+    "前/后排头部气囊(气帘)": "前後席カーテンエアバッグ",
+    "膝部气囊": "ニーエアバッグ",
+    "前排中间气囊": "前席センターエアバッグ",
+    "被动行人保护": "歩行者保護（受動）",
+
+    # 能動安全
+    "ABS防抱死": "ABS（アンチロックブレーキ）",
+    "制动力分配(EBD/CBC等)": "制動力配分（EBD/CBC等）",
+    "刹车辅助(EBA/BAS/BA等)": "ブレーキアシスト（EBA/BAS/BA等）",
+    "牵引力控制(ASR/TCS/TRC等)": "トラクションコントロール（ASR/TCS/TRC等）",
+    "车身稳定控制(ESC/ESP/DSC等)": "車両安定制御（ESC/ESP/DSC等）",
+    "胎压监测功能": "タイヤ空気圧監視",
+    "安全带未系提醒": "シートベルト非装着警報",
+    "ISOFIX儿童座椅接口": "ISOFIXチャイルドシート固定具",
+
+    # 運転支援ハード
+    "前/后驻车雷达": "前後パーキングセンサー",
+    "驾驶辅助影像": "周囲監視カメラ",
+    "前方感知摄像头": "前方検知カメラ",
+    "摄像头数量": "カメラ数",
+    "车内摄像头数量": "車内カメラ数",
+    "超声波雷达数量": "超音波センサー数",
+
+    # 運転支援機能
+    "巡航系统": "クルーズ制御",
+    "辅助驾驶等级": "運転支援レベル",
+    "卫星导航系统": "ナビゲーションシステム",
+    "导航路况信息显示": "交通情報表示",
+    "地图品牌": "地図ブランド",
+    "AR实景导航": "AR実写ナビ",
+    "并线辅助": "車線変更支援",
+    "车道保持辅助系统": "車線維持支援",
+    "车道偏离预警系统": "車線逸脱警報",
+    "车道居中保持": "車線中央維持",
+    "道路交通标识识别": "交通標識認識",
+    "主动刹车/主动安全系统": "自動緊急ブレーキ（AEB）",
+    "疲劳驾驶提示": "ドライバー疲労警報",
+    "前方碰撞预警": "前方衝突警報",
+    "内置行车记录仪": "ドライブレコーダー内蔵",
+    "道路救援呼叫": "ロードアシストコール",
+    "自动泊车入位": "自動駐車支援",
+    "辅助变道": "自動車線変更支援",
+    "辅助匝道自动驶出(入)": "インターチェンジ出入支援",
+    "辅助驾驶路段": "支援対応路種",
+    "驾驶模式切换": "ドライビングモード切替",
+    "发动机启停技术": "アイドリングストップ",
+    "自动驻车": "オートホールド",
+    "上坡辅助": "ヒルスタートアシスト",
+    "可变悬架功能": "可変サスペンション機能",
+    "可变转向比": "可変ステアリング比",
+
+    # 外装／防盗
+    "外观套件": "エクステリアパッケージ",
+    "运动风格": "スポーツスタイル",
+    "轮圈材质": "ホイール材質",
+    "电动后备厢": "電動テールゲート",
+    "感应后备厢": "ハンズフリーテールゲート",
+    "电动后备厢位置记忆": "テールゲート開度記憶",
+    "发动机电子防盗": "エンジンイモビライザー",
+    "车内中控锁": "集中ドアロック",
+    "钥匙类型": "キータイプ",
+    "无钥匙启动系统": "キーレス始動システム",
+    "无钥匙进入功能": "キーレスエントリー",
+    "隐藏电动门把手": "格納式ドアハンドル",
+    "远程启动功能": "リモートスタート",
+
+    # 車外照明
+    "近光灯光源": "ロービーム光源",
+    "远光灯光源": "ハイビーム光源",
+    "灯光特色功能": "ライト特別機能",
+    "LED日间行车灯": "LEDデイタイムランニングライト",
+    "自适应远近光": "アダプティブハイビーム",
+    "自动头灯": "オートライト",
+    "转向头灯": "コーナリングライト",
+    "车前雾灯": "フロントフォグランプ",
+    "大灯高度可调": "ヘッドライトレベライザー",
+    "大灯延时关闭": "ライトオフディレイ",
+
+    # サンルーフ／ウインドウ
+    "天窗类型": "サンルーフ形式",
+    "前/后电动车窗": "前後パワーウインドウ",
+    "车窗一键升降功能": "ワンタッチウインドウ",
+    "车窗防夹手功能": "挟み込み防止機構",
+    "侧窗多层隔音玻璃": "多層遮音ガラス（サイド）",
+    "后风挡遮阳帘": "リアウインドウサンシェード",
+    "后排侧窗遮阳帘": "後席サイドサンシェード",
+    "车内化妆镜": "バニティミラー",
+    "后雨刷": "リアワイパー",
+    "感应雨刷功能": "レインセンサー",
+
+    # ドアミラー
+    "外后视镜功能": "ドアミラー機能",
+
+    # ディスプレイ／システム
+    "中控彩色屏幕": "センターディスプレイ",
+    "中控屏幕尺寸": "センターディスプレイサイズ",
+    "副驾娱乐屏尺寸": "助手席ディスプレイサイズ",
+    "蓝牙/车载电话": "Bluetooth／車載電話",
+    "手机互联/映射": "スマートフォン連携／ミラーリング",
+    "语音识别控制系统": "音声認識コントロール",
+    "语音助手唤醒词": "音声アシスタント起動語",
+    "语音免唤醒词": "ウェイクワードレス音声操作",
+    "语音分区域唤醒识别": "エリア別音声起動認識",
+    "语音连续识别": "連続音声認識",
+    "可见即可说": "視覚連動音声操作",
+    "手势控制": "ジェスチャーコントロール",
+    "应用商店": "アプリストア",
+    "车载智能系统": "車載OS／インフォテインメント",
+    "车机智能芯片": "車載SoC",
+
+    # コネクテッド
+    "车联网": "車載通信（コネクテッド）",
+    "4G/5G网络": "4G/5G通信",
+    "OTA升级": "OTAアップデート",
+    "V2X通讯": "V2X通信",
+    "手机APP远程功能": "スマホアプリ遠隔機能",
+
+    # ステアリング／ミラー（内装）
+    "方向盘材质": "ステアリング材質",
+    "方向盘位置调节": "ステアリング位置調整",
+    "换挡形式": "シフト形式",
+    "多功能方向盘": "マルチファンクションステアリング",
+    "方向盘换挡拨片": "パドルシフト",
+    "方向盘加热": "ステアリングヒーター",
+    "方向盘记忆": "ステアリングメモリー",
+    "行车电脑显示屏幕": "ドライブコンピュータ表示",
+    "全液晶仪表盘": "フル液晶メーターパネル",
+    "液晶仪表尺寸": "メーター液晶サイズ",
+    "HUD抬头数字显示": "ヘッドアップディスプレイ（HUD）",
+    "内后视镜功能": "ルームミラー機能",
+    "ETC装置": "ETC装置",
+
+    # 充電・インターフェース
+    "多媒体/充电接口": "マルチメディア／充電インターフェース",
+    "USB/Type-C接口数量": "USB/Type-Cポート数",
+    "手机无线充电功能": "スマートフォンワイヤレス充電",
+
+    # シート
+    "座椅材质": "シート材質",
+    "主座椅调节方式": "運転席調整方式",
+    "副座椅调节方式": "助手席調整方式",
+    "主/副驾驶座电动调节": "運転席／助手席電動調整",
+    "前排座椅功能": "前席シート機能",
+    "电动座椅记忆功能": "電動シートメモリー",
+    "副驾驶位后排可调节按钮": "助手席後席調整ボタン",
+    "第二排座椅调节": "後席調整機能",
+    "第二排座椅电动调节": "後席電動調整",
+    "第二排座椅功能": "後席シート機能",
+    "后排座椅放倒形式": "後席可倒方式",
+    "前/后中央扶手": "前後センターアームレスト",
+    "后排杯架": "後席カップホルダー",
+
+    # オーディオ／室内照明
+    "扬声器品牌名称": "スピーカーブランド",
+    "扬声器数量": "スピーカー数",
+    "杜比全景声(Dolby Atmos)": "Dolby Atmos",
+    "车内环境氛围灯": "アンビエントライト",
+    "主动式环境氛围灯": "アクティブアンビエントライト",
+
+    # 空調／冷蔵
+    "空调温度控制方式": "空調温度制御方式",
+    "后排独立空调": "後席独立空調",
+    "后座出风口": "後席エアアウトレット",
+    "温度分区控制": "温度独立調整（ゾーン）",
+    "车载空气净化器": "車載空気清浄機",
+    "车内PM2.5过滤装置": "車内PM2.5フィルター",
+    "空气质量监测": "空気質モニタリング",
+
+    # カラー／オプション
+    "外观颜色": "外装色",
+    "内饰颜色": "内装色",
+    "智享套装2": "スマートコンフォートパッケージ2",
+    "智能领航辅助Max": "インテリジェントナビゲーションアシストMax",
+    "智乐套装": "スマートエンターテインメントパッケージ",
+}
+
+# ====== 金額整形（必要なら利用可：本スクリプトでは辞書優先でLLM前提の変更は無し） ======
 RE_WAN=re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN=re.compile(r"(?P<num>[\d,]+)\s*元")
 
@@ -159,9 +434,10 @@ def parse_json_relaxed(content:str,terms:list[str])->dict[str,str]:
         return {cn.strip():ja.strip() for cn,ja in pairs}
     return {t:t for t in terms}
 
-# ====== LLM ======
+# ====== LLM（未知語がある時のみ使用） ======
 class Translator:
     def __init__(self, model: str, api_key: str):
+        from openai import OpenAI  # 未使用時はimportしない
         if not (api_key and api_key.strip()):
             raise RuntimeError("OPENAI_API_KEY is not set")
         self.client = OpenAI(api_key=api_key)
@@ -169,7 +445,7 @@ class Translator:
         self.system = (
             "あなたは自動車仕様表の専門翻訳者です。"
             "入力は中国語の『セクション名/項目名/モデル名/セル値』の配列です。"
-            "自然で簡潔な日本語へ翻訳してください。数値・年式・排量・AT/MT等の記号は保持。"
+            "技術文書的な日本語に翻訳してください。単位・記号は保持。"
             "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
         )
         print(f"🟢 Translator ready: model={self.model}")
@@ -206,52 +482,9 @@ class Translator:
                     time.sleep(SLEEP_BASE*attempt)
         return out
 
-# ====== 列名用：先頭車名のカット ======
-YEAR_TOKEN_RE=re.compile(r"(?:20\d{2}|19\d{2})|(?:\d{2}款|[上中下]市|改款|年款)")
-LEADING_TOKEN_RE=re.compile(r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9\- ]{1,40}")
-def cut_before_year_or_kuan(s:str)->str|None:
-    s=s.strip()
-    m=YEAR_TOKEN_RE.search(s)
-    if m:return s[:m.start()].strip()
-    kuan=re.search(r"款",s)
-    if kuan:return s[:kuan.start()].strip()
-    m2=LEADING_TOKEN_RE.match(s)
-    return m2.group(0).strip() if m2 else None
-
-def detect_common_series_prefix(cols:list[str])->str|None:
-    cand=[]
-    for c in cols:
-        p=cut_before_year_or_kuan(str(c))
-        if p and len(p)>=2:cand.append(p)
-    if not cand:return None
-    from collections import Counter
-    top,ct=Counter(cand).most_common(1)[0]
-    return re.escape(top) if ct>=max(1,int(0.6*len(cols))) else None
-
-def strip_series_prefix_from_grades(grade_cols:list[str])->list[str]:
-    if not grade_cols or not STRIP_GRADE_PREFIX:return grade_cols
-    pattern=SERIES_PREFIX_RE or detect_common_series_prefix(grade_cols)
-    if not pattern:return grade_cols
-    regex=re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*",re.IGNORECASE)
-    return [regex.sub("",str(c)).strip() or c for c in grade_cols]
-
-# ====== リポジトリ内キャッシュ（編集可） ======
-def repo_cache_paths(series_id: str) -> tuple[Path, Path]:
-    base = Path(CACHE_REPO_DIR) / str(series_id or "unknown")
-    return (base / "cn.csv", base / "ja.csv")
-
-def same_shape_and_headers(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
-    return (df1.shape == df2.shape) and (list(df1.columns) == list(df2.columns))
-
-def norm_cn_cell(s: str) -> str:
-    return clean_any_noise(str(s)).strip()
-
 # ====== main ======
 def main():
     print(f"CSV_IN check: {SRC}")
-    print(f"Pre-run cache listing:")
-    os.system(f"ls -l {CACHE_REPO_DIR}/{SERIES_ID} || echo '(no cache dir)'")
-
     print(f"🔎 SRC: {SRC}")
     print(f"📝 DST(primary): {DST_PRIMARY}")
     print(f"📝 DST(secondary): {DST_SECONDARY}")
@@ -264,187 +497,73 @@ def main():
     # 列ヘッダのブランド正規化
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
-    # 前回 CN/JA をリポジトリ内から読込
-    cn_snap_path, ja_prev_path = repo_cache_paths(SERIES_ID)
-    prev_cn_df = pd.read_csv(cn_snap_path, encoding="utf-8-sig").map(clean_any_noise) if cn_snap_path.exists() else None
-    prev_ja_df = pd.read_csv(ja_prev_path, encoding="utf-8-sig") if ja_prev_path.exists() else None
-    enable_reuse = (prev_cn_df is not None) and (prev_ja_df is not None) and same_shape_and_headers(df, prev_cn_df)
-    print(f"♻️ reuse={enable_reuse}")
-
-    # 翻訳器
-    tr = Translator(MODEL, API_KEY)
-
-    # ------- セクション/項目：差分検出 -------
+    # ------- セクション／項目（辞書優先でキュー除外） -------
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
     print(f"🔢 uniq_sec={len(uniq_sec)}, uniq_item={len(uniq_item)}")
 
-    sec_changed, item_changed = set(), set()
-    if enable_reuse:
-        for cur, old in zip(df["セクション"].astype(str), prev_cn_df["セクション"].astype(str)):
-            if norm_cn_cell(cur) != norm_cn_cell(old):
-                sec_changed.add(str(cur).strip())
-        for cur, old in zip(df["項目"].astype(str), prev_cn_df["項目"].astype(str)):
-            if norm_cn_cell(cur) != norm_cn_cell(old):
-                item_changed.add(str(cur).strip())
-    print(f"🧮 changed: sections={len(sec_changed)} items={len(item_changed)} (reuse={enable_reuse})")
+    known_sec  = set(FIX_JA_SECTIONS.keys())
+    known_item = set(FIX_JA_ITEMS.keys())
 
-    sec_to_translate  = [x for x in uniq_sec  if (not enable_reuse) or (x in sec_changed)]
-    item_to_translate = [x for x in uniq_item if (not enable_reuse) or (x in item_changed)]
+    # 既知は最初から確定。未知のみ翻訳候補へ（通常は0件を想定）
+    sec_to_translate  = [x for x in uniq_sec  if x not in known_sec]
+    item_to_translate = [x for x in uniq_item if x not in known_item]
     print(f"🌐 to_translate: sec={len(sec_to_translate)} item={len(item_to_translate)}")
 
-    # 未変更は前回JAからコピー、変更のみAPI
-    sec_map_old, item_map_old = {}, {}
-    if enable_reuse:
-        if "セクション_ja" in prev_ja_df.columns:
-            for cur, old_cn, old_ja in zip(df["セクション"].astype(str), prev_cn_df["セクション"].astype(str), prev_ja_df["セクション_ja"].astype(str)):
-                if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                    sec_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
-        if "項目_ja" in prev_ja_df.columns:
-            for cur, old_cn, old_ja in zip(df["項目"].astype(str), prev_cn_df["項目"].astype(str), prev_ja_df["項目_ja"].astype(str)):
-                if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                    item_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
+    # 未知語がある場合だけ翻訳器を初期化
+    if sec_to_translate or item_to_translate:
+        tr = Translator(MODEL, API_KEY)
+        sec_map_new  = tr.translate_unique(sec_to_translate)  if sec_to_translate  else {}
+        item_map_new = tr.translate_unique(item_to_translate) if item_to_translate else {}
+    else:
+        sec_map_new, item_map_new = {}, {}
 
-    sec_map_new  = tr.translate_unique(sec_to_translate) if sec_to_translate else {}
-    item_map_new = tr.translate_unique(item_to_translate) if item_to_translate else {}
+    # 最終マップ（辞書を優先、未知語分のみ追加）
+    sec_map  = {**FIX_JA_SECTIONS, **sec_map_new}
+    item_map = {**FIX_JA_ITEMS,    **item_map_new}
 
-    sec_map  = {**sec_map_old, **sec_map_new}
-    item_map = {**item_map_old, **item_map_new}
-    sec_map.update(FIX_JA_SECTIONS)
-    item_map.update(FIX_JA_ITEMS)
-
-    # out_full：内部処理・キャッシュ用（CN/JA 両方持つフル）
     out_full = df.copy()
     out_full.insert(1, "セクション_ja", out_full["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
     out_full.insert(3, "項目_ja",     out_full["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
 
-    # 見出し(項目_ja)の統一
-    PAREN_CURR_RE=re.compile(r"（\s*(?:円|元|人民元|CNY|RMB|JPY)[^）]*）")
-    out_full["項目_ja"]=out_full["項目_ja"].astype(str).str.replace(PAREN_CURR_RE,"",regex=True).str.strip()
-    out_full.loc[out_full["項目_ja"].str.match(r"^メーカー希望小売価格.*$",na=False),"項目_ja"]="メーカー希望小売価格"
-    out_full.loc[out_full["項目_ja"].str.contains(r"ディーラー販売価格",na=False),"項目_ja"]="ディーラー販売価格（元）"
-
-    # ------- 列ヘッダ（グレード） -------
+    # 列ヘッダ（グレード列）の前処理（ブランド記号やシリーズ接頭辞の除去のみ。翻訳はそのまま）
     if TRANSLATE_COLNAMES:
         orig_cols=list(out_full.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
         grades_norm=[BRAND_MAP.get(c,c) for c in grades]
+        def detect_common_series_prefix(cols:list[str])->str|None:
+            if not cols: return None
+            s=os.path.commonprefix([str(c) for c in cols]).strip()
+            return s if s and len(s)>=2 else None
         def strip_series_prefix_from_grades(grade_cols:list[str])->list[str]:
             if not grade_cols or not STRIP_GRADE_PREFIX:return grade_cols
             pattern=SERIES_PREFIX_RE or detect_common_series_prefix(grade_cols)
             if not pattern:return grade_cols
-            regex=re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*",re.IGNORECASE)
+            regex=re.compile(rf"^\s*(?:{re.escape(pattern)})\s*[-:：/ ]*\s*",re.IGNORECASE)
             return [regex.sub("",str(c)).strip() or c for c in grade_cols]
         grades_stripped=strip_series_prefix_from_grades(grades_norm)
+        out_full.columns=fixed+grades_stripped
 
-        reuse_headers=False
-        if enable_reuse:
-            reuse_headers = list(prev_cn_df.columns[4:]) == list(df.columns[4:])
-        print(f"🧾 headers_reuse={reuse_headers}")
-        if reuse_headers and prev_ja_df is not None and list(prev_ja_df.columns[:4])==list(out_full.columns[:4]):
-            out_full.columns = list(prev_ja_df.columns)
-        else:
-            uniq_grades=uniq([str(c).strip() for c in grades_stripped])
-            grade_map=tr.translate_unique(uniq_grades) if uniq_grades else {}
-            translated=[grade_map.get(g,g) for g in grades_stripped]
-            out_full.columns=fixed+translated
-    else:
-        if STRIP_GRADE_PREFIX:
-            orig_cols=list(out_full.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
-            out_full.columns=fixed+strip_series_prefix_from_grades(grades)
-
-    # ------- 価格セル 整形（翻訳しない） -------
-    MSRP_JA_RE=re.compile(r"^メーカー希望小売価格$")
-    DEALER_JA_RE=re.compile(r"^ディーラー販売価格（元）$")
-    is_msrp   = out_full["項目"].isin(PRICE_ITEM_MSRP_CN)  | out_full["項目_ja"].str.match(MSRP_JA_RE,na=False)
-    is_dealer = out_full["項目"].isin(PRICE_ITEM_DEALER_CN)| out_full["項目_ja"].str.match(DEALER_JA_RE,na=False)
-    for col in out_full.columns[4:]:
-        out_full.loc[is_msrp,  col]=out_full.loc[is_msrp,  col].map(lambda s:msrp_to_yuan_and_jpy(s,EXRATE_CNY_TO_JPY))
-        out_full.loc[is_dealer,col]=out_full.loc[is_dealer,col].map(lambda s:dealer_to_yuan_only(s))
-
-    # ------- 値セル：セル位置ベース差分のみ翻訳（価格行除外） -------
-    if TRANSLATE_VALUES:
-        numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        non_price_mask = ~(is_msrp | is_dealer)
-
-        values_to_translate=[]
-        coords_to_update=[]
-
-        if enable_reuse and (prev_cn_df is not None) and (prev_ja_df is not None):
-            if prev_cn_df.shape == df.shape and list(prev_cn_df.columns)==list(df.columns):
-                diff_mask=(df!=prev_cn_df)
-                for i in range(len(df)):
-                    if not non_price_mask.iloc[i]:
-                        continue
-                    for j in range(4, len(df.columns)):
-                        cur=str(df.iat[i,j]).strip()
-                        if not diff_mask.iat[i,j]:
-                            # 未変更は前回JAをコピー
-                            out_full.iat[i,j]=prev_ja_df.iat[i,j]
-                            continue
-                        if cur in {"","●","○","–","-","—"}: continue
-                        if numeric_like.fullmatch(cur): continue
-                        values_to_translate.append(cur)
-                        coords_to_update.append((i,j))
-            else:
-                print("⚠️ shape/headers mismatch: full translate for non-price rows")
-                for i in range(len(df)):
-                    if not non_price_mask.iloc[i]:
-                        continue
-                    for j in range(4,len(df.columns)):
-                        v=str(df.iat[i,j]).strip()
-                        if v in {"","●","○","–","-","—"}: continue
-                        if numeric_like.fullmatch(v): continue
-                        values_to_translate.append(v)
-                        coords_to_update.append((i,j))
-        else:
-            for i in range(len(df)):
-                if not non_price_mask.iloc[i]:
-                    continue
-                for j in range(4,len(df.columns)):
-                    v=str(df.iat[i,j]).strip()
-                    if v in {"","●","○","–","-","—"}: continue
-                    if numeric_like.fullmatch(v): continue
-                    values_to_translate.append(v)
-                    coords_to_update.append((i,j))
-
-        print(f"🗂️  values candidates before-uniq = {len(values_to_translate)}")
-        uniq_vals=uniq(values_to_translate)
-        print(f"🌐 to_translate: values={len(uniq_vals)}")
-        val_map=tr.translate_unique(uniq_vals) if uniq_vals else {}
-
-        for (i, j) in coords_to_update:
-            s=str(df.iat[i,j]).strip()
-            if not s: continue
-            out_full.iat[i,j]=val_map.get(s,s)
-
-    # ------- 出力 -------
-    # 列名の不可視文字を除去して正規化（\u200b, \ufeff, NBSP, 全角/半角スペース等）
+    # 出力（CN列は残さない）
     def _norm(s: str) -> str:
         s = str(s)
-        # ゼロ幅/FEFF/NBSP/全角/半角スペースを全削除
         s = re.sub(r"[\u200b\ufeff\u00A0\u3000 \t]+", "", s)
         return s
 
     cols = list(out_full.columns)
     cols_norm = [_norm(c) for c in cols]
 
-    # JA列の実インデックスを正規化名で特定（列順が動いてもOK）
     try:
         idx_sec_ja  = cols_norm.index("セクション_ja")
         idx_item_ja = cols_norm.index("項目_ja")
     except ValueError:
-        # 念のためのフォールバック（トリミングのみ）
         idx_sec_ja  = next(i for i,c in enumerate(cols) if str(c).strip()=="セクション_ja")
         idx_item_ja = next(i for i,c in enumerate(cols) if str(c).strip()=="項目_ja")
 
-    # 出力対象は：JA2列 + 「CN列ではない」残り（= グレード列）
     CN_KEYS_NORM = {"セクション", "項目"}
     take_grade_idxs = []
     for i, n in enumerate(cols_norm):
-        if i in (idx_sec_ja, idx_item_ja):
-            continue
-        if n in CN_KEYS_NORM:                  # 正規化後にCN名と一致するものは除外
-            continue
+        if i in (idx_sec_ja, idx_item_ja): continue
+        if n in CN_KEYS_NORM:              continue
         take_grade_idxs.append(i)
 
     final_out = pd.concat(
@@ -453,29 +572,13 @@ def main():
         axis=1
     )
 
-    # 最終保険：同名列が紛れ込んでいたら落とす
     final_out = final_out.drop(columns=["セクション", "項目"], errors="ignore")
 
-    # 失敗に気づけるよう、保存直前にアサート&ログ
-    bad = [c for c in final_out.columns if _norm(c) in CN_KEYS_NORM]
-    if bad:
-        print("❌ CN-like columns still present (normalized):", [str(c) for c in bad])
-        print("ALL OUTPUT COLS (raw):", [str(c) for c in final_out.columns])
-        raise RuntimeError("CN columns still present in output")
-
+    # 保存
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
     final_out.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
     final_out.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
-
-    # キャッシュはフル列（CN/JA含む）で保存（差分検出のため）
-    cn_snap_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.read_csv(SRC, encoding="utf-8-sig").to_csv(cn_snap_path, index=False, encoding="utf-8-sig")
-    out_full.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
-
-    print(f"✅ Saved (output has NO CN columns): {DST_PRIMARY}")
-    print(f"📦 Repo cache CN: {cn_snap_path}")
-    print(f"📦 Repo cache JA: {ja_prev_path}")
-
+    print(f"✅ Saved: {DST_PRIMARY}")
 
 if __name__ == "__main__":
     main()
