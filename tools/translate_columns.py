@@ -77,7 +77,7 @@ def clean_price_cell(s:str)->str:
         t=re.sub(rf"(?:\s*{re.escape(w)}\s*)+$","",t)
     return t.strip()
 
-RE_PAREN_ANY_YEN=re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
+RE_PAREN_ANY_YEN=re.compile(r"（[^》）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
 RE_ANY_YEN_TOKEN=re.compile(r"(日本円|JPY|[¥￥]|円)")
 def strip_any_yen_tokens(s:str)->str:
     t=str(s)
@@ -103,7 +103,6 @@ PRICE_ITEM_DEALER_JA={"ディーラー販売価格（元）"}
 # ====== 金額整形 ======
 RE_WAN=re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN=re.compile(r"(?P<num>[\d,]+)\s*元")
-
 def parse_cny(text:str):
     t=str(text)
     m1=RE_WAN.search(t)
@@ -147,7 +146,8 @@ def parse_json_relaxed(content:str,terms:list[str])->dict[str,str]:
     try:
         d=json.loads(content)
         if isinstance(d,dict)and"translations"in d:
-            return {str(t["cn"]).strip():str(t.get("ja",t["cn"])).strip() for t in d["translations"] if t.get("cn")}
+            return {str(t["cn"]).strip():str(t.get("ja",t["cn"])).strip()
+                    for t in d["translations"] if t.get("cn")}
     except Exception:
         pass
     pairs=re.findall(r'"cn"\s*:\s*"([^"]+)"\s*,\s*"ja"\s*:\s*"([^"]*)"', content)
@@ -178,19 +178,18 @@ class Translator:
             {"role":"system","content":self.system},
             {"role":"user","content":json.dumps({"terms":terms},ensure_ascii=False)},
         ]
-        # まずは response_format=JSON で試す。空返し時はtext→fallbackで再解釈
+        # JSON指定 → 失敗時 text フォールバック
         try:
             resp=self.client.chat.completions.create(
                 model=self.model,messages=msgs,temperature=0,
                 response_format={"type":"json_object"},
             )
             content=resp.choices[0].message.content or ""
-            parsed = parse_json_relaxed(content, terms)
+            parsed=parse_json_relaxed(content, terms)
             if parsed and any((parsed.get(t)!=t) for t in terms):
                 return parsed
         except Exception as e:
             print("❌ OpenAI JSON error:", repr(e))
-        # フォールバック：通常text
         try:
             resp=self.client.chat.completions.create(
                 model=self.model,messages=msgs,temperature=0
@@ -337,6 +336,7 @@ def main():
         orig_cols=list(out.columns); fixed=orig_cols[:4]; grades=orig_cols[4:]
         grades_norm=[BRAND_MAP.get(c,c) for c in grades]
         grades_stripped=strip_series_prefix_from_grades(grades_norm)
+
         reuse_headers=False
         if enable_reuse:
             reuse_headers = list(prev_cn_df.columns[4:]) == list(df.columns[4:])
@@ -367,53 +367,33 @@ def main():
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         non_price_mask = ~(is_msrp | is_dealer)
 
+        # CNキャッシュとの差分（セル位置）を厳密に判定
+        if enable_reuse and (prev_cn_df is not None):
+            diff_mask = (df != prev_cn_df)
+        else:
+            diff_mask = pd.DataFrame(True, index=df.index, columns=df.columns)
+
         values_to_translate=[]
         coords_to_update=[]
 
-        if enable_reuse and (prev_cn_df is not None) and (prev_ja_df is not None):
-            if prev_cn_df.shape == df.shape:
-                for i in range(len(df)):
-                    for j in range(4, len(df.columns)):
-                        if not non_price_mask[i]:
-                            continue
-                        cur = str(df.iat[i, j]).strip()
-                        old = str(prev_cn_df.iat[i, j]).strip()
-                        if cur != old:
-                            if cur in {"", "●", "○", "–", "-", "—"}:
-                                continue
-                            if numeric_like.fullmatch(cur):
-                                continue
-                            values_to_translate.append(cur)
-                            coords_to_update.append((i, j))
-                        else:
-                            # 未変更は前回JAからコピー
-                            out.iat[i, j] = prev_ja_df.iat[i, j]
-            else:
-                print(f"⚠️ shape mismatch: skip diff reuse ({prev_cn_df.shape} vs {df.shape})")
-                for i in range(len(df)):
-                    for j in range(4, len(df.columns)):
-                        if not non_price_mask[i]:
-                            continue
-                        v = str(df.iat[i, j]).strip()
-                        if v in {"", "●", "○", "–", "-", "—"}:
-                            continue
-                        if numeric_like.fullmatch(v):
-                            continue
-                        values_to_translate.append(v)
-                        coords_to_update.append((i, j))
-        else:
-            # 初回などキャッシュなし。全対象から収集（非価格のみ）
-            for i in range(len(df)):
-                for j in range(4, len(df.columns)):
-                    if not non_price_mask[i]:
-                        continue
-                    v = str(df.iat[i, j]).strip()
-                    if v in {"", "●", "○", "–", "-", "—"}:
-                        continue
-                    if numeric_like.fullmatch(v):
-                        continue
-                    values_to_translate.append(v)
+        for i in range(len(df)):
+            for j in range(4, len(df.columns)):
+                if not non_price_mask[i]:
+                    continue
+                cur = str(df.iat[i, j]).strip()
+                if cur in {"", "●", "○", "–", "-", "—"}:
+                    continue
+                if numeric_like.fullmatch(cur):
+                    continue
+
+                if diff_mask.iat[i, j]:
+                    # 変更セルは翻訳
+                    values_to_translate.append(cur)
                     coords_to_update.append((i, j))
+                else:
+                    # 未変更は旧JAコピー（再翻訳しない）
+                    if enable_reuse and (prev_ja_df is not None) and (j < prev_ja_df.shape[1]):
+                        out.iat[i, j] = prev_ja_df.iat[i, j]
 
         print(f"🗂️  values candidates before-uniq = {len(values_to_translate)}")
         uniq_vals=uniq(values_to_translate)
