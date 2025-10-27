@@ -417,21 +417,33 @@ def main():
             if not s: continue
             out_full.iat[i,j]=val_map.get(s,s)
 
-    # ======= 出力 =======
-    # 出力CSVには「セクション_ja」「項目_ja」とグレード列“のみ”を明示指定で出す（CN列は最初から作らない扱い）
-    grade_cols = list(out_full.columns[4:])
-    out_save = out_full.loc[:, ["セクション_ja", "項目_ja"] + grade_cols]
+    # ------- 出力 -------
+    # 出力用は「セクション_ja」「項目_ja」＋グレード列だけで最初から組み立てる
+    # グレード列は、CN/JA どちらでもなく "4列目以降" を採用（すでにヘッダ翻訳済み）
+    grade_cols = [c for c in out_full.columns if c not in ("セクション", "セクション_ja", "項目", "項目_ja")]
+
+    # 出力DataFrameを“新規”に作る（CN列は最初から持たない）
+    final_out = pd.concat(
+        [
+            out_full.loc[:, ["セクション_ja", "項目_ja"]],
+            out_full.loc[:, grade_cols],
+        ],
+        axis=1
+    )
+
+    # 念のための最終ガード（CN列が紛れ込んでいたら確実に落とす）
+    final_out = final_out.drop(columns=["セクション", "項目"], errors="ignore")
 
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
-    out_save.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
-    out_save.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
+    final_out.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
+    final_out.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
 
-    # キャッシュはフル列（CN/JA両方）で保存して次回差分用に使う
+    # キャッシュはフル列（CN/JA含む）で保存（差分検出のため）
     cn_snap_path.parent.mkdir(parents=True, exist_ok=True)
     pd.read_csv(SRC, encoding="utf-8-sig").to_csv(cn_snap_path, index=False, encoding="utf-8-sig")
     out_full.to_csv(ja_prev_path, index=False, encoding="utf-8-sig")
 
-    print(f"✅ Saved (CN cols not created in output): {DST_PRIMARY}")
+    print(f"✅ Saved (output has NO CN columns): {DST_PRIMARY}")
     print(f"📦 Repo cache CN: {cn_snap_path}")
     print(f"📦 Repo cache JA: {ja_prev_path}")
 
