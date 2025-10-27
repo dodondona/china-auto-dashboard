@@ -2,16 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-translate_columns.py  (no-cache, header untouched, first-row prefix cut before year)
+translate_columns.py  (cacheless, header untouched, first-row prefix cut before year)
 
-要点:
+要件まとめ（本スレッド確定事項）:
+  - キャッシュは一切使わない/作らない（読み/書き/差分再利用すべて無し）
   - 入力: 「セクション」「項目」+ グレード列（CN）
-  - 出力: 「セクション_ja」「項目_ja」+ グレード列（ヘッダは翻訳しない）
-  - キャッシュは一切使わない/作らない
-  - セクション/項目は辞書優先 + 残りだけバッチ翻訳
-  - 先頭行の“グレード値”は『年(20xx/20xx款)より前』を切り落としてから翻訳
-  - 価格は LLM を通さず「xx.x万元（日本円¥…）」で強制整形
-  - ゴミ語（“計算機と計算機”など）は安全な正規化で除去
+  - 出力: 「セクション_ja」「項目_ja」+ グレード列（ヘッダ=列名は翻訳しない）
+  - 価格行は LLM を通さず、必ず「xx.x万元（日本円¥…）」等で整形（ENV: CNY_TO_JPY）
+  - 先頭行(最上位の行)のグレード値は『年(20xx/20xx款)より前』を削除し、残りだけ翻訳
+  - セクション/項目は辞書優先、足りない分だけを重複排除してバッチ翻訳
+  - 数値/記号/ダッシュ等は翻訳スキップ
+  - LLM の変な重複（例:「計算機と計算機」）は安全に除去
+  - ブランド/系列の問題は “年より前カット” を優先（ヘッダは翻訳しない）
 """
 
 from __future__ import annotations
@@ -224,7 +226,7 @@ def cut_prefix_before_year(s: str) -> str:
     """
     '奔驰E级 2025款 改款 E 260 L' -> '2025款 改款 E 260 L'
     年トークン(20xx/20xx款)より前を切り落とす。
-    なければ何もしない。
+    なければそのまま返す。
     """
     if not s:
         return s
@@ -234,12 +236,11 @@ def cut_prefix_before_year(s: str) -> str:
         return x[m.start():].strip()
     return x
 
-def drop_known_series_if_present(s: str) -> str:
+def drop_known_series_if_no_year(s: str) -> str:
     """年トークンが無い場合のみ、既知の系列名を先頭から除去（安全側）"""
     if not s:
         return s
     x = str(s).strip()
-    # 代表的パターン（必要に応じて増やせる）
     x = re.sub(r"^(?:奔驰E级|梅赛德斯-奔驰E级|メルセデス・ベンツEクラス)\s+", "", x)
     return x
 
@@ -248,7 +249,7 @@ def main():
     df = read_csv(SRC)
     ensure_required_columns(df)
 
-    # 出力骨格（ヘッダは翻訳しない）
+    # 出力骨格（ヘッダ=列名は翻訳しない）
     out = pd.DataFrame(index=df.index)
     out["セクション"] = df["セクション"]
     out["項目"] = df["項目"]
@@ -303,8 +304,8 @@ def main():
             # ★ 先頭行は『年トークン(20xx/20xx款)より前』を切り落としてから使う
             if i == 0:
                 cut = cut_prefix_before_year(val)
-                if cut == val:  # 年トークンがなかった場合のみ、既知の系列名を落とす
-                    cut = drop_known_series_if_present(cut)
+                if cut == val:                 # 年トークンが無い場合のみ既知系列名を削除
+                    cut = drop_known_series_if_no_year(cut)
                 val = cut.strip()
                 if not val:
                     continue
