@@ -33,7 +33,7 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests || true
           python -m playwright install chromium || true
 
-      # 1) 先にホームページからCSV生成
+      # 1) ホームページからCSV生成
       - name: Run config crawler
         run: |
           set -euo pipefail
@@ -46,6 +46,7 @@ jobs:
         env:
           SERIES_ID: ${{ inputs.series_id }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CACHE_REPO_DIR: cache
         run: |
           set -euo pipefail
           IN="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv"
@@ -65,15 +66,14 @@ jobs:
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          # cache と outputs を一括 add（存在しないときもエラーにしない）
-          mkdir -p "cache_repo/series/${{ inputs.series_id }}" || true
-          git add -A "cache_repo/series/${{ inputs.series_id }}/" || true
+          mkdir -p "cache/${{ inputs.series_id }}" || true
+          git add -A "cache/${{ inputs.series_id }}/" || true
           git add -A "output/autohome/${{ inputs.series_id }}/" || true
-          git commit -m "update series ${{ inputs.series_id }} (CN/JA outputs & cache_repo)" || echo "No changes to commit"
+          git commit -m "update series ${{ inputs.series_id }} (CN/JA outputs & cache)" || echo "No changes to commit"
           git pull --rebase || true
           git push
 
-      # 任意：Artifacts（必要なければ外してください）
+      # 4) Artifacts（任意）
       - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
@@ -82,5 +82,5 @@ jobs:
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv
-            cache_repo/series/${{ inputs.series_id }}/
+            cache/${{ inputs.series_id }}/
           if-no-files-found: warn
