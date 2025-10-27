@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-translate_columns.py  (cacheless, header untouched, first-row prefix cut before year)
+tools/translate_columns.py  — full replacement
 
-要件まとめ（本スレッド確定事項）:
-  - キャッシュは一切使わない/作らない（読み/書き/差分再利用すべて無し）
+要件（このスレッドの合意をすべて反映）:
+  - キャッシュは一切使わない/作らない（再利用・保存なし）
   - 入力: 「セクション」「項目」+ グレード列（CN）
-  - 出力: 「セクション_ja」「項目_ja」+ グレード列（ヘッダ=列名は翻訳しない）
-  - 価格行は LLM を通さず、必ず「xx.x万元（日本円¥…）」等で整形（ENV: CNY_TO_JPY）
-  - 先頭行(最上位の行)のグレード値は『年(20xx/20xx款)より前』を削除し、残りだけ翻訳
-  - セクション/項目は辞書優先、足りない分だけを重複排除してバッチ翻訳
+  - 出力: 「セクション_ja」「項目_ja」+ グレード列（= 列ヘッダ）
+      * グレード列ヘッダは『年(20xx/20xx款)より前』を捨て、残り(尾部)のみを翻訳して表示
+  - セクション/項目は辞書優先、残りだけ重複排除してバッチ翻訳
+  - 値セル:
+      * 価格行は LLM を通さず「xx.x万元（日本円¥…）」整形（表記ゆらぎを吸収）
+      * その他は重複排除してバッチ翻訳
   - 数値/記号/ダッシュ等は翻訳スキップ
-  - LLM の変な重複（例:「計算機と計算機」）は安全に除去
-  - ブランド/系列の問題は “年より前カット” を優先（ヘッダは翻訳しない）
+  - LLM のゴミ（「計算機」「計算機と計算機」など）は安全に除去
+  - YAML/ワークフローは環境変数 CSV_IN / CSV_OUT or DST_PRIMARY を想定
 """
 
 from __future__ import annotations
@@ -22,7 +24,9 @@ from pathlib import Path
 from typing import Dict, List
 import pandas as pd
 
-# ====== 入出力解決 ======
+# =========================
+# 入出力解決
+# =========================
 SERIES_ID = os.environ.get("SERIES_ID", "").strip()
 
 def resolve_src_dst():
@@ -70,7 +74,9 @@ def make_secondary(dst: Path) -> Path:
 
 DST_SECONDARY = make_secondary(DST_PRIMARY)
 
-# ====== OpenAI バッチ翻訳（必要最小限） ======
+# =========================
+# OpenAI（バッチ翻訳）
+# =========================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL", "") or "gpt-4o-mini").strip()
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "80"))
@@ -84,8 +90,8 @@ def chat_translate_batch(items: List[str]) -> List[str]:
     out: List[str] = []
     import requests
     sys = (
-        "車両仕様表の短い見出し/値を日本語に簡潔に訳してください。"
-        "数値や単位は維持。余計な文は不要。入力順で1行1訳で返答。"
+        "自動車仕様の短い見出し/値を日本語に簡潔に訳してください。"
+        "数値や単位は維持し、余計な文は書かず、入力順で1行1訳で返答。"
     )
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
     for i in range(0, len(items), BATCH_SIZE):
@@ -113,7 +119,9 @@ def chat_translate_batch(items: List[str]) -> List[str]:
             out.extend(chunk)
     return out
 
-# ====== CSV I/O ======
+# =========================
+# CSV I/O
+# =========================
 def read_csv(path: Path) -> pd.DataFrame:
     if not Path(path).exists():
         raise SystemExit(f"入力CSVが見つかりません: {path}")
@@ -123,7 +131,9 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False, encoding="utf-8-sig")
 
-# ====== 判定/整形 ======
+# =========================
+# 判定/整形ユーティリティ
+# =========================
 def ensure_required_columns(df: pd.DataFrame) -> None:
     need = ["セクション", "項目"]
     for col in need:
@@ -146,14 +156,21 @@ def clean_llm_artifacts(s: str) -> str:
     if not s:
         return s
     x = str(s)
-    x = re.sub(r"^([\u3040-\u30FF\u4E00-\u9FFFA-Za-z0-9]{1,15})と\1$", r"\1", x)  # “XとX”
-    x = re.sub(r"^(.{1,12})\1$", r"\1", x)                                     # 連続重複
+    # “XとX” の重複を除去
+    x = re.sub(r"^([\u3040-\u30FF\u4E00-\u9FFFA-Za-z0-9]{1,15})と\1$", r"\1", x)
+    # 同語の単純重複
+    x = re.sub(r"^(.{1,12})\1$", r"\1", x)
     x = re.sub(r"^(.{1,12})\s+\1$", r"\1", x)
+    # 記号/空白整形
     x = re.sub(r"[、，,]{2,}", "、", x)
     x = re.sub(r"\s{2,}", " ", x)
-    return x.strip()
+    # 価格ノイズ（日本語の「計算機」も除去）
+    x = re.sub(r"(計算機|计算器|询底价|询价)\b", "", x).strip()
+    return x
 
-# ====== 固定辞書（セクション/項目） ======
+# =========================
+# 固定辞書（セクション/項目）
+# =========================
 SECTION_DICT: Dict[str, str] = {
     "基本参数": "基本情報", "车身参数": "車体寸法", "外部配置": "外装装備",
     "内部配置": "内装装備", "座椅配置": "シート", "安全配置": "安全装備",
@@ -179,18 +196,28 @@ ITEM_DICT: Dict[str, str] = {
     "前/后排座椅加热": "前/後席シートヒーター", "自动空调": "オートエアコン", "后座出风口": "後席エアアウトレット",
 }
 
-# ====== 価格：LLM非依存の整形 ======
+# =========================
+# 価格（LLM非依存）
+# =========================
 CNY_TO_JPY = float(os.environ.get("CNY_TO_JPY", "20.0"))
 
-def is_price_row_label(s: str) -> bool:
-    x = str(s or "").strip()
-    return x in {"厂商指导价", "经销商报价", "メーカー希望小売価格", "ディーラー販売価格"}
+# 価格ラベル（表記ゆらぎ対応）
+PRICE_RE_CN = re.compile(r"^(厂商指导价|经销商报价|经销商参考价|经销商)$")
+PRICE_RE_JA = re.compile(r"^(メーカー(?:希|推)望小売価格|メーカー推奨価格|ディーラー販売価格)(?:（?\(元\))?)$")
+
+def is_price_row_label_any(s: str) -> bool:
+    if not s:
+        return False
+    x = str(s).strip()
+    x = x.replace(" ", "").replace("　", "")
+    return bool(PRICE_RE_CN.match(x) or PRICE_RE_JA.match(x))
 
 def parse_cny_amount(raw: str) -> float | None:
     if not raw:
         return None
     x = str(raw)
-    x = re.sub(r"(計算機|计算器|コンピュータ|機械)+", "", x)  # ノイズ除去
+    # よく混ざるノイズを先に除去
+    x = re.sub(r"(計算機|计算器|询底价|询价|报价|价格询问|到店|起售|起)\b", "", x)
     x = x.replace(",", "").strip()
     m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*万", x)
     if m:
@@ -209,7 +236,7 @@ def format_price_cell(cell: str) -> str:
         return x
     amt = parse_cny_amount(x)
     if amt is None:
-        return x
+        return clean_llm_artifacts(x)  # 解析できないときはノイズだけ落として返す
     if "万" in x:
         m = re.match(r"([0-9]+(?:\.[0-9]+)?)", x.replace(" ", ""))
         base = m.group(1) if m else "{:.2f}".format(amt / 10000.0)
@@ -219,47 +246,70 @@ def format_price_cell(cell: str) -> str:
         jpy = fmt_jpy(amt * CNY_TO_JPY)
         return f"{int(amt)}元（日本円{jpy}）"
 
-# ====== 先頭行専用: 年トークンより前を切る ======
-YEAR_TOKEN = re.compile(r"(20\d{2})(?:\s*款)?")  # 例: 2025, 2025款, 2024款 など
+# =========================
+# 「年より前カット」— ヘッダ処理
+# =========================
+YEAR_TOKEN = re.compile(r"(20\d{2})(?:\s*款)?")  # 例: 2004款, 2025款
 
-def cut_prefix_before_year(s: str) -> str:
+def split_prefix_by_year(s: str) -> tuple[str, str]:
     """
-    '奔驰E级 2025款 改款 E 260 L' -> '2025款 改款 E 260 L'
-    年トークン(20xx/20xx款)より前を切り落とす。
-    なければそのまま返す。
+    年(20xx/20xx款)の直前で (prefix, tail) に分割。
+    prefix: 年より前（シリーズ名など） / tail: 年以降
+    年が無ければ (s, "")。
     """
     if not s:
-        return s
+        return "", ""
     x = str(s).strip()
     m = YEAR_TOKEN.search(x)
     if m:
-        return x[m.start():].strip()
-    return x
+        return x[:m.start()].rstrip(), x[m.start():].lstrip()
+    return x, ""
 
-def drop_known_series_if_no_year(s: str) -> str:
-    """年トークンが無い場合のみ、既知の系列名を先頭から除去（安全側）"""
-    if not s:
-        return s
-    x = str(s).strip()
-    x = re.sub(r"^(?:奔驰E级|梅赛德斯-奔驰E级|メルセデス・ベンツEクラス)\s+", "", x)
-    return x
-
-# ====== 本体 ======
+# =========================
+# 本体
+# =========================
 def main():
     df = read_csv(SRC)
     ensure_required_columns(df)
 
-    # 出力骨格（ヘッダ=列名は翻訳しない）
+    # 出力骨格
     out = pd.DataFrame(index=df.index)
     out["セクション"] = df["セクション"]
     out["項目"] = df["項目"]
     out["セクション_ja"] = ""
     out["項目_ja"] = ""
-    grade_cols = [c for c in df.columns if c not in ["セクション", "項目"]]
-    for c in grade_cols:
-        out[c] = df[c]  # ヘッダはそのまま
 
-    # --- セクション/項目：辞書優先 → 残りだけ翻訳 ---
+    # ---- グレード列ヘッダ（列名）: 年より前カット → 年以降だけ翻訳
+    all_cols = list(df.columns)
+    grade_cols_src = [c for c in all_cols if c not in ["セクション", "項目"]]
+
+    prefixes, tails = [], []
+    for g in grade_cols_src:
+        p, t = split_prefix_by_year(g)
+        prefixes.append(p)
+        tails.append(t)
+
+    uniq_tails = [t for t in dict.fromkeys([t for t in tails if t])]
+    tail_map: Dict[str, str] = {}
+    if uniq_tails:
+        trans_tails = chat_translate_batch(uniq_tails)
+        # ノイズ掃除もかけておく
+        trans_tails = [clean_llm_artifacts(z) for z in trans_tails]
+        tail_map = {src: dst for src, dst in zip(uniq_tails, trans_tails)}
+
+    # 最終ヘッダは「tail の訳のみ」（シリーズ名は含めない）
+    grade_cols = []
+    for p, t in zip(prefixes, tails):
+        if t:
+            grade_cols.append(tail_map.get(t, t))
+        else:
+            grade_cols.append(p or "")
+
+    # out に元値をコピー（列数揃え）
+    for c in grade_cols_src:
+        out[c] = df[c]
+
+    # ---- セクション/項目：辞書優先 → 残りだけ翻訳
     sec_src = df["セクション"].astype(str).tolist()
     item_src = df["項目"].astype(str).tolist()
 
@@ -278,6 +328,7 @@ def main():
 
     if need:
         trans = chat_translate_batch(need)
+        trans = [clean_llm_artifacts(z) for z in trans]
         mapping = {k:v for k, v in zip(need, trans)}
         for i in idx_sec:
             sec_ja[i] = mapping.get(sec_src[i], sec_src[i])
@@ -287,73 +338,73 @@ def main():
     out["セクション_ja"] = sec_ja
     out["項目_ja"]       = item_ja
 
-    # --- グレード列：価格はルール整形 / その他はバッチ翻訳 ---
-    is_price = df["項目"].map(is_price_row_label)
+    # ---- 値セル：価格はルール整形 / その他はバッチ翻訳
+    # 価格判定（CN/JAのゆらぎ両対応）
+    is_price = out["項目"].map(is_price_row_label_any)
+    if "項目_ja" in out.columns:
+        is_price = is_price | out["項目_ja"].map(is_price_row_label_any)
 
-    # 価格以外の翻訳候補収集（重複まとめ）
+    # 非価格セルの翻訳候補収集（重複まとめ）
     non_price_values: List[str] = []
     coords: List[tuple[int,int]] = []
-    for i in range(len(df)):
+    for i in range(len(out)):
         if is_price.iloc[i]:
             continue
-        for j, col in enumerate(grade_cols):
+        for j, col in enumerate(grade_cols_src):
             raw = str(df.iat[i, 2+j]) if (2+j) < df.shape[1] else ""
             val = raw.strip()
             if not val or is_trivial(val):
                 continue
-            # ★ 先頭行は『年トークン(20xx/20xx款)より前』を切り落としてから使う
-            if i == 0:
-                cut = cut_prefix_before_year(val)
-                if cut == val:                 # 年トークンが無い場合のみ既知系列名を削除
-                    cut = drop_known_series_if_no_year(cut)
-                val = cut.strip()
-                if not val:
-                    continue
             non_price_values.append(val)
-            coords.append((i, 4+j))
+            coords.append((i, 4+j))  # out 内のセル座標
 
-    # 重複を潰して翻訳
-    uniq = []
+    # 重複ユニーク化 → バッチ翻訳
+    uniq_vals = []
     pos = []
     index_map = {}
     for s in non_price_values:
         if s in index_map:
             pos.append(index_map[s])
         else:
-            index_map[s] = len(uniq)
-            uniq.append(s)
+            index_map[s] = len(uniq_vals)
+            uniq_vals.append(s)
             pos.append(index_map[s])
 
     trans_map: Dict[str, str] = {}
-    if uniq:
-        translated = chat_translate_batch(uniq)
-        for src, ja in zip(uniq, translated):
-            trans_map[src] = clean_llm_artifacts(ja or src)
+    if uniq_vals:
+        translated = chat_translate_batch(uniq_vals)
+        translated = [clean_llm_artifacts(z) for z in translated]
+        for src, ja in zip(uniq_vals, translated):
+            trans_map[src] = ja
 
     # 反映（非価格行）
     for (i, out_j), idx in zip(coords, pos):
-        src = uniq[idx]
+        src = uniq_vals[idx]
         ja  = trans_map.get(src, src)
         out.iat[i, out_j] = ja
 
     # 価格行（必ず日本円併記）
-    for i in range(len(df)):
+    for i in range(len(out)):
         if not is_price.iloc[i]:
             continue
-        for j, col in enumerate(grade_cols):
+        for j, col in enumerate(grade_cols_src):
             raw = str(df.iat[i, 2+j]) if (2+j) < df.shape[1] else ""
             out.iat[i, 4+j] = format_price_cell(raw)
 
-    # --- 最終出力（CN列は出さない） ---
-    final_out = out[["セクション_ja", "項目_ja"] + grade_cols].copy()
+    # ---- 最終出力：ヘッダ（= グレード列名）を置換
+    final_out = out[["セクション_ja", "項目_ja"] + grade_cols_src].copy()
+    final_out.columns = ["セクション_ja", "項目_ja"] + grade_cols
 
-    write_csv(final_out, DST_PRIMARY)
+    # 保存
+    DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
+    final_out.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
     if DST_SECONDARY:
-        write_csv(final_out, DST_SECONDARY)
+        final_out.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
 
     print(f"✅ Wrote: {DST_PRIMARY}")
     if DST_SECONDARY:
         print(f"✅ Wrote: {DST_SECONDARY}")
 
 if __name__ == "__main__":
+    SRC, DST_PRIMARY = resolve_src_dst()
     main()
