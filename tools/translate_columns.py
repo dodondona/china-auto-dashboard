@@ -4,7 +4,9 @@ from pathlib import Path
 import pandas as pd
 from openai import OpenAI
 
-# ====== 入出力 ======
+# =============================
+# 入出力解決
+# =============================
 SERIES_ID = os.environ.get("SERIES_ID", "").strip()
 
 def resolve_src_dst():
@@ -46,7 +48,28 @@ def make_secondary(dst: Path) -> Path:
 
 DST_SECONDARY = make_secondary(DST_PRIMARY)
 
-# ====== 設定 ======
+def detect_series_id_from_path(p: Path) -> str:
+    # output/autohome/<sid>/config_<sid>.csv の <sid> を推定
+    try:
+        name = p.stem  # config_8042
+        m = re.search(r"config_(\d+)", name)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    try:
+        parent = p.parent.name  # 8042
+        if parent.isdigit():
+            return parent
+    except Exception:
+        pass
+    return SERIES_ID or "misc"
+
+SERIES_FOR_CACHE = detect_series_id_from_path(SRC)
+
+# =============================
+# 設定
+# =============================
 MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 API_KEY = os.environ.get("OPENAI_API_KEY")
 TRANSLATE_VALUES   = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
@@ -58,7 +81,9 @@ CURRENCYFREAKS_KEY = os.environ.get("CURRENCY", "").strip()
 
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 
-# ====== 為替レート（CurrencyFreaks優先 / 失敗時フォールバック） ======
+# =============================
+# 為替（CurrencyFreaks優先 / 失敗時はフォールバック）
+# =============================
 def get_cny_jpy_rate_fallback(default_rate: float) -> float:
     if not CURRENCYFREAKS_KEY:
         print(f"⚠️ No API key set (CURRENCY). Using fallback rate {default_rate}")
@@ -69,9 +94,9 @@ def get_cny_jpy_rate_fallback(default_rate: float) -> float:
             data = json.loads(r.read().decode("utf-8"))
         jpy = float(data["rates"]["JPY"])
         cny = float(data["rates"]["CNY"])
-        rate = jpy / cny  # 1 CNY あたりの JPY
+        rate = jpy / cny  # 1CNY あたりの JPY
         if rate < 1:
-            rate = 1 / rate  # 念のための逆数補正
+            rate = 1 / rate
         print(f"💱 Rate from CurrencyFreaks: 1CNY = {rate:.2f}JPY")
         return rate
     except Exception as e:
@@ -80,7 +105,9 @@ def get_cny_jpy_rate_fallback(default_rate: float) -> float:
 
 EXRATE_CNY_TO_JPY = get_cny_jpy_rate_fallback(EXRATE_CNY_TO_JPY)
 
-# ====== 固定訳・正規化 ======
+# =============================
+# 固定訳・正規化
+# =============================
 NOISE_ANY = ["对比", "参数", "图片", "配置", "详情"]
 NOISE_PRICE_TAIL = ["询价", "计算器", "询底价", "报价", "价格询问", "起", "起售", "到店", "经销商"]
 
@@ -444,7 +471,9 @@ FIX_JA_ITEMS = {
     "V2X": "V2X"
 }
 
-# ====== 金額整形（万元→元→円、「日本円 約…円」） ======
+# =============================
+# 金額整形（万元→元→円、「日本円 約…円」）
+# =============================
 RE_WAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
 RE_YUAN = re.compile(r"(?P<num>[\d,]+)\s*元")
 
@@ -478,7 +507,9 @@ def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
 def dealer_to_yuan_and_jpy(cell: str, rate: float) -> str:
     return _format_yuan_and_jpy(cell, rate)
 
-# ====== 翻訳ユーティリティ ======
+# =============================
+# 便利関数
+# =============================
 def uniq(seq):
     s, out = set(), []
     for x in seq:
@@ -507,6 +538,9 @@ def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
         return {cn.strip(): ja.strip() for cn, ja in pairs}
     return {t: t for t in terms}
 
+# =============================
+# 翻訳クラス
+# =============================
 class Translator:
     def __init__(self, model: str, api_key: str):
         if not (api_key and api_key.strip()):
@@ -555,7 +589,91 @@ class Translator:
                     time.sleep(SLEEP_BASE * attempt)
         return out
 
-# ====== モデル名・ルール ======
+# =============================
+# キャッシュ（固定辞書 → シリーズキャッシュ(JSON) → メモリ）
+# =============================
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+CACHE_DIR = ensure_dir(Path("cache") / SERIES_FOR_CACHE)
+CACHE_FILES = {
+    "section": CACHE_DIR / "sections.json",
+    "item":    CACHE_DIR / "items.json",
+    "value":   CACHE_DIR / "values.json",
+    "col":     CACHE_DIR / "columns.json",
+}
+
+def load_json(p: Path) -> dict[str, str]:
+    try:
+        if p.exists():
+            with p.open("r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"⚠️ cache load failed {p}: {e}")
+    return {}
+
+def dump_json_safe(p: Path, data: dict[str, str]):
+    try:
+        ensure_dir(p.parent)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(p)
+    except Exception as e:
+        print(f"⚠️ cache save failed {p}: {e}")
+
+# メモリキャッシュ（実行中のみ）
+MEM_CACHE = {
+    "section": {},
+    "item": {},
+    "value": {},
+    "col": {},
+}
+
+SERIES_CACHE = {
+    "section": load_json(CACHE_FILES["section"]),
+    "item":    load_json(CACHE_FILES["item"]),
+    "value":   load_json(CACHE_FILES["value"]),
+    "col":     load_json(CACHE_FILES["col"]),
+}
+
+def translate_with_caches(kind: str, terms: list[str], fixed_map: dict[str, str], tr: Translator) -> dict[str, str]:
+    """
+    優先順: 固定辞書 > シリーズキャッシュ(JSON) > メモリキャッシュ > LLM
+    """
+    out: dict[str, str] = {}
+
+    # 1) 固定辞書
+    for t in terms:
+        if t in fixed_map:
+            out[t] = fixed_map[t]
+
+    # 2) シリーズキャッシュ(JSON)
+    for t in terms:
+        if t not in out and t in SERIES_CACHE[kind]:
+            out[t] = SERIES_CACHE[kind][t]
+
+    # 3) メモリキャッシュ
+    for t in terms:
+        if t not in out and t in MEM_CACHE[kind]:
+            out[t] = MEM_CACHE[kind][t]
+
+    # 4) LLM
+    need = [t for t in terms if t not in out]
+    if need:
+        llm_map = tr.translate_unique(uniq(need))
+        out.update(llm_map)
+        # メモリ・シリーズキャッシュに反映
+        for k, v in llm_map.items():
+            MEM_CACHE[kind][k] = v
+            SERIES_CACHE[kind][k] = v
+
+    return out
+
+# =============================
+# モデル名・グレード整形
+# =============================
 YEAR_TOKEN_RE = re.compile(r"(?:20\d{2}|19\d{2})|(?:\d{2}款|[上中下]市|改款|年款)")
 LEADING_TOKEN_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9\- ]{1,40}")
 
@@ -607,7 +725,9 @@ def grade_rule_ja(s: str) -> str:
     t = re.sub(r"\s*[-:：/]\s*", " ", t).strip()
     return t
 
-# ====== main ======
+# =============================
+# main
+# =============================
 def main():
     print(f"CSV_IN: {SRC}")
     if not Path(SRC).exists():
@@ -616,25 +736,19 @@ def main():
     df = pd.read_csv(SRC, encoding="utf-8-sig")
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
-    # セクション/項目：辞書を先に適用、辞書に無いキーのみLLMで補完
+    tr = Translator(MODEL, API_KEY)
+
+    # セクション/項目：辞書を先に適用、無いものはキャッシュ優先で補完
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
 
-    tr = Translator(MODEL, API_KEY)
-    sec_dict = {**FIX_JA_SECTIONS}
-    item_dict = {**FIX_JA_ITEMS}
+    sec_map = translate_with_caches("section", uniq_sec, FIX_JA_SECTIONS, tr)
+    item_map = translate_with_caches("item", uniq_item, FIX_JA_ITEMS, tr)
 
-    sec_missing  = [s for s in uniq_sec  if s not in sec_dict]
-    item_missing = [s for s in uniq_item if s not in item_dict]
-    if sec_missing:
-        sec_dict.update(tr.translate_unique(sec_missing))
-    if item_missing:
-        item_dict.update(tr.translate_unique(item_missing))
+    df.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
+    df.insert(3, "項目_ja",       df["項目"].map(lambda s: item_map.get(str(s).strip(),   str(s).strip())))
 
-    df.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_dict.get(str(s).strip(), str(s).strip())))
-    df.insert(3, "項目_ja",       df["項目"].map(lambda s: item_dict.get(str(s).strip(),   str(s).strip())))
-
-    # モデル列（ヘッダ）翻訳（必要時のみ）
+    # モデル列（ヘッダ）
     if TRANSLATE_COLNAMES:
         orig_cols = list(df.columns)
         fixed = orig_cols[:4]
@@ -642,11 +756,11 @@ def main():
         grades_stripped = strip_series_prefix_from_grades(grades)
         grades_rule_ja = [grade_rule_ja(g) for g in grades_stripped]
         need_llm = [g for g in grades_rule_ja if re.search(r"[\u4e00-\u9fff]", g)]
-        llm_map = tr.translate_unique(uniq(need_llm)) if need_llm else {}
-        final_grades = [llm_map.get(g, g) for g in grades_rule_ja]
+        col_map = translate_with_caches("col", uniq(need_llm), {}, tr) if need_llm else {}
+        final_grades = [col_map.get(g, g) for g in grades_rule_ja]
         df.columns = fixed + final_grades
 
-    # 価格行検出（部分一致＋括弧等の正規化）
+    # 価格行検出
     def norm_key(s: str) -> str:
         s = str(s)
         s = re.sub(r"[ \t\u3000\u00A0\u200b\ufeff]+", "", s)
@@ -675,16 +789,13 @@ def main():
         j0 = is_dealer.idxmax()
         print(f"  sample Dealer key: CN='{df.at[j0,'項目']}', JA='{df.at[j0,'項目_ja']}'")
 
-    # ====== 価格行変換（重複列名対策：列番号でアクセス）＋ロック
-    converted_cells: dict[tuple[int,int], str] = {}
-    # 列番号 4..end-1 を走査
+    # 価格セル変換（列番号で処理）＋ロック
+    converted_cells: dict[tuple[int, int], str] = {}
     for col_idx in range(4, len(df.columns)):
-        # MSRP 行
         for row_idx in df.index[is_msrp]:
             oldv = df.iloc[row_idx, col_idx]
             newv = msrp_to_yuan_and_jpy(oldv, EXRATE_CNY_TO_JPY)
             converted_cells[(row_idx, col_idx)] = newv
-        # Dealer 行
         for row_idx in df.index[is_dealer]:
             oldv = df.iloc[row_idx, col_idx]
             newv = dealer_to_yuan_and_jpy(oldv, EXRATE_CNY_TO_JPY)
@@ -698,10 +809,10 @@ def main():
                 continue
             df_vals.iat[row_idx, col_idx] = clean_any_noise(df_vals.iat[row_idx, col_idx])
 
-    # 値セル LLM 翻訳（価格行は対象外）
+    # 値セル翻訳（固定→シリーズ→メモリ→LLM）
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        tr_values = []
+        tr_values_terms = []
         coords = []
         for row_idx in range(len(df_vals)):
             if is_msrp.iloc[row_idx] or is_dealer.iloc[row_idx]:
@@ -712,17 +823,24 @@ def main():
                     continue
                 if numeric_like.fullmatch(v):
                     continue
-                tr_values.append(v)
+                tr_values_terms.append(v)
                 coords.append((row_idx, col_idx))
-        uniq_vals = uniq(tr_values)
-        val_map = Translator(MODEL, API_KEY).translate_unique(uniq_vals) if uniq_vals else {}
+        uniq_vals = uniq(tr_values_terms)
+        # 値の固定辞書は今は無し({})。キャッシュ優先。
+        val_map = translate_with_caches("value", uniq_vals, {}, tr) if uniq_vals else {}
         for (row_idx, col_idx) in coords:
             s = str(df_vals.iat[row_idx, col_idx]).strip()
             df.iat[row_idx, col_idx] = val_map.get(s, s)
 
-    # ロック再適用（価格表記を固定）
+    # 価格ロック再適用
     for (row_idx, col_idx), val in converted_cells.items():
         df.iat[row_idx, col_idx] = val
+
+    # キャッシュ保存
+    dump_json_safe(CACHE_FILES["section"], SERIES_CACHE["section"])
+    dump_json_safe(CACHE_FILES["item"],    SERIES_CACHE["item"])
+    dump_json_safe(CACHE_FILES["value"],   SERIES_CACHE["value"])
+    dump_json_safe(CACHE_FILES["col"],     SERIES_CACHE["col"])
 
     # 出力
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
