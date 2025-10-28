@@ -58,6 +58,10 @@ jobs:
       fail-fast: false
       matrix:
         series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
+    # ← ここで Secrets をジョブ環境へ（為替とOpenAI）
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CURRENCY: ${{ secrets.CURRENCY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,8 +75,8 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 pandas openai
-          python -m playwright install chromium
+          pip install playwright beautifulsoup4 lxml pandas openai
+          python -m playwright install chromium || true
 
       - name: Run config crawler
         run: |
@@ -84,19 +88,15 @@ jobs:
 
       - name: Translate columns (per series)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # 必要なら為替を調整（既定: 21.0）
-          # EXRATE_CNY_TO_JPY: "21.0"
+          # series単位の入出力だけ追加で渡す（為替・OpenAIはジョブenvから継承）
+          CSV_IN:  output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv
+          CSV_OUT: output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
         run: |
           set -euo pipefail
-          IN="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv"
-          OUT="output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv"
-          if [ -s "$IN" ]; then
-            export CSV_IN="$IN"
-            export CSV_OUT="$OUT"
+          if [ -s "$CSV_IN" ]; then
             python tools/translate_columns.py
           else
-            echo "Skip translate: $IN not found."
+            echo "Skip translate: $CSV_IN not found."
           fi
 
       - name: Upload artifact (per series)
@@ -112,6 +112,10 @@ jobs:
   autohome_config_to_csv:
     if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
+    # ← ここでも Secrets をジョブ環境へ
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CURRENCY: ${{ secrets.CURRENCY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,8 +132,6 @@ jobs:
           pip install pandas openai
 
       - name: Translate columns (JA)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           # 従来運用: CSV_IN / CSV_OUT を外から与える or デフォルト(7578)を使う
