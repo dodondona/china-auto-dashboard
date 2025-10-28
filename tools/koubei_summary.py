@@ -172,7 +172,7 @@ def summarize_batch_ja(texts, client: OpenAI):
 
     def _call():
         comp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o-nano",
             response_format={"type": "json_object"},
             messages=[{"role":"system","content":sys_prompt},{"role":"user","content":user_text}],
             temperature=0.0,
