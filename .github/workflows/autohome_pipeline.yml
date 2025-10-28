@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "10 1 3 * *"
 
+permissions:
+  contents: write
+
 jobs:
   autohome_pipeline:
     runs-on: ubuntu-latest
