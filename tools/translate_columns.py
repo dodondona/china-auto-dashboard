@@ -231,22 +231,12 @@ def strip_series_prefix_from_grades(grade_cols: list[str]) -> list[str]:
     regex = re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*", re.IGNORECASE)
     return [regex.sub("", str(c)).strip() or c for c in grade_cols]
 
-# 「2025款」→「2025年モデル」, 「改款」→「改良版」, 「运动型」→「スポーツタイプ」など
 def grade_rule_ja(s: str) -> str:
     t = str(s).strip()
     t = re.sub(r"(\d{4})\s*款", r"\1年モデル", t)
-    # よくある語
-    repl = {
-        "改款": "改良版",
-        "运动型": "スポーツタイプ",
-        "运动": "スポーツ",
-        "四驱": "4WD",
-        "两驱": "2WD",
-        "全驱": "AWD",
-    }
+    repl = {"改款": "改良版","运动型": "スポーツタイプ","运动": "スポーツ","四驱": "4WD","两驱": "2WD","全驱": "AWD"}
     for cn, ja in repl.items():
         t = t.replace(cn, ja)
-    # 余計な接続記号の整形
     t = re.sub(r"\s*[-:：/]\s*", " ", t).strip()
     return t
 
@@ -256,12 +246,9 @@ def main():
     if not Path(SRC).exists():
         raise FileNotFoundError(f"入力CSVが見つかりません: {SRC}")
 
-    # 原文ロード＆軽ノイズ除去
     df = pd.read_csv(SRC, encoding="utf-8-sig").map(clean_any_noise)
-    # ヘッダのブランド正規化（列名をまず補正）
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
-    # ====== セクション／項目：辞書優先→なければLLM ======
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
 
@@ -278,53 +265,34 @@ def main():
     if item_missing:
         item_dict.update(tr.translate_unique(item_missing))
 
-    # JA列を挿入
     df.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_dict.get(str(s).strip(), str(s).strip())))
     df.insert(3, "項目_ja",     df["項目"].map(lambda s: item_dict.get(str(s).strip(),   str(s).strip())))
 
-    # ====== モデル名（グレード列）: 接頭辞カット＋ルール適用＋（必要時LLM） ======
     if TRANSLATE_COLNAMES:
         orig_cols = list(df.columns)
-        fixed = orig_cols[:4]                 # セクション, セクション_ja, 項目, 項目_ja
-        grades = orig_cols[4:]                # 以降がモデル（グレード）列
-
-        # 接頭辞（ブランド＋シリーズ名）を一括カット
+        fixed = orig_cols[:4]
+        grades = orig_cols[4:]
         grades_stripped = strip_series_prefix_from_grades(grades)
-
-        # まずルール変換
         grades_rule_ja = [grade_rule_ja(g) for g in grades_stripped]
-
-        # LLMが必要なケース（上のルールで未カバーな純中文語が残る場合）だけ抽出
-        # 例：完全に中文語が残っている等を簡易検出（漢字＋空白のみ等）
-        need_llm = []
-        for g in grades_rule_ja:
-            # 数字・英字・既知記号のみになっていれば LLM 不要
-            if re.fullmatch(r"[0-9A-Za-z\s\-\+\./°]+", g):
-                continue
-            # 典型的に訳したい中国語語彙が残る場合
-            if re.search(r"[\u4e00-\u9fff]", g):
-                need_llm.append(g)
-
-        if need_llm:
-            uniq_need = uniq(need_llm)
-            llm_map = tr.translate_unique(uniq_need)
-        else:
-            llm_map = {}
-
+        need_llm = [g for g in grades_rule_ja if re.search(r"[\u4e00-\u9fff]", g)]
+        llm_map = tr.translate_unique(uniq(need_llm)) if need_llm else {}
         final_grades = [llm_map.get(g, g) for g in grades_rule_ja]
         df.columns = fixed + final_grades
 
-    # ====== 価格行の整形（値セルの翻訳対象からも除外） ======
-    MSRP_JA_RE=re.compile(r"^メーカー希望小売価格$")
-    DEALER_JA_RE=re.compile(r"^ディーラー販売価格（元）$")
-    is_msrp   = df["項目"].isin(PRICE_ITEM_MSRP_CN)  | df["項目_ja"].str.match(MSRP_JA_RE,na=False)
-    is_dealer = df["項目"].isin(PRICE_ITEM_DEALER_CN)| df["項目_ja"].str.match(DEALER_JA_RE,na=False)
+    # ====== 価格行の整形（強化版・円併記復活） ======
+    def normalize_key(s: str) -> str:
+        return re.sub(r"[\u200b\ufeff\u00A0\u3000 \t]+", "", str(s))
+
+    msrp_keys   = {"厂商指导价", "メーカー希望小売価格"}
+    dealer_keys = {"经销商参考价", "经销商报价", "经销商", "ディーラー販売価格（元）"}
+
+    is_msrp   = df["項目"].map(normalize_key).isin(msrp_keys) | df["項目_ja"].map(normalize_key).isin(msrp_keys)
+    is_dealer = df["項目"].map(normalize_key).isin(dealer_keys) | df["項目_ja"].map(normalize_key).isin(dealer_keys)
 
     for col in df.columns[4:]:
-        df.loc[is_msrp,  col]=df.loc[is_msrp,  col].map(lambda s:msrp_to_yuan_and_jpy(s,EXRATE_CNY_TO_JPY))
-        df.loc[is_dealer,col]=df.loc[is_dealer,col].map(lambda s:dealer_to_yuan_only(s))
+        df.loc[is_msrp,  col]  = df.loc[is_msrp,  col].map(lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY))
+        df.loc[is_dealer, col] = df.loc[is_dealer, col].map(lambda s: dealer_to_yuan_only(s))
 
-    # ====== 値セル翻訳（価格行除外・数値/記号類除外） ======
     if TRANSLATE_VALUES:
         numeric_like=re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         tr_values=[]; coords=[]
@@ -342,7 +310,6 @@ def main():
             s=str(df.iat[i,j]).strip()
             df.iat[i,j]=val_map.get(s,s)
 
-    # ====== 出力 ======
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
     df.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
