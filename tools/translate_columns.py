@@ -10,19 +10,24 @@ SERIES_ID = os.environ.get("SERIES_ID", "").strip()
 def resolve_src_dst():
     csv_in  = os.environ.get("CSV_IN", "").strip()
     csv_out = os.environ.get("CSV_OUT", "").strip()
+
     def guess_paths_from_series(sid: str):
         if not sid:
             return None, None
         base = f"output/autohome/{sid}/config_{sid}"
         return Path(f"{base}.csv"), Path(f"{base}.ja.csv")
+
     default_in  = Path("output/autohome/7578/config_7578.csv")
     default_out = Path("output/autohome/7578/config_7578.ja.csv")
+
     src = Path(csv_in)  if csv_in  else None
     dst = Path(csv_out) if csv_out else None
+
     if src is None or dst is None:
         s2, d2 = guess_paths_from_series(SERIES_ID)
         src = src or s2
         dst = dst or d2
+
     src = src or default_in
     dst = dst or default_out
     return src, dst
@@ -50,6 +55,7 @@ STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "tr
 SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
 EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
 CURRENCYFREAKS_KEY = os.environ.get("CURRENCY", "").strip()
+
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 
 # ====== 為替レート（CurrencyFreaks優先 / 失敗時フォールバック） ======
@@ -75,36 +81,40 @@ def get_cny_jpy_rate_fallback(default_rate: float) -> float:
 EXRATE_CNY_TO_JPY = get_cny_jpy_rate_fallback(EXRATE_CNY_TO_JPY)
 
 # ====== 固定訳・正規化 ======
-NOISE_ANY = ["对比","参数","图片","配置","详情"]
-NOISE_PRICE_TAIL = ["询价","计算器","询底价","报价","价格询问","起","起售","到店","经销商"]
+NOISE_ANY = ["对比", "参数", "图片", "配置", "详情"]
+NOISE_PRICE_TAIL = ["询价", "计算器", "询底价", "报价", "价格询问", "起", "起售", "到店", "经销商"]
 
-def clean_any_noise(s:str)->str:
-    s=str(s) if s is not None else ""
-    for w in NOISE_ANY+NOISE_PRICE_TAIL:
-        s=s.replace(w,"")
-    return re.sub(r"\s+"," ",s).strip(" 　-—–")
+def clean_any_noise(s: str) -> str:
+    s = str(s) if s is not None else ""
+    for w in NOISE_ANY + NOISE_PRICE_TAIL:
+        s = s.replace(w, "")
+    return re.sub(r"\s+", " ", s).strip(" 　-—–")
 
-def clean_price_cell(s:str)->str:
-    t=clean_any_noise(s)
+def clean_price_cell(s: str) -> str:
+    t = clean_any_noise(s)
     for w in NOISE_PRICE_TAIL:
-        t=re.sub(rf"(?:\s*{re.escape(w)}\s*)+$","",t)
+        t = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", t)
     return t.strip()
 
-RE_PAREN_ANY_YEN=re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
-RE_ANY_YEN_TOKEN=re.compile(r"(日本円|JPY|[¥￥]|円)")
-def strip_any_yen_tokens(s:str)->str:
-    t=str(s)
-    t=RE_PAREN_ANY_YEN.sub("",t)
-    t=RE_ANY_YEN_TOKEN.sub("",t)
-    return re.sub(r"\s+"," ",t).strip()
+RE_PAREN_ANY_YEN = re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
+RE_ANY_YEN_TOKEN = re.compile(r"(日本円|JPY|[¥￥]|円)")
 
-BRAND_MAP={
-    "BYD":"BYD","比亚迪":"BYD",
-    "奔驰":"メルセデス・ベンツ","梅赛德斯-奔驰":"メルセデス・ベンツ",
+def strip_any_yen_tokens(s: str) -> str:
+    t = str(s)
+    t = RE_PAREN_ANY_YEN.sub("", t)
+    t = RE_ANY_YEN_TOKEN.sub("", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+BRAND_MAP = {
+    "BYD": "BYD",
+    "比亚迪": "BYD",
+    "奔驰": "メルセデス・ベンツ",
+    "梅赛德斯-奔驰": "メルセデス・ベンツ",
 }
 
-FIX_JA_ITEMS={
-　　"基本参数": "基本仕様",
+# ====== セクション/項目の辞書（CN→JA：辞書優先、欠けはLLMで補完） ======
+FIX_JA_SECTIONS = {
+    "基本参数": "基本仕様",
     "车身": "車体",
     "发动机": "エンジン",
     "变速箱": "トランスミッション",
@@ -128,6 +138,9 @@ FIX_JA_ITEMS={
     "空调/冰箱": "エアコン・冷蔵庫",
     "颜色": "カラー",
     "选装包": "オプションパッケージ",
+}
+
+FIX_JA_ITEMS = {
     "厂商指导价(元)": "メーカー希望小売価格(元)",
     "经销商报价": "ディーラー販売価格（元）",
     "厂商": "メーカー",
@@ -159,7 +172,6 @@ FIX_JA_ITEMS={
     "座位数(个)": "乗車定員(名)",
     "油箱容积(L)": "燃料タンク容量(L)",
     "行李厢容积(L)": "ラゲッジ容量(L)",
-    "汽车级别": "自動車区分",
     "工信部纯电续航里程(km)": "公称EV航続距離(km)",
     "电动机(Peak功率kW)": "モーター(ピーク出力kW)",
     "电动机(Peak扭矩N·m)": "モーター(ピークトルクN·m)",
@@ -178,16 +190,13 @@ FIX_JA_ITEMS={
     "缸径(mm)": "ボア(mm)",
     "行程(mm)": "ストローク(mm)",
     "最大马力(Ps)": "最高出力(Ps)",
-    "最大扭矩(N·m)": "最大トルク(N·m)",
     "最大扭矩转速(rpm)": "最大トルク発生回転数(rpm)",
-    "最大功率(kW)": "最大出力(kW)",
     "最大功率转速(rpm)": "最大出力発生回転数(rpm)",
     "燃料形式": "燃料種類",
     "燃油标号": "燃料オクタン価",
     "供油方式": "燃料供給方式",
     "缸体材质": "シリンダーブロック材質",
     "缸盖材质": "シリンダーヘッド材質",
-    "环保标准": "環境基準",
     "电机类型": "モーター種類",
     "电动机总功率(kW)": "モーター総出力(kW)",
     "电动机总扭矩(N·m)": "モーター総トルク(N·m)",
@@ -235,7 +244,6 @@ FIX_JA_ITEMS={
     "上坡辅助": "ヒルスタートアシスト",
     "陡坡缓降": "ヒルディセントコントロール",
     "可变转向比": "可変ステアレシオ",
-    "前/后中央差速器锁止功能": "センターデフロック(前/後)",
     "运动驾驶模式": "スポーツモード",
     "经济驾驶模式": "エコモード",
     "雪地/沙地等驾驶模式": "スノー/サンド等ドライブモード",
@@ -256,7 +264,6 @@ FIX_JA_ITEMS={
     "DOW开门预警": "ドアオープン警報(DOW)",
     "前/后驻车雷达": "前/後パーキングセンサー",
     "倒车车侧预警系统": "後退時車両接近警報",
-    "并线辅助/变道辅助": "車線変更支援",
     "透明底盘": "フロア透過表示",
     "全速自适应巡航": "全車速ACC",
     "自动泊车入位": "自動駐車",
@@ -281,13 +288,11 @@ FIX_JA_ITEMS={
     "牵引力控制(ASR/TCS/TRC等)": "トラクションコントロール",
     "车身稳定控制(ESC/ESP/DSC等)": "横滑り防止装置",
     "并线辅助(BSD/CTA等)": "BSD/CTA",
-    "车门自动解锁": "ドア自動解錠",
     "儿童座椅接口(ISOFIX)": "ISOFIXチャイルドシート固定",
     "被动行人保护": "歩行者保護(受動)",
     "前排安全带调节": "フロントシートベルト調整",
     "后排安全带调节": "リヤシートベルト調整",
     "车内灭火器": "車載消火器",
-    "ISOFIX儿童座椅接口": "ISOFIXチャイルドシート固定",
     "副驾驶安全气囊关闭": "助手席エアバッグオフ",
     "中控屏幕尺寸": "センターディスプレイサイズ",
     "中控彩色屏幕": "センターカラーディスプレイ",
@@ -328,8 +333,6 @@ FIX_JA_ITEMS={
     "隐私玻璃": "プライバシーガラス",
     "感应雨刷": "オートワイパー",
     "后雨刷": "リヤワイパー",
-    "前/后排侧气囊": "前/後席サイドエアバッグ",
-    "前/后排头部气囊(气帘)": "前/後席カーテンエアバッグ",
     "矩阵式大灯": "マトリクスLEDヘッドライト",
     "自适应远近光": "アダプティブハイビーム",
     "自动大灯": "オートライト",
@@ -430,13 +433,6 @@ FIX_JA_ITEMS={
     "转向助力类型": "パワステ形式",
     "转向比": "ステアリング比",
     "最小转弯半径(m)": "最小回転半径(m)",
-    "方向盘材质": "ステアリング素材",
-    "方向盘加热": "ステアリングヒーター",
-    "方向盘换挡": "パドルシフト",
-    "方向盘电动调节": "電動ステアリング調整",
-    "方向盘记忆": "ステアリングメモリー",
-    "方向盘调节": "ステアリング調整",
-    "方向盘样式": "ステアリングデザイン",
     "行车记录仪": "ドライブレコーダー",
     "内置行车记录仪": "内蔵ドライブレコーダー",
     "雷达探测器": "レーダー探知機",
@@ -444,43 +440,42 @@ FIX_JA_ITEMS={
     "驾驶辅助影像": "運転支援映像",
     "手机APP远程功能": "スマホアプリ遠隔操作",
     "远程启动功能": "リモートスタート機能",
-    "道路交通标识识别": "道路標識認識",
     "ETC装置": "ETC装置",
-    "V2X": "V2X",
+    "V2X": "V2X"
 }
-FIX_JA_SECTIONS={"被动安全":"衝突安全"}
 
-# ====== 金額整形（万元→元→円） ======
+# ====== 金額整形（万元→元→円、「日本円 約…円」） ======
 RE_WAN = re.compile(r"(?P<num>\d+(?:\.\d+)?)\s*万")
-RE_YUAN= re.compile(r"(?P<num>[\d,]+)\s*元")
+RE_YUAN = re.compile(r"(?P<num>[\d,]+)\s*元")
 
-def parse_cny(text:str):
-    t=str(text)
-    m1=RE_WAN.search(t)
-    if m1:return float(m1.group("num"))*10000.0
-    m2=RE_YUAN.search(t)
-    if m2:return float(m2.group("num").replace(",",""))
+def parse_cny(text: str):
+    t = str(text)
+    m1 = RE_WAN.search(t)
+    if m1:
+        return float(m1.group("num")) * 10000.0
+    m2 = RE_YUAN.search(t)
+    if m2:
+        return float(m2.group("num").replace(",", ""))
     return None
 
-def _format_yuan_and_jpy(cell:str, rate:float)->str:
-    """
-    共通：万元/元 → 「<x>万元（日本円 約N円）」 形式へ。
-    """
-    t=strip_any_yen_tokens(clean_price_cell(cell))
-    if not t or t in {"-","–","—"}:return t
-    cny=parse_cny(t)
-    if cny is None:
-        if("元"not in t)and RE_WAN.search(t):t=f"{t}元"
+def _format_yuan_and_jpy(cell: str, rate: float) -> str:
+    t = strip_any_yen_tokens(clean_price_cell(cell))
+    if not t or t in {"-", "–", "—"}:
         return t
-    m1=RE_WAN.search(t)
-    yuan_disp=f"{m1.group('num')}万元" if m1 else (t if"元"in t else f"{t}元")
-    jpy=int(round(cny*rate))
-    return f"{yuan_disp}（日本円 約{jpy:,}円）"  # ← 「約」を追加、「日本円」と「約」の間に半角スペース
+    cny = parse_cny(t)
+    if cny is None:
+        if ("元" not in t) and RE_WAN.search(t):
+            t = f"{t}元"
+        return t
+    m1 = RE_WAN.search(t)
+    yuan_disp = f"{m1.group('num')}万元" if m1 else (t if "元" in t else f"{t}元")
+    jpy = int(round(cny * EXRATE_CNY_TO_JPY))
+    return f"{yuan_disp}（日本円 約{jpy:,}円）"
 
-def msrp_to_yuan_and_jpy(cell:str,rate:float)->str:
+def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
     return _format_yuan_and_jpy(cell, rate)
 
-def dealer_to_yuan_and_jpy(cell:str,rate:float)->str:
+def dealer_to_yuan_and_jpy(cell: str, rate: float) -> str:
     return _format_yuan_and_jpy(cell, rate)
 
 # ====== 翻訳ユーティリティ ======
@@ -488,25 +483,29 @@ def uniq(seq):
     s, out = set(), []
     for x in seq:
         if x not in s:
-            s.add(x); out.append(x)
+            s.add(x)
+            out.append(x)
     return out
 
 def chunked(xs, n):
     for i in range(0, len(xs), n):
         yield xs[i:i+n]
 
-def parse_json_relaxed(content:str,terms:list[str])->dict[str,str]:
+def parse_json_relaxed(content: str, terms: list[str]) -> dict[str, str]:
     try:
-        d=json.loads(content)
-        if isinstance(d,dict)and"translations"in d:
-            return {str(t["cn"]).strip():str(t.get("ja",t["cn"])).strip()
-                    for t in d["translations"] if t.get("cn")}
+        d = json.loads(content)
+        if isinstance(d, dict) and "translations" in d:
+            return {
+                str(t["cn"]).strip(): str(t.get("ja", t["cn"])).strip()
+                for t in d["translations"]
+                if t.get("cn")
+            }
     except Exception:
         pass
-    pairs=re.findall(r'"cn"\s*:\s*"([^"]+)"\s*,\s*"ja"\s*:\s*"([^"]*)"', content)
+    pairs = re.findall(r'"cn"\s*:\s*"([^"]+)"\s*,\s*"ja"\s*:\s*"([^"]*)"', content)
     if pairs:
-        return {cn.strip():ja.strip() for cn,ja in pairs}
-    return {t:t for t in terms}
+        return {cn.strip(): ja.strip() for cn, ja in pairs}
+    return {t: t for t in terms}
 
 class Translator:
     def __init__(self, model: str, api_key: str):
@@ -520,35 +519,40 @@ class Translator:
             "自然で簡潔な日本語へ翻訳してください。数値・年式・排量・AT/MT等の記号は保持。"
             "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
         )
-    def translate_batch(self, terms: list[str]) -> dict[str,str]:
+
+    def translate_batch(self, terms: list[str]) -> dict[str, str]:
         if not terms:
             return {}
-        msgs=[
-            {"role":"system","content":self.system},
-            {"role":"user","content":json.dumps({"terms":terms},ensure_ascii=False)},
+        msgs = [
+            {"role": "system", "content": self.system},
+            {"role": "user", "content": json.dumps({"terms": terms}, ensure_ascii=False)},
         ]
         try:
-            resp=self.client.chat.completions.create(
-                model=self.model,messages=msgs,temperature=0,
-                response_format={"type":"json_object"},
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=msgs,
+                temperature=0,
+                response_format={"type": "json_object"},
             )
-            content=resp.choices[0].message.content or ""
+            content = resp.choices[0].message.content or ""
             return parse_json_relaxed(content, terms)
         except Exception as e:
             print("❌ OpenAI error:", repr(e))
             return {t: t for t in terms}
-    def translate_unique(self, unique_terms: list[str]) -> dict[str,str]:
-        out={}
+
+    def translate_unique(self, unique_terms: list[str]) -> dict[str, str]:
+        out = {}
         for chunk in chunked(unique_terms, BATCH_SIZE):
-            for attempt in range(1, RETRIES+1):
+            for attempt in range(1, RETRIES + 1):
                 try:
                     out.update(self.translate_batch(chunk))
                     break
                 except Exception as e:
                     print(f"❌ translate_unique error attempt={attempt}:", repr(e))
-                    if attempt==RETRIES:
-                        for t in chunk: out.setdefault(t, t)
-                    time.sleep(SLEEP_BASE*attempt)
+                    if attempt == RETRIES:
+                        for t in chunk:
+                            out.setdefault(t, t)
+                    time.sleep(SLEEP_BASE * attempt)
         return out
 
 # ====== モデル名・ルール ======
@@ -558,33 +562,46 @@ LEADING_TOKEN_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9\- 
 def cut_before_year_or_kuan(s: str) -> str | None:
     s = s.strip()
     m = YEAR_TOKEN_RE.search(s)
-    if m: return s[:m.start()].strip()
+    if m:
+        return s[:m.start()].strip()
     kuan = re.search(r"款", s)
-    if kuan: return s[:kuan.start()].strip()
+    if kuan:
+        return s[:kuan.start()].strip()
     m2 = LEADING_TOKEN_RE.match(s)
     return m2.group(0).strip() if m2 else None
 
 def detect_common_series_prefix(cols: list[str]) -> str | None:
-    cand=[]
+    cand = []
     for c in cols:
         p = cut_before_year_or_kuan(str(c))
-        if p and len(p) >= 2: cand.append(p)
-    if not cand: return None
+        if p and len(p) >= 2:
+            cand.append(p)
+    if not cand:
+        return None
     from collections import Counter
     top, ct = Counter(cand).most_common(1)[0]
-    return re.escape(top) if ct >= max(1, int(0.6*len(cols))) else None
+    return re.escape(top) if ct >= max(1, int(0.6 * len(cols))) else None
 
 def strip_series_prefix_from_grades(grade_cols: list[str]) -> list[str]:
-    if not grade_cols or not STRIP_GRADE_PREFIX: return grade_cols
+    if not grade_cols or not STRIP_GRADE_PREFIX:
+        return grade_cols
     pattern = SERIES_PREFIX_RE or detect_common_series_prefix(grade_cols)
-    if not pattern: return grade_cols
+    if not pattern:
+        return grade_cols
     regex = re.compile(rf"^\s*(?:{pattern})\s*[-:：/ ]*\s*", re.IGNORECASE)
     return [regex.sub("", str(c)).strip() or c for c in grade_cols]
 
 def grade_rule_ja(s: str) -> str:
     t = str(s).strip()
     t = re.sub(r"(\d{4})\s*款", r"\1年モデル", t)
-    repl = {"改款": "改良版","运动型": "スポーツタイプ","运动": "スポーツ","四驱": "4WD","两驱": "2WD","全驱": "AWD"}
+    repl = {
+        "改款": "改良版",
+        "运动型": "スポーツタイプ",
+        "运动": "スポーツ",
+        "四驱": "4WD",
+        "两驱": "2WD",
+        "全驱": "AWD",
+    }
     for cn, ja in repl.items():
         t = t.replace(cn, ja)
     t = re.sub(r"\s*[-:：/]\s*", " ", t).strip()
@@ -599,17 +616,20 @@ def main():
     df = pd.read_csv(SRC, encoding="utf-8-sig")
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
 
-    # セクション/項目 辞書→不足分のみLLM
+    # セクション/項目：辞書を先に適用、辞書に無いキーのみLLMで補完
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
 
     tr = Translator(MODEL, API_KEY)
     sec_dict = {**FIX_JA_SECTIONS}
     item_dict = {**FIX_JA_ITEMS}
+
     sec_missing  = [s for s in uniq_sec  if s not in sec_dict]
     item_missing = [s for s in uniq_item if s not in item_dict]
-    if sec_missing:  sec_dict.update(tr.translate_unique(sec_missing))
-    if item_missing: item_dict.update(tr.translate_unique(item_missing))
+    if sec_missing:
+        sec_dict.update(tr.translate_unique(sec_missing))
+    if item_missing:
+        item_dict.update(tr.translate_unique(item_missing))
 
     df.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_dict.get(str(s).strip(), str(s).strip())))
     df.insert(3, "項目_ja",       df["項目"].map(lambda s: item_dict.get(str(s).strip(),   str(s).strip())))
@@ -626,11 +646,11 @@ def main():
         final_grades = [llm_map.get(g, g) for g in grades_rule_ja]
         df.columns = fixed + final_grades
 
-    # ====== 価格行検出（部分一致＋括弧等の正規化）
+    # 価格行検出（部分一致＋括弧等の正規化）
     def norm_key(s: str) -> str:
         s = str(s)
         s = re.sub(r"[ \t\u3000\u00A0\u200b\ufeff]+", "", s)
-        s = re.sub(r"[（(].*?[）)]", "", s)  # 括弧内削除
+        s = re.sub(r"[（(].*?[）)]", "", s)
         return s
 
     key_cn_norm = df["項目"].map(norm_key)
@@ -655,8 +675,8 @@ def main():
         j = is_dealer.idxmax()
         print(f"  sample Dealer key: CN='{df.at[j,'項目']}', JA='{df.at[j,'項目_ja']}'")
 
-    # ====== 価格行変換（MSRP/Dealerとも「日本円 約…円」へ統一）＋ロック
-    converted_cells = {}  # (row, col) -> str
+    # 価格行変換（MSRP/Dealerとも「日本円 約…円」へ統一）＋ロック
+    converted_cells = {}
     for col in df.columns[4:]:
         for i in df.index[is_msrp]:
             newv = msrp_to_yuan_and_jpy(df.iat[i, df.columns.get_loc(col)], EXRATE_CNY_TO_JPY)
@@ -673,29 +693,32 @@ def main():
                 continue
             df_vals.iat[i, j] = clean_any_noise(df_vals.iat[i, j])
 
-    # ====== 値セル LLM 翻訳（価格行は対象外）
+    # 値セル LLM 翻訳（価格行は対象外）
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        tr_values=[]; coords=[]
+        tr_values, coords = [], []
         for i in range(len(df_vals)):
             if is_msrp.iloc[i] or is_dealer.iloc[i]:
                 continue
             for j in range(4, len(df_vals.columns)):
                 v = str(df_vals.iat[i, j]).strip()
-                if v in {"","●","○","–","-","—"}: continue
-                if numeric_like.fullmatch(v): continue
-                tr_values.append(v); coords.append((i, j))
+                if v in {"", "●", "○", "–", "-", "—"}:
+                    continue
+                if numeric_like.fullmatch(v):
+                    continue
+                tr_values.append(v)
+                coords.append((i, j))
         uniq_vals = uniq(tr_values)
         val_map = Translator(MODEL, API_KEY).translate_unique(uniq_vals) if uniq_vals else {}
         for (i, j) in coords:
             s = str(df_vals.iat[i, j]).strip()
             df.iat[i, j] = val_map.get(s, s)
 
-    # ====== ロック再適用（価格表記を固定）
+    # ロック再適用（価格表記を固定）
     for (i, col), val in converted_cells.items():
         df.at[i, col] = val
 
-    # ====== 出力 ======
+    # 出力
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(DST_PRIMARY,   index=False, encoding="utf-8-sig")
     df.to_csv(DST_SECONDARY, index=False, encoding="utf-8-sig")
