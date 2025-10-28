@@ -14,6 +14,11 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      # Secretsを環境変数として渡す（最重要）
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CURRENCY: ${{ secrets.CURRENCY }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,14 +50,12 @@ jobs:
       - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CACHE_REPO_DIR: cache     # ← 統一：cache/<ID>/ に保存
         run: |
           set -euo pipefail
           IN="output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.csv"
           echo "CSV_IN check: $IN"
           if [ -f "$IN" ]; then
-            # 直前のキャッシュ状況も表示（存在していても翻訳ロジックは従来通り）
             echo "Pre-run cache listing:"
             ls -l "cache/${{ inputs.series_id }}" || echo "(no cache dir)"
             export CSV_IN="$IN"
@@ -71,7 +74,6 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          # cache と outputs を一括 add（存在しないときもエラーにしない）
           mkdir -p "cache/${{ inputs.series_id }}" || true
           git add -A "cache/${{ inputs.series_id }}/" || true
           git add -A "output/autohome/${{ inputs.series_id }}/" || true
