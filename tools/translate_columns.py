@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, json, time, re
+import os, json, time, re, urllib.request
 from pathlib import Path
 import pandas as pd
 from openai import OpenAI
@@ -57,6 +57,33 @@ SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
 EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
 
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
+
+# ====== 為替レート自動取得（無料API優先 / 失敗時フォールバック） ======
+def _fetch_json(url: str, timeout: float = 6.0):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def get_cny_jpy_rate_fallback(default_rate: float) -> float:
+    try:
+        data = _fetch_json("https://api.frankfurter.dev/latest?from=CNY&to=JPY")
+        rate = float(data["rates"]["JPY"])
+        if rate > 0:
+            print(f"💱 Rate from Frankfurter: {rate}")
+            return rate
+    except Exception:
+        pass
+    try:
+        data = _fetch_json("https://api.exchangerate.host/latest?base=CNY&symbols=JPY")
+        rate = float(data["rates"]["JPY"])
+        if rate > 0:
+            print(f"💱 Rate from exchangerate.host: {rate}")
+            return rate
+    except Exception:
+        pass
+    print(f"⚠️  Using fallback rate: {default_rate}")
+    return float(default_rate)
+
+EXRATE_CNY_TO_JPY = get_cny_jpy_rate_fallback(EXRATE_CNY_TO_JPY)
 
 # ====== 固定訳・正規化 ======
 NOISE_ANY = ["对比","参数","图片","配置","详情"]
@@ -131,7 +158,7 @@ def dealer_to_yuan_only(cell:str)->str:
     if("元"not in t)and RE_WAN.search(t):t=f"{t}元"
     return t
 
-# ====== LLM 翻訳ユーティリティ ======
+# ====== 翻訳ユーティリティ（以下は変更なし） ======
 def uniq(seq):
     s, out = set(), []
     for x in seq:
@@ -246,39 +273,24 @@ def main():
     if not Path(SRC).exists():
         raise FileNotFoundError(f"入力CSVが見つかりません: {SRC}")
 
-    # 原文そのまま読み込み（ここでは全体一括のノイズ除去はしない）
-    df = pd.read_csv(SRC, encoding="utf-8-sig")
-
-    # 値セル等のノイズ除去用にコピー（セクション／項目キーは原文のまま扱う）
-    df_vals = df.copy().map(clean_any_noise)
-
-    # ヘッダのブランド正規化
+    df = pd.read_csv(SRC, encoding="utf-8-sig").map(clean_any_noise)
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
-    df_vals.columns = df.columns  # 同期
 
-    # セクション／項目（原文キーで辞書→なければLLM）
     uniq_sec  = uniq([str(x).strip() for x in df["セクション"].fillna("") if str(x).strip()])
     uniq_item = uniq([str(x).strip() for x in df["項目"].fillna("")    if str(x).strip()])
 
     tr = Translator(MODEL, API_KEY)
-
     sec_dict = {**FIX_JA_SECTIONS}
     item_dict = {**FIX_JA_ITEMS}
 
     sec_missing  = [s for s in uniq_sec  if s not in sec_dict]
     item_missing = [s for s in uniq_item if s not in item_dict]
-
-    if sec_missing:
-        sec_dict.update(tr.translate_unique(sec_missing))
-    if item_missing:
-        item_dict.update(tr.translate_unique(item_missing))
+    if sec_missing: sec_dict.update(tr.translate_unique(sec_missing))
+    if item_missing: item_dict.update(tr.translate_unique(item_missing))
 
     df.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_dict.get(str(s).strip(), str(s).strip())))
     df.insert(3, "項目_ja",     df["項目"].map(lambda s: item_dict.get(str(s).strip(),   str(s).strip())))
-    df_vals.insert(1, "セクション_ja", df["セクション"].map(lambda s: sec_dict.get(str(s).strip(), str(s).strip())))
-    df_vals.insert(3, "項目_ja",     df["項目"].map(lambda s: item_dict.get(str(s).strip(),   str(s).strip())))
 
-    # モデル名（グレード列）
     if TRANSLATE_COLNAMES:
         orig_cols = list(df.columns)
         fixed = orig_cols[:4]
@@ -289,32 +301,20 @@ def main():
         llm_map = tr.translate_unique(uniq(need_llm)) if need_llm else {}
         final_grades = [llm_map.get(g, g) for g in grades_rule_ja]
         df.columns = fixed + final_grades
-        df_vals.columns = df.columns  # 同期
 
-    # 価格行検出（原文キー・訳語キーのどちらでもヒット、括弧や空白を正規化して判定）
-    def norm_key_for_match(s: str) -> str:
-        s = str(s)
-        s = re.sub(r"[ \t\u3000\u00A0\u200b\ufeff]+", "", s)
-        s = re.sub(r"[（(].*?[）)]", "", s)  # 括弧内削除
-        return s
+    def normalize_key(s: str) -> str:
+        return re.sub(r"[\u200b\ufeff\u00A0\u3000 \t]+", "", str(s))
 
     msrp_keys   = {"厂商指导价", "メーカー希望小売価格"}
-    dealer_keys = {"经销商参考价", "经销商报价", "经销商", "ディーラー販売価格（元）", "ディーラー販売価格"}
+    dealer_keys = {"经销商参考价", "经销商报价", "经销商", "ディーラー販売価格（元）"}
 
-    key_cn_norm = df["項目"].map(norm_key_for_match)
-    key_ja_norm = df["項目_ja"].map(norm_key_for_match)
+    is_msrp   = df["項目"].map(normalize_key).isin(msrp_keys) | df["項目_ja"].map(normalize_key).isin(msrp_keys)
+    is_dealer = df["項目"].map(normalize_key).isin(dealer_keys) | df["項目_ja"].map(normalize_key).isin(dealer_keys)
 
-    is_msrp   = key_cn_norm.isin(msrp_keys)   | key_ja_norm.isin(msrp_keys)   | key_cn_norm.str.contains("厂商指导", na=False)
-    is_dealer = key_cn_norm.isin(dealer_keys) | key_ja_norm.isin(dealer_keys) | key_cn_norm.str.contains("经销商", na=False)
-
-    # 価格セル整形はノイズ除去済み側（df_vals）で実行し、結果を df に反映
     for col in df.columns[4:]:
-        df_vals.loc[is_msrp,  col] = df_vals.loc[is_msrp,  col].map(lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY))
-        df_vals.loc[is_dealer, col] = df_vals.loc[is_dealer, col].map(lambda s: dealer_to_yuan_only(s))
-        df.loc[is_msrp,  col] = df_vals.loc[is_msrp,  col]
-        df.loc[is_dealer, col] = df_vals.loc[is_dealer, col]
+        df.loc[is_msrp,  col]  = df.loc[is_msrp,  col].map(lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY))
+        df.loc[is_dealer, col] = df.loc[is_dealer, col].map(lambda s: dealer_to_yuan_only(s))
 
-    # 値セル翻訳（価格行除外・数値/記号類除外）
     if TRANSLATE_VALUES:
         numeric_like=re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         tr_values=[]; coords=[]
@@ -322,14 +322,14 @@ def main():
             if is_msrp.iloc[i] or is_dealer.iloc[i]:
                 continue
             for j in range(4,len(df.columns)):
-                v=str(df_vals.iat[i,j]).strip()
+                v=str(df.iat[i,j]).strip()
                 if v in {"","●","○","–","-","—"}: continue
                 if numeric_like.fullmatch(v): continue
                 tr_values.append(v); coords.append((i,j))
         uniq_vals=uniq(tr_values)
         val_map=Translator(MODEL, API_KEY).translate_unique(uniq_vals) if uniq_vals else {}
         for (i,j) in coords:
-            s=str(df_vals.iat[i,j]).strip()
+            s=str(df.iat[i,j]).strip()
             df.iat[i,j]=val_map.get(s,s)
 
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
