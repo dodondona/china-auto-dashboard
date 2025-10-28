@@ -55,37 +55,30 @@ TRANSLATE_COLNAMES = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "tr
 STRIP_GRADE_PREFIX = os.environ.get("STRIP_GRADE_PREFIX", "true").lower() == "true"
 SERIES_PREFIX_RE   = os.environ.get("SERIES_PREFIX", "").strip()
 EXRATE_CNY_TO_JPY  = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
+CURRENCYFREAKS_KEY = os.environ.get("CURRENCY", "").strip()
 
 BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
 
-# ====== 為替レート自動取得（レート方向を自動補正） ======
-def _fetch_json(url: str, timeout: float = 6.0):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
+# ====== 為替レート自動取得（CurrencyFreaks優先 / 失敗時フォールバック） ======
 def get_cny_jpy_rate_fallback(default_rate: float) -> float:
-    rate = None
+    if not CURRENCYFREAKS_KEY:
+        print(f"⚠️ No API key set (CURRENCY). Using fallback rate {default_rate}")
+        return default_rate
+
     try:
-        data = _fetch_json("https://api.frankfurter.dev/latest?from=CNY&to=JPY")
-        rate = float(data["rates"]["JPY"])
-        print(f"💱 Frankfurter raw: {rate}")
-    except Exception:
-        pass
-    if not rate:
-        try:
-            data = _fetch_json("https://api.exchangerate.host/latest?base=CNY&symbols=JPY")
-            rate = float(data["rates"]["JPY"])
-            print(f"💱 exchangerate.host raw: {rate}")
-        except Exception:
-            pass
-    if not rate:
-        print(f"⚠️ Using fallback rate {default_rate}")
-        return float(default_rate)
-    # 方向補正（1CNYあたりのJPY値が1未満の場合は逆数を取る）
-    if rate < 1:
-        rate = 1 / rate
-        print(f"↔️ rate inverted to {rate}")
-    return rate
+        url = f"https://api.currencyfreaks.com/latest?apikey={CURRENCYFREAKS_KEY}&symbols=JPY,CNY"
+        with urllib.request.urlopen(url, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        jpy = float(data["rates"]["JPY"])
+        cny = float(data["rates"]["CNY"])
+        rate = jpy / cny
+        if rate < 1:
+            rate = 1 / rate  # 念のため逆数補正
+        print(f"💱 Rate from CurrencyFreaks: 1CNY = {rate:.2f}JPY")
+        return rate
+    except Exception as e:
+        print(f"⚠️ CurrencyFreaks fetch failed ({e}). Using fallback rate {default_rate}")
+        return default_rate
 
 EXRATE_CNY_TO_JPY = get_cny_jpy_rate_fallback(EXRATE_CNY_TO_JPY)
 
@@ -160,7 +153,5 @@ def dealer_to_yuan_only(cell:str)->str:
     if("元"not in t)and RE_WAN.search(t):t=f"{t}元"
     return t
 
-# ====== Translator 他（略） ======
-# （以降はあなたの現行正常版と同一、改変なし）
-
-# ...（既存の Translator, uniq, chunked, grade_rule_ja 等はそのまま）...
+# ====== （以下、翻訳・出力部はあなたの現行コードそのまま） ======
+# Translatorクラスやmain()などは現行版をコピーでOK。
