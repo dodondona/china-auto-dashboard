@@ -105,6 +105,7 @@ BRAND_MAP={
 
 FIX_JA_ITEMS={
     "厂商指导价":"メーカー希望小売価格",
+    "厂商指导价(元)":"メーカー希望小売価格(元)",
     "经销商参考价":"ディーラー販売価格（元）",
     "经销商报价":"ディーラー販売価格（元）",
     "经销商":"ディーラー販売価格（元）",
@@ -124,7 +125,10 @@ def parse_cny(text:str):
     if m2:return float(m2.group("num").replace(",",""))
     return None
 
-def msrp_to_yuan_and_jpy(cell:str,rate:float)->str:
+def _format_yuan_and_jpy(cell:str, rate:float)->str:
+    """
+    共通：万元/元 → 「<x>万元（日本円 約N円）」 形式へ。
+    """
     t=strip_any_yen_tokens(clean_price_cell(cell))
     if not t or t in {"-","–","—"}:return t
     cny=parse_cny(t)
@@ -134,13 +138,13 @@ def msrp_to_yuan_and_jpy(cell:str,rate:float)->str:
     m1=RE_WAN.search(t)
     yuan_disp=f"{m1.group('num')}万元" if m1 else (t if"元"in t else f"{t}元")
     jpy=int(round(cny*rate))
-    return f"{yuan_disp}（日本円{jpy:,}円）"
+    return f"{yuan_disp}（日本円 約{jpy:,}円）"  # ← 「約」を追加、「日本円」と「約」の間に半角スペース
 
-def dealer_to_yuan_only(cell:str)->str:
-    t=strip_any_yen_tokens(clean_price_cell(cell))
-    if not t or t in {"-","–","—"}:return t
-    if("元"not in t)and RE_WAN.search(t):t=f"{t}元"
-    return t
+def msrp_to_yuan_and_jpy(cell:str,rate:float)->str:
+    return _format_yuan_and_jpy(cell, rate)
+
+def dealer_to_yuan_and_jpy(cell:str,rate:float)->str:
+    return _format_yuan_and_jpy(cell, rate)
 
 # ====== 翻訳ユーティリティ ======
 def uniq(seq):
@@ -285,7 +289,7 @@ def main():
         final_grades = [llm_map.get(g, g) for g in grades_rule_ja]
         df.columns = fixed + final_grades
 
-    # ====== 価格行検出（強化版・部分一致）
+    # ====== 価格行検出（部分一致＋括弧等の正規化）
     def norm_key(s: str) -> str:
         s = str(s)
         s = re.sub(r"[ \t\u3000\u00A0\u200b\ufeff]+", "", s)
@@ -304,7 +308,6 @@ def main():
         key_ja_norm.str.contains("ディーラー販売価格", na=False)
     )
 
-    # ログ（実行有無と件数を可視化）
     msrp_count = int(is_msrp.sum())
     dealer_count = int(is_dealer.sum())
     print(f"🔎 price rows: msrp={msrp_count}, dealer={dealer_count}")
@@ -315,17 +318,17 @@ def main():
         j = is_dealer.idxmax()
         print(f"  sample Dealer key: CN='{df.at[j,'項目']}', JA='{df.at[j,'項目_ja']}'")
 
-    # ====== 価格行の変換（万元→元→円）＋ ロック（後段で再適用）
+    # ====== 価格行変換（MSRP/Dealerとも「日本円 約…円」へ統一）＋ロック
     converted_cells = {}  # (row, col) -> str
     for col in df.columns[4:]:
         for i in df.index[is_msrp]:
             newv = msrp_to_yuan_and_jpy(df.iat[i, df.columns.get_loc(col)], EXRATE_CNY_TO_JPY)
             converted_cells[(i, col)] = newv
         for i in df.index[is_dealer]:
-            newv = dealer_to_yuan_only(df.iat[i, df.columns.get_loc(col)])
+            newv = dealer_to_yuan_and_jpy(df.iat[i, df.columns.get_loc(col)], EXRATE_CNY_TO_JPY)
             converted_cells[(i, col)] = newv
 
-    # まず値セルをクリーンアップ（価格行は除外）
+    # 値セルクリーン（価格行は除外）
     df_vals = df.copy()
     for i in df_vals.index:
         for j in range(4, len(df_vals.columns)):
@@ -333,7 +336,7 @@ def main():
                 continue
             df_vals.iat[i, j] = clean_any_noise(df_vals.iat[i, j])
 
-    # ====== 値セル LLM 翻訳（価格行は対象外） ======
+    # ====== 値セル LLM 翻訳（価格行は対象外）
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
         tr_values=[]; coords=[]
@@ -351,7 +354,7 @@ def main():
             s = str(df_vals.iat[i, j]).strip()
             df.iat[i, j] = val_map.get(s, s)
 
-    # ====== ロック再適用（LLMが上書きしても価格表記を固定）
+    # ====== ロック再適用（価格表記を固定）
     for (i, col), val in converted_cells.items():
         df.at[i, col] = val
 
