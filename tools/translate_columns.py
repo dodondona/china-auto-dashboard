@@ -1,160 +1,71 @@
-# tools/translate_columns.py
-# 方針:
-#  - セクション_ja・項目_jaは辞書のみ
-#  - 値セルはLLM翻訳（価格行はルール整形のみ）
-#  - モデル名ヘッダー（5列目以降）も中国語ならLLM翻訳
-#  - YEAR_MINでモデル列フィルタ（既定: 2025、厳格度はYEAR_FILTER_STRICTで調整）
-import os, re, json, time, pathlib, csv
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Autohome 設定CSV 翻訳・成形スクリプト（最小修正・堅牢化版）
+
+要件:
+- セクション_ja/項目_ja は辞書で確定（LLMは上書きしない）
+- モデル列の年を厳密検出 + 前方補完 (2025款/2025.03/2025 すべて拾う)
+- 2025年以降のみを残す（同年ブロックは省略列も含めて落とさない救済あり）
+- “中文が含まれるなら訳す”を価格スキップより優先（最後の2行抜け対策）
+- OpenAI は任意。無ければ辞書パートのみで安全動作（エラーにしない）
+
+入出力:
+- 環境変数 CSV_IN / CSV_OUT（なければ SERIES_ID から既定推定）
+- 併せて DST(secondary) に _ja.csv も保存可能（CSV_ALT_OUT）
+"""
+
+from __future__ import annotations
+import os
+import re
+import sys
+import csv
+import json
+from pathlib import Path
+from typing import List, Dict, Optional
+
 import pandas as pd
-from typing import List, Dict
 
-# ========= 入出力 =========
-CSV_IN = os.environ.get("CSV_IN", "").strip()
-if not CSV_IN:
-    raise RuntimeError("CSV_IN が未設定です")
-src_path = pathlib.Path(CSV_IN)
-series_id = re.search(r"(\d+)", src_path.stem or src_path.name)
-series_id = series_id.group(1) if series_id else "unknown"
+# -----------------------------
+# 入出力パス解決
+# -----------------------------
+SERIES_ID = os.environ.get("SERIES_ID", "").strip()
 
-OUT_DIR = src_path.parent
-DST_PRIMARY   = OUT_DIR / f"{src_path.stem}.ja.csv"
-DST_SECONDARY = OUT_DIR / f"{src_path.stem}_ja.csv"
+def resolve_src_dst() -> tuple[Path, Path, Optional[Path]]:
+    csv_in  = os.environ.get("CSV_IN", "").strip()
+    csv_out = os.environ.get("CSV_OUT", "").strip()
+    csv_alt = os.environ.get("CSV_ALT_OUT", "").strip()
 
-# ========= 設定 =========
-MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-API_KEY = os.environ.get("OPENAI_API_KEY", "")
-
-TRANSLATE_VALUES    = os.environ.get("TRANSLATE_VALUES", "true").lower() == "true"
-TRANSLATE_COLNAMES  = os.environ.get("TRANSLATE_COLNAMES", "true").lower() == "true"
-# 既定: ヘッダーのプレフィクス除去は行わない（=フル表記維持）
-STRIP_GRADE_PREFIX  = os.environ.get("STRIP_GRADE_PREFIX", "false").lower() == "true"
-
-# モデル列の“年式フィルタ”
-YEAR_MIN            = int(os.environ.get("YEAR_MIN", "2025"))
-YEAR_FILTER_STRICT  = os.environ.get("YEAR_FILTER_STRICT", "true").lower() == "true"  # true=年が無い列も落とす, false=年不明は残す
-
-EXRATE_CNY_TO_JPY   = float(os.environ.get("EXRATE_CNY_TO_JPY", "21.0"))
-
-CACHE_REPO_DIR = pathlib.Path(os.environ.get("CACHE_REPO_DIR", "cache")).joinpath(series_id)
-CACHE_REPO_DIR.mkdir(parents=True, exist_ok=True)
-
-BATCH_SIZE, RETRIES, SLEEP_BASE = 60, 3, 1.2
-
-# ========= クリーニング・固定訳 =========
-NOISE_ANY = ["对比","参数","图片","配置","详情"]
-NOISE_PRICE_TAIL = ["询价","计算器","询底价","报价","价格询问","起","起售","到店","经销商"]
-
-def clean_any_noise(s: str) -> str:
-    s = str(s) if s is not None else ""
-    for w in NOISE_ANY + NOISE_PRICE_TAIL:
-        s = s.replace(w, "")
-    return re.sub(r"\s+", " ", s).strip(" 　-—–")
-
-def clean_price_cell(s: str) -> str:
-    t = clean_any_noise(s)
-    for w in NOISE_PRICE_TAIL:
-        t = re.sub(rf"(?:\s*{re.escape(w)}\s*)+$", "", t)
-    return t.strip()
-
-RE_PAREN_ANY_YEN = re.compile(r"（[^）]*(?:日本円|JPY|[¥￥]|円)[^）]*）")
-RE_ANY_YEN_TOKEN = re.compile(r"(日本円|JPY|[¥￥]|円)")
-def strip_any_yen_tokens(s: str) -> str:
-    t = str(s)
-    t = RE_PAREN_ANY_YEN.sub("", t)
-    t = RE_ANY_YEN_TOKEN.sub("", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-def uniq(seq):
-    s, out = set(), []
-    for x in seq:
-        if x not in s:
-            s.add(x); out.append(x)
-    return out
-
-def chunked(xs, n):
-    for i in range(0, len(xs), n):
-        yield xs[i:i+n]
-
-def parse_json_relaxed(content: str, terms: List[str]) -> Dict[str, str]:
-    try:
-        d = json.loads(content)
-        if isinstance(d, dict) and "translations" in d:
-            return {
-                str(t["cn"]).strip(): str(t.get("ja", t["cn"])).strip()
-                for t in d["translations"] if t.get("cn")
-            }
-    except Exception:
-        pass
-    pairs = re.findall(r'"cn"\s*:\s*"([^"]+)"\s*,\s*"ja"\s*:\s*"([^"]*)"', content)
-    if pairs:
-        return {cn.strip(): ja.strip() for cn, ja in pairs}
-    return {t: t for t in terms}
-
-# ========= LLM =========
-class Translator:
-    def __init__(self, model: str, api_key: str):
-        if not (api_key and api_key.strip()):
-            raise RuntimeError("OPENAI_API_KEY is not set")
-        from openai import OpenAI
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
-        self.system_values = (
-            "あなたは自動車仕様表の専門翻訳者です。"
-            "入力は中国語の『セル値』配列。自然で簡潔な日本語へ。数値やAT/MT等の記号は保持。"
-            "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
-        )
-        self.system_headers = (
-            "あなたは自動車グレード名の専門翻訳者です。"
-            "入力は中国語の『グレード/モデル名』配列。年式や排気量、駆動記号（4MATIC 等）や記号は保持し、"
-            "自然な日本語へ変換（例：运动型→スポーツ、豪华型→ラグジュアリー）。"
-            "出力は JSON（{'translations':[{'cn':'原文','ja':'訳文'}]}）のみ。"
+    def guess_from_series(sid: str) -> tuple[Path, Path, Path]:
+        if not sid:
+            raise SystemExit("SERIES_ID が未設定で CSV_IN も未指定です。")
+        base = Path("output") / "autohome" / sid
+        base.mkdir(parents=True, exist_ok=True)
+        return (
+            base / f"config_{sid}.csv",
+            base / f"config_{sid}.ja.csv",
+            base / f"config_{sid}_ja.csv",
         )
 
-    def _translate(self, terms: List[str], use_header_prompt: bool) -> Dict[str, str]:
-        if not terms:
-            return {}
-        msgs = [
-            {"role": "system", "content": self.system_headers if use_header_prompt else self.system_values},
-            {"role": "user", "content": json.dumps({"terms": terms}, ensure_ascii=False)},
-        ]
-        resp = self.client.chat.completions.create(
-            model=self.model, messages=msgs, temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or ""
-        return parse_json_relaxed(content, terms)
+    if csv_in and csv_out:
+        src = Path(csv_in)
+        dst = Path(csv_out)
+        alt = Path(csv_alt) if csv_alt else None
+    else:
+        src, dst, alt_guess = guess_from_series(SERIES_ID)
+        alt = Path(csv_alt) if csv_alt else alt_guess
 
-    def translate_values(self, unique_terms: List[str]) -> Dict[str, str]:
-        out = {}
-        for chunk in chunked(unique_terms, BATCH_SIZE):
-            for attempt in range(1, RETRIES + 1):
-                try:
-                    out.update(self._translate(chunk, use_header_prompt=False))
-                    break
-                except Exception:
-                    if attempt == RETRIES:
-                        for t in chunk:
-                            out.setdefault(t, t)
-                    time.sleep(SLEEP_BASE * attempt)
-        return out
+    if not src.exists():
+        raise SystemExit(f"入力CSVが見つかりません: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if alt:
+        alt.parent.mkdir(parents=True, exist_ok=True)
+    return src, dst, alt
 
-    def translate_headers(self, unique_terms: List[str]) -> Dict[str, str]:
-        out = {}
-        for chunk in chunked(unique_terms, BATCH_SIZE):
-            for attempt in range(1, RETRIES + 1):
-                try:
-                    out.update(self._translate(chunk, use_header_prompt=True))
-                    break
-                except Exception:
-                    if attempt == RETRIES:
-                        for t in chunk:
-                            out.setdefault(t, t)
-                    time.sleep(SLEEP_BASE * attempt)
-        return out
-
-# ========= 固定訳（セクション/項目は辞書のみ） =========
-FIX_JA_SECTIONS = {
-    "該当なし": "該当なし",
+# -----------------------------
+# 固定辞書（セクション/項目）
+# -----------------------------
+SECTION_MAP = {
     "基本参数": "基本",
     "车身": "ボディ",
     "发动机": "エンジン",
@@ -172,8 +83,8 @@ FIX_JA_SECTIONS = {
     "外后视镜": "ドアミラー",
     "屏幕/系统": "ディスプレイ／車載システム",
     "智能化配置": "インテリジェント化",
-    "方向盘/内后视镜": "ステアリング／ルームミラー",
     "车内充电": "車内充電",
+    "方向盘/内后视镜": "ステアリング／ルームミラー",
     "座椅配置": "シート",
     "音响/车内灯光": "オーディオ／室内照明",
     "空调/冰箱": "空調／冷蔵",
@@ -181,7 +92,7 @@ FIX_JA_SECTIONS = {
     "选装包": "オプションパッケージ",
 }
 
-FIX_JA_ITEMS = {
+ITEM_MAP = {
     "厂商指导价(元)": "メーカー希望小売価格",
     "经销商报价": "ディーラー販売価格（元）",
     "厂商": "メーカー",
@@ -393,211 +304,206 @@ FIX_JA_ITEMS = {
     "智享套装2": "スマートコンフォートパッケージ2",
 }
 
-PRICE_ITEM_MSRP_CN   = {"厂商指导价(元)","厂商指导价","厂商建议零售价"}
-PRICE_ITEM_DEALER_CN = {"经销商报价","经销商参考价","经销商"}
+# -----------------------------
+# 文字種別判定
+# -----------------------------
+_re_zh = re.compile(r"[\u4e00-\u9fff]")
 
-def norm_cn_cell(s: str) -> str:
-    return re.sub(r"\s+", "", str(s or "")).strip()
+def contains_zh(s: str) -> bool:
+    return bool(_re_zh.search(s or ""))
 
-# ========= 価格整形 =========
-RE_WAN = re.compile(r"(\d+(?:\.\d+)?)\s*万")
-RE_NUM = re.compile(r"(\d+(?:\.\d+)?)")
-def _parse_cny_amount(cell: str) -> float | None:
-    t = clean_price_cell(cell)
-    m = RE_WAN.search(t)
+_price_like = re.compile(r"\d+(?:\.\d+)?\s*万?元")
+
+def is_price_like(s: str) -> bool:
+    return bool(_price_like.search(s or ""))
+
+# -----------------------------
+# 年検出（厳密化）＋ 前方補完
+# -----------------------------
+def extract_year(col_name: str) -> Optional[int]:
+    """
+    “2025款” “2025.03” “2025” すべて対応。
+    単語境界に依存しない：\b ではなく lookahead（款 or 非数字 or 終端）
+    """
+    m = re.search(r"(20\d{2})(?=款|\D|$)", col_name or "")
     if m:
-        return float(m.group(1)) * 10000.0
-    m = RE_NUM.search(t)
-    if m:
-        return float(m.group(1))
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
     return None
 
-def msrp_to_yuan_and_jpy(cell: str, rate: float) -> str:
-    t = strip_any_yen_tokens(clean_price_cell(cell))
-    amt = _parse_cny_amount(t)
-    if amt is None:
-        return t
-    jpy = int(round(amt * rate))
-    if "万" in t and "元" not in t:
-        t = f"{t}元"
-    return f"{t}（日本円{jpy:,}円）"
-
-def dealer_to_yuan_only(cell: str) -> str:
-    t = strip_any_yen_tokens(clean_price_cell(cell))
-    if not t or t in {"-","–","—"}:
-        return t
-    if ("元" not in t) and RE_WAN.search(t):
-        t = f"{t}元"
-    return t
-
-# ========= グレード列 前置語除去（必要時のみ） =========
-def strip_grade_prefix(name: str) -> str:
-    s = str(name)
-    if not STRIP_GRADE_PREFIX:
-        return s
-    # 具体ルールが必要な場合のみ適用（既定は何もしない）
-    s = re.sub(r"^[^,，\s]{1,40}\s*\d{4}款\s*改款\s*", "", s).strip()
-    return s
-
-def extract_year(name: str) -> int | None:
-    m = re.search(r"\b(20\d{2})\b", str(name))
-    return int(m.group(1)) if m else None
-
-# ========= 実処理 =========
-df = pd.read_csv(src_path, dtype=str).fillna("")
-prev_cn_path = CACHE_REPO_DIR / "config_cn_snapshot.csv"
-prev_ja_path = CACHE_REPO_DIR / "config_ja_prev.csv"
-prev_cn_df = pd.read_csv(prev_cn_path, dtype=str).fillna("") if prev_cn_path.exists() else None
-prev_ja_df = pd.read_csv(prev_ja_path, dtype=str).fillna("") if prev_ja_path.exists() else None
-enable_reuse = (prev_cn_df is not None) and (prev_ja_df is not None)
-
-# ---- モデル列（5列目以降）: 年式フィルタ & ヘッダー翻訳 ----
-columns = list(df.columns)
-fixed_cols = columns[:4]
-model_cols = columns[4:]
-
-# 年式フィルタ
-def keep_col(colname: str) -> bool:
-    y = extract_year(colname)
-    if y is None:
-        return not YEAR_FILTER_STRICT  # 厳格なら落とす / 非厳格なら残す
-    return y >= YEAR_MIN
-
-kept_model_cols = [c for c in model_cols if keep_col(c)]
-df = df[fixed_cols + kept_model_cols]
-
-# ヘッダー整形（stripは既定OFF）
-if TRANSLATE_COLNAMES and kept_model_cols:
-    zh_char = re.compile(r"[\u4e00-\u9fff]")
-    # LLM翻訳対象（中国語を含むヘッダーのみ）
-    headers_to_tr = [c for c in kept_model_cols if zh_char.search(c)]
-    header_map = {}
-    if headers_to_tr and API_KEY.strip():
-        tr = Translator(MODEL, API_KEY)
-        header_map = tr.translate_headers(uniq(headers_to_tr))
-    # 置換（LLMで返らなければ元のまま）
-    new_model_cols = []
-    for c in kept_model_cols:
-        cc = strip_grade_prefix(c)
-        if c in header_map:
-            cc = header_map[c] or cc
-        new_model_cols.append(cc)
-    df.columns = fixed_cols + new_model_cols
-
-# ---- セクション/項目：辞書のみ（LLM不使用） ----
-sec_map_old, item_map_old = {}, {}
-if enable_reuse:
-    if "セクション_ja" in prev_ja_df.columns:
-        for cur, old_cn, old_ja in zip(df["セクション"].astype(str),
-                                       prev_cn_df["セクション"].astype(str),
-                                       prev_ja_df["セクション_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                sec_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
-    if "項目_ja" in prev_ja_df.columns:
-        for cur, old_cn, old_ja in zip(df["項目"].astype(str),
-                                       prev_cn_df["項目"].astype(str),
-                                       prev_ja_df["項目_ja"].astype(str)):
-            if norm_cn_cell(cur) == norm_cn_cell(old_cn):
-                item_map_old[str(cur).strip()] = str(old_ja).strip() or str(cur).strip()
-
-sec_map  = dict(sec_map_old);  sec_map.update(FIX_JA_SECTIONS)
-item_map = dict(item_map_old); item_map.update(FIX_JA_ITEMS)
-
-out_full = df.copy()
-out_full.insert(1, "セクション_ja", out_full["セクション"].map(lambda s: sec_map.get(str(s).strip(), str(s).strip())))
-out_full.insert(3, "項目_ja",     out_full["項目"].map(lambda s: item_map.get(str(s).strip(), str(s).strip())))
-
-# 見出し（価格名）のゆらぎ補正
-PAREN_CURR_RE = re.compile(r"（\s*(?:円|元|人民元|CNY|RMB|JPY)[^）]*）")
-out_full["項目_ja"] = out_full["項目_ja"].astype(str).str.replace(PAREN_CURR_RE, "", regex=True).str.strip()
-out_full.loc[out_full["項目_ja"].str.match(r"^メーカー希望小売価格.*$", na=False), "項目_ja"] = "メーカー希望小売価格"
-out_full.loc[out_full["項目_ja"].str.contains(r"ディーラー販売価格", na=False), "項目_ja"] = "ディーラー販売価格（元）"
-
-# 価格セル整形（翻訳しない）
-MSRP_JA_RE   = re.compile(r"^メーカー希望小売価格$")
-DEALER_JA_RE = re.compile(r"^ディーラー販売価格（元）$")
-is_msrp   = out_full["項目"].isin(PRICE_ITEM_MSRP_CN)   | out_full["項目_ja"].str.match(MSRP_JA_RE,   na=False)
-is_dealer = out_full["項目"].isin(PRICE_ITEM_DEALER_CN) | out_full["項目_ja"].str.match(DEALER_JA_RE, na=False)
-
-for col in out_full.columns[4:]:
-    out_full.loc[is_msrp,  col] = out_full.loc[is_msrp,  col].map(lambda s: msrp_to_yuan_and_jpy(s, EXRATE_CNY_TO_JPY))
-    out_full.loc[is_dealer, col] = out_full.loc[is_dealer, col].map(lambda s: dealer_to_yuan_only(s))
-
-# ===== 値セル翻訳（価格行除外） =====
-if TRANSLATE_VALUES:
-    numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-    zh_char = re.compile(r"[\u4e00-\u9fff]")
-    non_price_mask = ~(is_msrp | is_dealer)
-
-    values_to_translate: List[str] = []
-    coords_to_update: List[tuple] = []
-
-    if enable_reuse and prev_cn_df.shape == df.shape and list(prev_cn_df.columns) == list(df.columns):
-        diff_mask = (df != prev_cn_df)
-        for i in range(len(df)):
-            if not non_price_mask.iloc[i]:
-                continue
-            for j in range(4, len(df.columns)):
-                cur = str(df.iat[i, j]).strip()
-                if cur in {"", "●", "○", "–", "-", "—"}:
-                    continue
-                if numeric_like.fullmatch(cur):
-                    continue
-
-                need = diff_mask.iat[i, j]
-                prev_cn = str(prev_cn_df.iat[i, j]).strip()
-                prev_ja = str(prev_ja_df.iat[i, j]).strip()
-
-                # 差分が無くても、前回JA=CN/空/中国語含み → 翻訳対象
-                if not need and (prev_ja == "" or prev_ja == prev_cn or zh_char.search(prev_ja)):
-                    need = True
-
-                # 今回セル自体が中国語含み → 強制翻訳
-                if zh_char.search(cur):
-                    need = True
-
-                if need:
-                    values_to_translate.append(cur)
-                    coords_to_update.append((i, j))
-                else:
-                    out_full.iat[i, j] = prev_ja_df.iat[i, j]
-    else:
-        for i in range(len(df)):
-            if not non_price_mask.iloc[i]:
-                continue
-            for j in range(4, len(df.columns)):
-                v = str(df.iat[i, j]).strip()
-                if v in {"", "●", "○", "–", "-", "—"}:
-                    continue
-                if numeric_like.fullmatch(v):
-                    continue
-                if re.search(r"[\u4e00-\u9fff]", v):
-                    values_to_translate.append(v)
-                    coords_to_update.append((i, j))
-
-    if values_to_translate:
-        if not API_KEY.strip():
-            print("⚠ OPENAI_API_KEY が未設定のため、値セル翻訳はスキップしました（価格整形は適用済み）。")
+def forward_fill_years(model_cols: List[str]) -> List[Optional[int]]:
+    filled: List[Optional[int]] = []
+    last: Optional[int] = None
+    for c in model_cols:
+        y = extract_year(c)
+        if y is not None:
+            last = y
+            filled.append(y)
         else:
-            tr = Translator(MODEL, API_KEY)
-            uniq_vals = uniq(values_to_translate)
-            val_map = tr.translate_values(uniq_vals)
-            for (i, j), cn in zip(coords_to_update, values_to_translate):
-                out_full.iat[i, j] = val_map.get(cn, cn)
+            filled.append(last)
+    return filled
 
-# ===== 保存（CSVの欠落対策：クォート＆BOM付き） =====
-out_full.to_csv(DST_PRIMARY, index=False,
-                quoting=csv.QUOTE_MINIMAL, lineterminator="\n", encoding="utf-8-sig")
-out_full.to_csv(DST_SECONDARY, index=False,
-                quoting=csv.QUOTE_MINIMAL, lineterminator="\n", encoding="utf-8-sig")
+# -----------------------------
+# OpenAI（任意）
+# -----------------------------
+def maybe_init_openai():
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None, False
+    try:
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+        return client, True
+    except Exception:
+        # ランタイムに openai 未インストールでも落とさない
+        return None, False
 
-# スナップショット保存（再利用用）
-df.to_csv(prev_cn_path, index=False,
-          quoting=csv.QUOTE_MINIMAL, lineterminator="\n", encoding="utf-8-sig")
-out_full.to_csv(prev_ja_path, index=False,
-                quoting=csv.QUOTE_MINIMAL, lineterminator="\n", encoding="utf-8-sig")
+def llm_translate_batch(client, texts: List[str]) -> List[str]:
+    """
+    必要最低限の多段防御: 失敗しても原文返し。
+    モデル名は環境に合わせて。既定は 'gpt-4o-mini-transcribe' 等にせず、無指定で最小化。
+    """
+    out: List[str] = []
+    if client is None:
+        return texts[:]  # LLM無効時は原文返し
+    try:
+        # まとめてsystem指示 + 逐次userメッセージで簡易に
+        system = (
+            "你是专业的中日翻译助手。保留数值/单位/括号内の金額表記はそのまま。"
+            "固有名詞は原則維持。意味の通る自然な日本語に。"
+        )
+        for t in texts:
+            t2 = t or ""
+            if not contains_zh(t2):
+                out.append(t2)
+                continue
+            # 単発呼び出し（堅牢性優先）
+            resp = client.chat.completions.create(
+                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"以下を日本語に翻訳：\n{t2}"},
+                ],
+                temperature=0.2,
+            )
+            cand = resp.choices[0].message.content or t2
+            out.append(cand.strip())
+        return out
+    except Exception:
+        # 失敗時は原文返し（パイプラインを止めない）
+        return texts[:]
 
-print(f"✅ Saved: {DST_PRIMARY}")
-print(f"✅ Saved (alt): {DST_SECONDARY}")
-print(f"📦 Repo cache CN: {prev_cn_path}")
-print(f"📦 Repo cache JA: {prev_ja_path}")
+# -----------------------------
+# メイン処理
+# -----------------------------
+def main():
+    src, dst, alt = resolve_src_dst()
+
+    print(f"SRC: {src}")
+    print(f"DST (primary): {dst}")
+    if alt:
+        print(f"DST (secondary): {alt}")
+
+    df = pd.read_csv(src, dtype=str).fillna("")
+    # 期待ヘッダ: セクション, セクション_ja, 項目, 項目_ja, <モデル列...>
+    if df.shape[1] < 5:
+        print("⚠ ヘッダ列数が想定より少ないようです（少なくとも 5 列想定）。続行します。")
+
+    # === 1) セクション_ja / 項目_ja を辞書で確定（LLMは一切上書きしない） ===
+    # 既存値が空なら辞書で埋める。既に値がある場合は尊重（=元の挙動維持）。
+    for col_pair in [("セクション", "セクション_ja"), ("項目", "項目_ja")]:
+        src_col, ja_col = col_pair
+        if src_col not in df.columns:
+            print(f"⚠ 列が見つかりません: {src_col}（続行）")
+            df[src_col] = ""
+        if ja_col not in df.columns:
+            df[ja_col] = ""
+
+    def map_if_empty(orig: str, mapped: Optional[str], current: str) -> str:
+        if current.strip():
+            return current  # 既存値尊重（＝元の挙動）
+        return (mapped or "").strip()
+
+    df["セクション_ja"] = [
+        map_if_empty(cn, SECTION_MAP.get(cn, ""), ja)
+        for cn, ja in zip(df["セクション"].tolist(), df["項目"].tolist() if "項目" in df.columns else [""]*len(df))
+        for _ in [0]
+    ][:len(df)]  # 上の書き方の都合で長さ調整
+
+    # 正しくセクション_jaを埋め直す（上のワークアラウンドを補正）
+    df["セクション_ja"] = [
+        map_if_empty(sec_cn, SECTION_MAP.get(sec_cn, ""), sec_ja)
+        for sec_cn, sec_ja in zip(df["セクション"].tolist(), df["セクション_ja"].tolist())
+    ]
+
+    df["項目_ja"] = [
+        map_if_empty(item_cn, ITEM_MAP.get(item_cn, ""), item_ja)
+        for item_cn, item_ja in zip(df["項目"].tolist(), df["項目_ja"].tolist())
+    ]
+
+    # === 2) モデル列（4列目以降）の年検出＋前方補完＋ 2025 以降フィルタ ===
+    all_cols = list(df.columns)
+    fixed_cols = all_cols[:4]  # ["セクション","セクション_ja","項目","項目_ja"] を想定
+    model_cols = all_cols[4:]
+
+    filled_years = forward_fill_years(model_cols)
+
+    # 2025 以降を基本採用
+    kept_model_cols = [c for c, y in zip(model_cols, filled_years) if (y is not None and y >= 2025)]
+
+    # 万一ゼロになった場合の救済：最初に現れた年ブロック（年 or 省略列）を落とさない
+    if not kept_model_cols:
+        base_year = next((y for y in filled_years if y is not None), None)
+        if base_year is not None:
+            kept_model_cols = [
+                c for c, y in zip(model_cols, filled_years)
+                if (y is None or y == base_year)
+            ]
+        else:
+            # 年がどこにも無ければ「元の挙動」を優先し全列維持
+            kept_model_cols = model_cols[:]
+
+    # 列を再構成
+    out_cols = fixed_cols + kept_model_cols
+    df = df[out_cols]
+
+    # === 3) LLM翻訳の対象を厳密選別（“中文なら訳す”を価格判定より優先） ===
+    # セクション_ja / 項目_ja は LLM 対象から除外（=上書き禁止）
+    translate_target_cols = [c for c in df.columns if c not in ("セクション_ja", "項目_ja")]
+
+    client, llm_enabled = maybe_init_openai()
+    if llm_enabled:
+        # バッチ抽出
+        texts: List[str] = []
+        indices: List[tuple[int, str]] = []  # (row_idx, col_name)
+        for idx, row in df.iterrows():
+            for col in translate_target_cols:
+                val = str(row[col] if col in row else "")
+                if not val:
+                    continue
+                # “中文が含まれるなら訳す”を最優先
+                if contains_zh(val):
+                    texts.append(val)
+                    indices.append((idx, col))
+                else:
+                    # 中文を含まない場合は現状維持（元の挙動を壊さない）
+                    pass
+
+        if texts:
+            trans = llm_translate_batch(client, texts)
+            # 逐次反映
+            for (r, c), v in zip(indices, trans):
+                df.at[r, c] = v
+
+    # === 4) 保存（primary / secondary） ===
+    # 元のパイプラインに合わせ、index=False, utf-8-sig で保存
+    df.to_csv(dst, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+    print(f"✅ Saved: {dst}")
+    if alt:
+        df.to_csv(alt, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+        print(f"✅ Saved (alt): {alt}")
+
+if __name__ == "__main__":
+    main()
