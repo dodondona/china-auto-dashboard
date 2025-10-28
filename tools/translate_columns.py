@@ -112,7 +112,7 @@ BRAND_MAP = {
     "梅赛德斯-奔驰": "メルセデス・ベンツ",
 }
 
-# ====== セクション/項目の辞書（CN→JA：辞書優先、欠けはLLMで補完） ======
+# ====== セクション/項目の辞書（CN→JA） ======
 FIX_JA_SECTIONS = {
     "基本参数": "基本仕様",
     "车身": "車体",
@@ -669,54 +669,60 @@ def main():
     dealer_count = int(is_dealer.sum())
     print(f"🔎 price rows: msrp={msrp_count}, dealer={dealer_count}")
     if msrp_count:
-        i = is_msrp.idxmax()
-        print(f"  sample MSRP key: CN='{df.at[i,'項目']}', JA='{df.at[i,'項目_ja']}'")
+        i0 = is_msrp.idxmax()
+        print(f"  sample MSRP key: CN='{df.at[i0,'項目']}', JA='{df.at[i0,'項目_ja']}'")
     if dealer_count:
-        j = is_dealer.idxmax()
-        print(f"  sample Dealer key: CN='{df.at[j,'項目']}', JA='{df.at[j,'項目_ja']}'")
+        j0 = is_dealer.idxmax()
+        print(f"  sample Dealer key: CN='{df.at[j0,'項目']}', JA='{df.at[j0,'項目_ja']}'")
 
-    # 価格行変換（MSRP/Dealerとも「日本円 約…円」へ統一）＋ロック
-    converted_cells = {}
-    for col in df.columns[4:]:
-        for i in df.index[is_msrp]:
-            newv = msrp_to_yuan_and_jpy(df.iat[i, df.columns.get_loc(col)], EXRATE_CNY_TO_JPY)
-            converted_cells[(i, col)] = newv
-        for i in df.index[is_dealer]:
-            newv = dealer_to_yuan_and_jpy(df.iat[i, df.columns.get_loc(col)], EXRATE_CNY_TO_JPY)
-            converted_cells[(i, col)] = newv
+    # ====== 価格行変換（重複列名対策：列番号でアクセス）＋ロック
+    converted_cells: dict[tuple[int,int], str] = {}
+    # 列番号 4..end-1 を走査
+    for col_idx in range(4, len(df.columns)):
+        # MSRP 行
+        for row_idx in df.index[is_msrp]:
+            oldv = df.iloc[row_idx, col_idx]
+            newv = msrp_to_yuan_and_jpy(oldv, EXRATE_CNY_TO_JPY)
+            converted_cells[(row_idx, col_idx)] = newv
+        # Dealer 行
+        for row_idx in df.index[is_dealer]:
+            oldv = df.iloc[row_idx, col_idx]
+            newv = dealer_to_yuan_and_jpy(oldv, EXRATE_CNY_TO_JPY)
+            converted_cells[(row_idx, col_idx)] = newv
 
     # 値セルクリーン（価格行は除外）
     df_vals = df.copy()
-    for i in df_vals.index:
-        for j in range(4, len(df_vals.columns)):
-            if is_msrp.iloc[i] or is_dealer.iloc[i]:
+    for row_idx in range(len(df_vals)):
+        for col_idx in range(4, len(df_vals.columns)):
+            if is_msrp.iloc[row_idx] or is_dealer.iloc[row_idx]:
                 continue
-            df_vals.iat[i, j] = clean_any_noise(df_vals.iat[i, j])
+            df_vals.iat[row_idx, col_idx] = clean_any_noise(df_vals.iat[row_idx, col_idx])
 
     # 値セル LLM 翻訳（価格行は対象外）
     if TRANSLATE_VALUES:
         numeric_like = re.compile(r"^[\d\.\,\%\:/xX\+\-\(\)~～\smmkKwWhHVVAhL丨·—–]+$")
-        tr_values, coords = [], []
-        for i in range(len(df_vals)):
-            if is_msrp.iloc[i] or is_dealer.iloc[i]:
+        tr_values = []
+        coords = []
+        for row_idx in range(len(df_vals)):
+            if is_msrp.iloc[row_idx] or is_dealer.iloc[row_idx]:
                 continue
-            for j in range(4, len(df_vals.columns)):
-                v = str(df_vals.iat[i, j]).strip()
+            for col_idx in range(4, len(df_vals.columns)):
+                v = str(df_vals.iat[row_idx, col_idx]).strip()
                 if v in {"", "●", "○", "–", "-", "—"}:
                     continue
                 if numeric_like.fullmatch(v):
                     continue
                 tr_values.append(v)
-                coords.append((i, j))
+                coords.append((row_idx, col_idx))
         uniq_vals = uniq(tr_values)
         val_map = Translator(MODEL, API_KEY).translate_unique(uniq_vals) if uniq_vals else {}
-        for (i, j) in coords:
-            s = str(df_vals.iat[i, j]).strip()
-            df.iat[i, j] = val_map.get(s, s)
+        for (row_idx, col_idx) in coords:
+            s = str(df_vals.iat[row_idx, col_idx]).strip()
+            df.iat[row_idx, col_idx] = val_map.get(s, s)
 
     # ロック再適用（価格表記を固定）
-    for (i, col), val in converted_cells.items():
-        df.at[i, col] = val
+    for (row_idx, col_idx), val in converted_cells.items():
+        df.iat[row_idx, col_idx] = val
 
     # 出力
     DST_PRIMARY.parent.mkdir(parents=True, exist_ok=True)
