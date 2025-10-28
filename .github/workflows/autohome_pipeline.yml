@@ -120,3 +120,35 @@ jobs:
             public/**/*.jpeg
             public/**/*.png
           if-no-files-found: warn
+
+      # ===================== ここから追記（既存は一切変更なし） =====================
+      - name: Download artifacts (this run)
+        uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+
+      - name: Replace output/pipeline from artifacts
+        run: |
+          set -euo pipefail
+          OUT="output/pipeline"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          shopt -s nullglob dotglob
+          for d in _artifacts/*; do
+            cp -R "$d" "$OUT"/
+          done
+          echo "==== Tree of $OUT ===="
+          find "$OUT" -maxdepth 3 -type f | sort || true
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(pipeline): refresh output/pipeline from artifacts [skip ci]"
+          git push
