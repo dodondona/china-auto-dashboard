@@ -8,6 +8,9 @@ on:
     workflows: ["autohome_pipeline"]
     types: [completed]
 
+permissions:
+  contents: write  # cacheフォルダをpushできるように追加
+
 jobs:
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' }}
@@ -17,6 +20,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Install jq and unzip
         run: |
@@ -58,13 +64,15 @@ jobs:
       fail-fast: false
       matrix:
         series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
-    # ← ここで Secrets をジョブ環境へ（為替とOpenAI）
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CURRENCY: ${{ secrets.CURRENCY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -88,7 +96,6 @@ jobs:
 
       - name: Translate columns (per series)
         env:
-          # series単位の入出力だけ追加で渡す（為替・OpenAIはジョブenvから継承）
           CSV_IN:  output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv
           CSV_OUT: output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
         run: |
@@ -108,17 +115,36 @@ jobs:
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
           if-no-files-found: warn
 
-  # 旧(手動/スケジュール)の一括翻訳は維持。ただし workflow_run では実行しない
+      - name: Commit & push cache dir if exists
+        run: |
+          set -euo pipefail
+          if [ -d "cache" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git pull --rebase
+            git add cache
+            if git diff --cached --quiet; then
+              echo "No changes in cache."
+              exit 0
+            fi
+            git commit -m "chore: update cache for series ${{ matrix.series }} [skip ci]"
+            git push origin HEAD:${GITHUB_REF#refs/heads/}
+          else
+            echo "No cache directory found."
+          fi
+
   autohome_config_to_csv:
     if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
-    # ← ここでも Secrets をジョブ環境へ
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CURRENCY: ${{ secrets.CURRENCY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -134,7 +160,6 @@ jobs:
       - name: Translate columns (JA)
         run: |
           set -euo pipefail
-          # 従来運用: CSV_IN / CSV_OUT を外から与える or デフォルト(7578)を使う
           python tools/translate_columns.py
 
       - name: Upload artifact (config csvs)
@@ -145,3 +170,21 @@ jobs:
             output/autohome/*/config_*.csv
             output/autohome/*/config_*.ja.csv
           if-no-files-found: warn
+
+      - name: Commit & push cache dir if exists
+        run: |
+          set -euo pipefail
+          if [ -d "cache" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git pull --rebase
+            git add cache
+            if git diff --cached --quiet; then
+              echo "No changes in cache."
+              exit 0
+            fi
+            git commit -m "chore: update cache [skip ci]"
+            git push origin HEAD:${GITHUB_REF#refs/heads/}
+          else
+            echo "No cache directory found."
+          fi
