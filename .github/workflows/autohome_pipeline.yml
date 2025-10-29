@@ -140,6 +140,7 @@ jobs:
           for d in _artifacts/*; do
             cp -R "$d" "$OUT"/
           done
+          rm -rf _artifacts artifact public
           echo "==== Tree of $OUT ===="
           find "$OUT" -maxdepth 3 -type f | sort || true
 
@@ -148,7 +149,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A output/pipeline
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
