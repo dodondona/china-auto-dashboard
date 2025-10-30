@@ -18,7 +18,7 @@ Description:
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
 
 def build_list_url(series_id: str, page: int) -> str:
-    # ★ここだけ修正：1ページ目は #pvareaid、2ページ目以降は index_{n}.html?#listcontainer
+    # 1ページ目と2ページ目以降でURLが異なる
     if page == 1:
         return f"https://k.autohome.com.cn/{series_id}#pvareaid=3454440"
     else:
@@ -56,12 +56,18 @@ def fetch_detail(playwright, reviewid: str, cache_dir: Path):
 
 def extract_review_ids(html: str):
     soup = BeautifulSoup(html, "lxml")
-    ids = []
-    for li in soup.select("li.mouthcon[data-reviewid]"):
+    ids = set()
+    # ★ 新方式: 詳細ページリンクから抽出（旧data-reviewidも併用）
+    for a in soup.select('a[href*="/detail/view_"]'):
+        href = a.get("href") or ""
+        m = re.search(r"/detail/view_([A-Za-z0-9]+)\.html", href)
+        if m:
+            ids.add(m.group(1))
+    for li in soup.select("li[data-reviewid]"):
         rid = li.get("data-reviewid")
         if rid:
-            ids.append(rid)
-    return ids
+            ids.add(rid)
+    return list(ids)
 
 def main(series_id: str, pages: int):
     cache_dir = Path("cache") / series_id
@@ -72,9 +78,14 @@ def main(series_id: str, pages: int):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         for i in range(1, pages + 1):
-            url = build_list_url(series_id, i)  # ← 修正適用
+            url = build_list_url(series_id, i)
             print(f"[page {i}] fetching… {url}")
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_selector('a[href*="/detail/view_"]', timeout=20000)
+            except Exception as e:
+                print(f"  !! timeout or load error on page {i}: {e}")
+                continue
             html = page.content()
             ids = extract_review_ids(html)
             print(f"[page {i}] found {len(ids)} reviews")
