@@ -9,28 +9,31 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 Usage:
   python tools/koubei_summary_playwright.py <series_id> <pages>
 
-方針:
-- 一覧部は完全に旧来方式：HTML全体からre.findallでreview_id抽出
-- BeautifulSoupは使用しない（JS描画後のDOM全体から直接拾う）
-- 詳細部のみTailwind構造対応
-- 出力・キャッシュ構造は一切変更しない
+最終版:
+- モバイル版URL (m.autohome.com.cn) を使用して review 一覧を取得
+- HTML全体から re.findall で review_id を抽出
+- 詳細本文は Tailwind 構造対応（div.tw-whitespace-pre-wrap）
+- その他の挙動・出力形式は一切変更なし
 """
 
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
 
 def build_list_url(series_id: str, page: int) -> str:
+    # ✅ モバイル版URLへ変更（ここが最重要）
     if page == 1:
-        return f"https://k.autohome.com.cn/{series_id}#pvareaid=3454440"
+        return f"https://m.autohome.com.cn/{series_id}/#pvareaid=3454440"
     else:
-        return f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
+        return f"https://m.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
 
-# ---------- 一覧（元の挙動を完全再現） ----------
+# ---------- 一覧（re.findallで全体スキャン） ----------
 def extract_review_ids_from_html(html: str):
+    # モバイル版HTMLでは data-reviewid="xxxx" の形式もあるため両方対応
     ids = re.findall(r"/detail/view_([0-9]+)\\.html", html)
-    ids = list(dict.fromkeys(ids))
-    return ids
+    if not ids:
+        ids = re.findall(r'data-reviewid="([0-9]+)"', html)
+    return list(dict.fromkeys(ids))
 
-# ---------- 詳細取得（Tailwind構造対応） ----------
+# ---------- 詳細取得 ----------
 def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
     cache_file = cache_dir / f"{reviewid}.json"
     if cache_file.exists():
@@ -46,13 +49,13 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
         page.set_viewport_size({"width": 1280, "height": 1800})
         try:
             page.goto(url, wait_until="networkidle", timeout=60000)
-            # 展开全文クリック（あれば）
+
+            # 展开全文クリック
             try:
                 page.get_by_text("展开全文", exact=False).click(timeout=2000)
             except Exception:
                 pass
 
-            # Tailwind本文DOMを待つ
             try:
                 page.wait_for_selector("div.tw-whitespace-pre-wrap", timeout=15000)
             except PWTimeout:
@@ -61,7 +64,6 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
             html = page.content()
             soup = BeautifulSoup(html, "lxml")
 
-            # タイトル
             title = ""
             h1 = soup.select_one("h1")
             if h1:
@@ -71,13 +73,11 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
                 if t:
                     title = t.get_text(strip=True)
 
-            # 本文（Tailwind構造）
             body = ""
             cont = soup.select_one("div.tw-whitespace-pre-wrap")
             if cont:
                 body = cont.get_text("\n", strip=True)
 
-            # 保険：旧構造
             if not body:
                 for sel in ["div.content", "section.content", "article", "div#content"]:
                     n = soup.select_one(sel)
