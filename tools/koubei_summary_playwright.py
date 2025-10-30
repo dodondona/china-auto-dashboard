@@ -4,11 +4,12 @@
 Autohome 口コミ要約ツール（Playwright使用）
 - 既存のStory生成/成果物は完全維持
 - 追加: 既知レビューをスキップする簡易キャッシュのみ
+- 修正: ページの待機/スクロールを強化（0件回避）
 """
 import sys, os, re, json, time, hashlib
 from pathlib import Path
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from openai import OpenAI
 
 # ====== 既存と同じ前提の設定 ======
@@ -68,6 +69,7 @@ def summarize_with_openai(client: OpenAI, text: str) -> str:
     )
     return resp.choices[0].message.content.strip()
 
+# ---- ここを強化（0件の主因だった待機不足を解消） ----
 def fetch_page_html(series_id: str, page: int) -> str:
     url = (
         f"https://k.autohome.com.cn/{series_id}#pvareaid=3454440"
@@ -75,21 +77,53 @@ def fetch_page_html(series_id: str, page: int) -> str:
         else f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
     )
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context()
-        pageobj = ctx.new_page()
-        pageobj.goto(url, wait_until="domcontentloaded", timeout=45000)
-        # 以前と同じ待機に戻す（厳しいセレクタ待ちは入れない）
-        pageobj.wait_for_timeout(1500)
-        html = pageobj.content()
-        ctx.close(); browser.close()
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+        # CNサイト向けにUA/ロケール/タイムゾーンを明示（以前も別スクリプトでこの手の設定あり）
+        context = browser.new_context(
+            user_agent=os.environ.get("UA_OVERRIDE",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36"),
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1280, "height": 2200}
+        )
+        pageobj = context.new_page()
+        try:
+            # 1) 最初はDOM読み込み
+            pageobj.goto(url, wait_until="domcontentloaded", timeout=45000)
+            # 2) XHRによる差し込みを待つ（networkidle）
+            pageobj.wait_for_load_state("networkidle", timeout=15000)
+            # 3) 口コミDOMが現れるまで待機（いくつかの候補）
+            try:
+                pageobj.wait_for_selector(".kb-item, .review-item, .text-con, .kb-content", timeout=8000)
+            except PWTimeout:
+                pass
+            # 4) スクロールで追加ロード（高さが安定するまで / 上限回数）
+            last_h = 0
+            stable_rounds = 0
+            for _ in range(12):
+                pageobj.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                pageobj.wait_for_load_state("networkidle", timeout=8000)
+                time.sleep(0.6)
+                h = pageobj.evaluate("document.body.scrollHeight")
+                if h == last_h:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                last_h = h
+                if stable_rounds >= 2:
+                    break
+            # 5) HTML取得
+            html = pageobj.content()
+        finally:
+            context.close()
+            browser.close()
         return html
+# ---- 強化ここまで ----
 
 def parse_reviews(html: str) -> list:
     """
-    ★ 以前の拾い方に戻す：aタグ走査 → view_ / detail/ の数値ID抽出
-      - 親要素から title/text を緩く拾う
-      - クラステンプレに依存しすぎない
+    aタグ走査 → view_ / detail/ の数値ID抽出
+    親要素から title/text を緩く拾う（クラス依存しすぎない）
     """
     soup = BeautifulSoup(html, "lxml")
     items = []
@@ -117,7 +151,6 @@ def parse_reviews(html: str) -> list:
             if el and el.get_text(strip=True):
                 text = el.get_text(" ", strip=True); break
 
-        # 何も取れていない場合でもIDは拾う（後段で詳細取得したい場合の保険）
         items.append({"id": rid, "title": title, "text": text})
 
     # ID重複排除
@@ -142,14 +175,12 @@ def main():
 
         for r in revs:
             rid, text = r["id"], r.get("text","").strip()
-
-            # テキストが空ならスキップ（ここは従来どおり）
             if not text:
-                continue
+                continue  # 空テキストは従来通りスキップ
 
             content_hash = _sha1(text)
 
-            # === 追加: キャッシュ判定（既知はスキップ） ===
+            # 追加: キャッシュ判定（既知はスキップ）
             if rid in cache and cache[rid].get("content_hash") == content_hash:
                 print(f"  [skip cached] {rid}")
                 continue
@@ -168,7 +199,6 @@ def main():
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             })
 
-            # === 追加: キャッシュ追記 ===
             _append_cache({"id": rid, "content_hash": content_hash})
 
         time.sleep(1)
@@ -185,7 +215,6 @@ def main():
                 f.write(r["summary"] + "\n\n")
         print(f"[done] saved {len(all_results)} summaries → {out_md.name}")
     else:
-        # ★ “all cached” と断定しない（0件パースの可能性を明示）
         if parsed_total == 0:
             print("[done] parsed 0 reviews (page DOM未ロードの可能性)")
         else:
