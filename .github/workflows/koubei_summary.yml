@@ -7,63 +7,27 @@ on:
         description: "Autohome series ID（例: 5769）"
         required: true
         type: string
-      skip_llm:
-        description: "LLM最終ポリッシュをスキップ（1=OFF / 0=ON）"
+      pages:
+        description: "巡回ページ数（必要に応じて）"
         required: false
-        default: "0"
-        type: string
-      summary_fmt_ver:
-        description: "出力フォーマットのバージョン（キャッシュ無効化トグル）"
-        required: false
-        default: "v1"
-        type: string
-      stop_after_consec_known:
-        description: "既知IDに連続で当たったら打ち切る件数"
-        required: false
-        default: "50"
-        type: string
-      max_pages:
-        description: "最大巡回ページ数（安全ガード）"
-        required: false
-        default: "20"
-        type: string
-      page_nav_timeout_ms:
-        description: "1ページのナビゲーションタイムアウト(ms)"
-        required: false
-        default: "15000"
-        type: string
-      page_retries:
-        description: "ページロード再試行回数"
-        required: false
-        default: "2"
-        type: string
-      wall_timeout_sec:
-        description: "ジョブ全体の壁時計タイムアウト(秒)"
-        required: false
-        default: "480"
+        default: "5"
         type: string
   schedule:
-    # 例: UTC 16:30 = JST 01:30
-    - cron: "30 16 * * *"
+    - cron: "30 16 * * *"  # JST 01:30
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
 
 permissions:
-  contents: write  # commit/push 用
+  contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # 共通ENV（inputsがあればそちらが優先されます）
-      SUMMARY_FMT_VER: ${{ inputs.summary_fmt_ver || 'v1' }}
-      SKIP_LLM: ${{ inputs.skip_llm || '0' }}
-      STOP_AFTER_CONSEC_KNOWN: ${{ inputs.stop_after_consec_known || '50' }}
-      MAX_PAGES: ${{ inputs.max_pages || '20' }}
-      PAGE_NAV_TIMEOUT_MS: ${{ inputs.page_nav_timeout_ms || '15000' }}
-      PAGE_RETRIES: ${{ inputs.page_retries || '2' }}
-      WALL_TIMEOUT_SEC: ${{ inputs.wall_timeout_sec || '480' }}
+      SERIES_ID: ${{ inputs.series_id }}
+      PAGES: ${{ inputs.pages }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,69 +43,31 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install openai playwright beautifulsoup4 lxml
+          pip install playwright beautifulsoup4 lxml openai
           python -m playwright install chromium
 
-      - name: Prepare paths
+      - name: Prepare directories
         run: |
           set -euo pipefail
-          sid="${{ inputs.series_id }}"
-          test -n "$sid"
-          mkdir -p "output/koubei/${sid}" "cache/koubei/${sid}"
+          mkdir -p "cache/koubei/${SERIES_ID}" || true
+          mkdir -p "output/koubei/${SERIES_ID}" || true
 
-      - name: Summarize Koubei with cache (incremental)
+      - name: Run koubei summary (with cache support)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # SKIP_LLM=1なら未設定でもOK
-          SERIES_ID: ${{ inputs.series_id }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
-          python tools/koubei_cache_summary.py "${SERIES_ID}"
+          python tools/koubei_summary_playwright.py "${SERIES_ID}" "${PAGES}"
 
-      - name: List outputs
-        run: |
-          set -euo pipefail
-          sid="${{ inputs.series_id }}"
-          echo "== cache =="
-          ls -lah "cache/koubei/${sid}" || true
-          echo "== output =="
-          ls -lah "output/koubei/${sid}" || true
-
-      - name: Upload artifacts (cache + outputs)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: koubei-${{ inputs.series_id }}-${{ env.SUMMARY_FMT_VER }}
+          name: koubei-${{ inputs.series_id }}
           retention-days: 14
           path: |
-            cache/koubei/${{ inputs.series_id }}/summaries.jsonl
-            cache/koubei/${{ inputs.series_id }}/raw_reviews.jsonl
-            output/koubei/${{ inputs.series_id }}/*.md
-
-      - name: Commit outputs back to repo
-        if: ${{ always() }}  # 成功/失敗を問わず試み、変更なければスキップ
-        run: |
-          set -euo pipefail
-          sid="${{ inputs.series_id }}"
-
-          # detatched HEAD 対策: 実行ブランチ名にフォールバック（無ければ main）
-          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-main}}"
-
-          # git 設定とsafe.directory
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # 変更をステージ（.gitignore を強制突破）
-          git add -f "output/koubei/${sid}" || true
-          git add -f "cache/koubei/${sid}/summaries.jsonl" || true
-          git add -f "cache/koubei/${sid}/raw_reviews.jsonl" || true
-
-          # 変更が無ければ終了
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          # コミット＆プッシュ
-          git commit -m "koubei: update summaries for ${sid} (fmt=${{ env.SUMMARY_FMT_VER }}) [skip ci]"
-          # リモートブランチが無いケースも作成してpush
-          git push origin "HEAD:${BRANCH}"
+            cache/koubei/${{ inputs.series_id }}/
+            output/koubei/${{ inputs.series_id }}/
+            autohome_reviews_*.csv
+            autohome_reviews_*.json
+            autohome_reviews_*.md
+            autohome_reviews_*.txt
