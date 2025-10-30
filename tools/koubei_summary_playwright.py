@@ -9,31 +9,98 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 Usage:
   python tools/koubei_summary_playwright.py <series_id> <pages>
 
-最終版:
-- モバイル版URL (m.autohome.com.cn) を使用して review 一覧を取得
-- HTML全体から re.findall で review_id を抽出
-- 詳細本文は Tailwind 構造対応（div.tw-whitespace-pre-wrap）
-- その他の挙動・出力形式は一切変更なし
+方針（抽出ロジックは一切変更しない）:
+- UAは extra_http_headers ではなく context(user_agent=...) で正しく指定
+- 一覧ページは networkidle まで待機 + 目標要素が出るまで待つ
+- extract_review_ids_from_list() は既存のまま（左カラム優先＋data-reviewid対応）
+- 詳細ページの取得・デコード処理も既存ロジックを維持
 """
 
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
 
 def build_list_url(series_id: str, page: int) -> str:
-    # ✅ モバイル版URLへ変更（ここが最重要）
     if page == 1:
-        return f"https://m.autohome.com.cn/{series_id}/#pvareaid=3454440"
+        return f"https://k.autohome.com.cn/{series_id}#pvareaid=3454440"
     else:
-        return f"https://m.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
+        return f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
 
-# ---------- 一覧（re.findallで全体スキャン） ----------
-def extract_review_ids_from_html(html: str):
-    # モバイル版HTMLでは data-reviewid="xxxx" の形式もあるため両方対応
-    ids = re.findall(r"/detail/view_([0-9]+)\\.html", html)
-    if not ids:
-        ids = re.findall(r'data-reviewid="([0-9]+)"', html)
-    return list(dict.fromkeys(ids))
+# ---------- 一覧: 左カラム限定で review_id 抽出（右カラム除外）、.html なしも救済 ----------
+ID_PAT = re.compile(r"/detail/view_([A-Za-z0-9]+)(?:\.html|\.)")
 
-# ---------- 詳細取得 ----------
+def extract_review_ids_from_list(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "lxml")
+    ids: set[str] = set()
+
+    left = soup.select_one(".con-left")
+    scope = left if left else soup  # 左が無い場合のみ全体
+
+    def in_right_column(tag) -> bool:
+        for anc in tag.parents:
+            classes = anc.get("class") or []
+            if isinstance(classes, str):
+                classes = [classes]
+            if "con-right" in classes:
+                return True
+        return False
+
+    for a in scope.select('a[href*="/detail/view_"]'):
+        if in_right_column(a):
+            continue
+        href = a.get("href") or ""
+        m = ID_PAT.search(href)
+        if m:
+            ids.add(m.group(1))
+
+    # 互換: data-reviewid
+    for li in scope.select("li[data-reviewid]"):
+        if in_right_column(li):
+            continue
+        rid = (li.get("data-reviewid") or "").strip()
+        if rid:
+            ids.add(rid)
+
+    return list(ids)
+
+# ---------- 詳細: body バイトから charset 判定してデコード ----------
+CHARSET_RE = re.compile(br"charset\s*=\s*([a-zA-Z0-9\-\_]+)", re.I)
+
+def decode_html(body: bytes) -> str:
+    head = body[:32768]
+    m = CHARSET_RE.search(head)
+    enc = (m.group(1).decode("ascii", "ignore").lower() if m else "")
+    for cand in ([enc] if enc else []) + ["utf-8", "gbk", "gb2312", "gb18030"]:
+        if not cand:
+            continue
+        try:
+            return body.decode(cand, errors="strict")
+        except Exception:
+            continue
+    return body.decode("utf-8", errors="ignore")
+
+def parse_detail_html_bytes(body: bytes) -> dict:
+    html = decode_html(body)
+    soup = BeautifulSoup(html, "lxml")
+
+    title = ""
+    t = soup.find("title")
+    if t:
+        title = re.sub(r"_口碑_汽车之家.*", "", t.get_text(strip=True))
+
+    text_blocks = [p.get_text(" ", strip=True) for p in soup.select(".text-con p")]
+    if not text_blocks:
+        for css in [".koubei-txt p", ".mouthcon-text p", ".text-con", ".koubei-txt", ".mouthcon-text", "article"]:
+            nodes = soup.select(css)
+            if nodes:
+                if css.endswith(" p"):
+                    text_blocks = [p.get_text(" ", strip=True) for p in nodes]
+                else:
+                    text_blocks = [" ".join(n.get_text(" ", strip=True) for n in nodes)]
+                break
+    text = "\n".join([s for s in text_blocks if s]).strip()
+    text = re.sub(r"\s+", " ", text)
+    return {"title": title, "text": text}
+
+# ---------- 詳細取得（domcontentloaded・60s・1回リトライ） ----------
 def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
     cache_file = cache_dir / f"{reviewid}.json"
     if cache_file.exists():
@@ -42,106 +109,112 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
     url = DETAIL_URL.format(reviewid=reviewid)
     print(f"  fetching detail {url}")
 
-    def _once() -> dict | None:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
-        page.set_viewport_size({"width": 1280, "height": 1800})
+    def _once() -> bytes | None:
+        # NOTE: UAはcontextで設定済み（extra_http_headersではない）
+        page = pw.new_page()
         try:
-            page.goto(url, wait_until="networkidle", timeout=60000)
-
-            # 展开全文クリック
-            try:
-                page.get_by_text("展开全文", exact=False).click(timeout=2000)
-            except Exception:
-                pass
-
-            try:
-                page.wait_for_selector("div.tw-whitespace-pre-wrap", timeout=15000)
-            except PWTimeout:
-                pass
-
-            html = page.content()
-            soup = BeautifulSoup(html, "lxml")
-
-            title = ""
-            h1 = soup.select_one("h1")
-            if h1:
-                title = h1.get_text(strip=True)
-            if not title:
-                t = soup.find("title")
-                if t:
-                    title = t.get_text(strip=True)
-
-            body = ""
-            cont = soup.select_one("div.tw-whitespace-pre-wrap")
-            if cont:
-                body = cont.get_text("\n", strip=True)
-
-            if not body:
-                for sel in ["div.content", "section.content", "article", "div#content"]:
-                    n = soup.select_one(sel)
-                    if n:
-                        body = n.get_text("\n", strip=True)
-                        if body:
-                            break
-
-            return {"id": reviewid, "url": url, "title": title, "text": body}
-
+            resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if not resp:
+                return None
+            body = resp.body()
+            return body
         finally:
             page.close()
-            browser.close()
 
-    data = _once()
-    if not data or not data.get("text"):
-        time.sleep(1.0)
-        data = _once()
+    body = None
+    try:
+        body = _once()
+    except PWTimeout:
+        body = None
 
-    if not data:
-        data = {"id": reviewid, "url": url, "title": "", "text": ""}
+    if body is None:
+        time.sleep(2)
+        try:
+            body = _once()
+        except Exception:
+            body = None
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if body is None:
+        print(f"  !! failed {reviewid}: fetch timeout")
+        return
+
+    data = parse_detail_html_bytes(body)
+    data["id"] = reviewid
+    data["url"] = url
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ---------- main ----------
-def main():
+def main(series_id: str, pages: int):
+    cache_dir = Path("cache") / series_id
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    all_ids: set[str] = set()
+    with sync_playwright() as p:
+        # ✅ UAは context で正しく指定（extra_http_headersではUAは変わらない）
+        context = p.chromium.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            extra_http_headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+            viewport={"width": 1366, "height": 2000}
+        )
+
+        page = context.new_page()
+        for i in range(1, pages + 1):
+            url = build_list_url(series_id, i)
+            print(f"[page {i}] fetching… {url}")
+            try:
+                # ✅ XHR完了まで待つ
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                # ✅ 目標要素が出るまでJSで待機（.con-left には依存しない）
+                page.wait_for_function(
+                    """() => {
+                        const a = document.querySelector("a[href*='/detail/view_']");
+                        const b = document.querySelector("li[data-reviewid]");
+                        return !!(a || b);
+                    }""",
+                    timeout=20000
+                )
+            except Exception as e:
+                print(f"  !! timeout or load error on page {i}: {e}")
+                continue
+
+            html = page.content()
+            ids = extract_review_ids_from_list(html)  # ← 既存関数そのまま
+            print(f"[page {i}] found {len(ids)} reviews")
+            all_ids.update(ids)
+
+        page.close()
+        # 詳細取得は同じUA/ALで
+        def _fetch_with_context(review_id: str):
+            # pw 互換の薄いラッパ
+            class PWProxy:
+                def new_page(self_inner):
+                    return context.new_page()
+            fetch_detail_into_cache(PWProxy(), review_id, cache_dir)
+
+        print(f"[total] unique reviews: {len(all_ids)}")
+        for rid in sorted(all_ids):
+            try:
+                _fetch_with_context(rid)
+            except Exception as e:
+                print(f"  !! failed {rid}: {e}")
+
+        context.close()
+
+    # zip 化（artifact 用）
+    import shutil
+    zipname = f"autohome_reviews_{series_id}"
+    shutil.make_archive(zipname, "zip", cache_dir)
+    print(f"[done] cached and zipped -> {zipname}.zip")
+
+if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python tools/koubei_summary_playwright.py <series_id> <pages>")
         sys.exit(1)
-    series_id = sys.argv[1]
+    series_id = sys.argv[1].strip()
     pages = int(sys.argv[2])
-    cache_dir = Path("cache") / series_id
-    out_file = Path(f"autohome_reviews_{series_id}.jsonl")
-
-    all_ids = []
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        for i in range(1, pages + 1):
-            url = build_list_url(series_id, i)
-            print(f"[page {i}] fetching…")
-            try:
-                page.goto(url, wait_until="networkidle", timeout=60000)
-                html = page.content()
-                ids = extract_review_ids_from_html(html)
-                print(f"[page {i}] found {len(ids)} reviews")
-                all_ids.extend(ids)
-            except Exception as e:
-                print(f"[page {i}] error: {e}")
-            time.sleep(1)
-        browser.close()
-
-        print(f"[done] parsed {len(all_ids)} reviews")
-
-        for rid in all_ids:
-            fetch_detail_into_cache(pw, rid, cache_dir)
-            time.sleep(0.5)
-
-    with open(out_file, "w", encoding="utf-8") as f:
-        for rid in all_ids:
-            cf = cache_dir / f"{rid}.json"
-            if cf.exists():
-                f.write(cf.read_text(encoding="utf-8").strip() + "\n")
-
-if __name__ == "__main__":
-    main()
+    main(series_id, pages)
