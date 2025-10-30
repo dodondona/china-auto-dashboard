@@ -25,6 +25,12 @@ def build_list_url(series_id: str, page: int) -> str:
         return f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
 
 def extract_detail_text(html: str):
+    # ★ 文字化け防止（Autohomeはgb2312/gbkエンコード）
+    try:
+        html = html.encode("latin1").decode("gbk", errors="ignore")
+    except Exception:
+        pass
+
     soup = BeautifulSoup(html, "lxml")
     title = ""
     t = soup.find("title")
@@ -57,7 +63,7 @@ def fetch_detail(playwright, reviewid: str, cache_dir: Path):
 def extract_review_ids(html: str):
     soup = BeautifulSoup(html, "lxml")
     ids = set()
-    # ★ 新方式: 詳細ページリンクから抽出（旧data-reviewidも併用）
+    # 詳細ページリンクから抽出（旧data-reviewidも併用）
     for a in soup.select('a[href*="/detail/view_"]'):
         href = a.get("href") or ""
         m = re.search(r"/detail/view_([A-Za-z0-9]+)\.html", href)
