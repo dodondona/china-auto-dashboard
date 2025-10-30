@@ -3,50 +3,35 @@ name: koubei_summary
 on:
   workflow_dispatch:
     inputs:
-      series_id:
-        description: "Autohome series ID（例: 5769）"
+      vehicle_id:
+        description: "Autohome vehicle ID (例: 7806, 5714)"
         required: true
-        type: string
       pages:
-        description: "巡回ページ数（従来どおり）"
+        description: "取得ページ数（例: 5）"
         required: false
         default: "5"
-        type: string
+      mode:
+        description: "ja=日本語JSON構造 / zh=中国語高速 / batch-submit=バッチ提出 / batch-collect=結果取得"
+        required: false
+        default: "ja"
+      batch_id:
+        description: "batch-collect時に指定するBatch ID"
+        required: false
+        default: ""
   schedule:
-    # 従来のスケジュールがある場合は合わせてください（例: UTC 16:30 = JST 01:30）
-    - cron: "30 16 * * *"
-  workflow_run:
-    # 従来どおり、上流のパイプライン完了で発火する場合
-    workflows: ["autohome_pipeline"]
-    types: [completed]
+    - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
 
 permissions:
   contents: write
 
 jobs:
-  run:
+  summarize_reviews:
     runs-on: ubuntu-latest
-    env:
-      SERIES_ID: ${{ inputs.series_id }}
-      PAGES: ${{ inputs.pages }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # === 追加①：実行前に cache を復元（以外は従来どおり） ===
-      - name: Restore koubei cache
-        uses: actions/cache/restore@v4
-        with:
-          path: cache/koubei/${{ inputs.series_id }}
-          key: koubei-cache-${{ inputs.series_id }}-${{ github.ref_name }}
-          restore-keys: |
-            koubei-cache-${{ inputs.series_id }}-
-            koubei-cache-
-
-      # （従来の依存インストール）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -54,43 +39,114 @@ jobs:
 
       - name: Install dependencies
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 lxml openai || true
-          python -m playwright install chromium || true
+          pip install --upgrade "openai==1.*" beautifulsoup4 requests pandas playwright
+          python -m playwright install chromium
 
-      - name: Prepare directories (従来どおりの出力先を維持)
+      - name: Print versions (debug)
         run: |
-          set -euo pipefail
-          mkdir -p "cache/koubei/${SERIES_ID}" || true
-          mkdir -p "output/koubei/${SERIES_ID}" || true
+          python - << 'PY'
+          import sys
+          print('python:', sys.version)
+          PY
 
-      # ★★★ 従来の実行コマンドをそのまま維持 ★★★
-      - name: Run original koubei summary
+      # ① 通常モード：口コミ抽出＋要約（既存メイン）
+      - name: Run summary script
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          set -euo pipefail
-          python tools/koubei_summary_playwright.py "${SERIES_ID}" "${PAGES}"
+          python tools/koubei_summary.py \
+            "${{ github.event.inputs.vehicle_id }}" \
+            "${{ github.event.inputs.pages }}" \
+            "${{ github.event.inputs.mode }}"
 
-      # === 追加②：実行後に cache を保存（次回に引き継ぐ） ===
-      - name: Save koubei cache
-        if: ${{ always() }}
-        uses: actions/cache/save@v4
-        with:
-          path: cache/koubei/${{ inputs.series_id }}
-          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
+      # ② 自然文レポ（既存の長め文章）
+      - name: Build narrative report
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
+        run: |
+          python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
 
-      # （従来どおりの成果物アップロード）
-      - name: Upload artifacts
+      # ③ “あなた好みの自然文”版（段落構成・代表コメント活用）
+      - name: Build story-style summary
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # 無くてもテンプレで出ます
+        run: |
+          python tools/koubei_storywriter.py "${{ github.event.inputs.vehicle_id }}" --pros 5 --cons 4 --quotes 2 --style executive
+
+      # ④ 今回の要望：各2〜3文の超要約（ポジ/ネガ）
+      - name: Build 2-3 sentence brief
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
+        run: |
+          python tools/koubei_brief.py "${{ github.event.inputs.vehicle_id }}" --k 3
+
+      # === 以下 Batch API 拡張 ===
+      - name: Submit Batch (mode=batch-submit)
+        if: ${{ github.event.inputs.mode == 'batch-submit' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BATCH_MODEL: gpt-4.1-nano
+        run: |
+          python tools/koubei_batch_submit.py "${{ github.event.inputs.vehicle_id }}" "${{ github.event.inputs.pages }}" "ja" | tee batch_id.txt
+          echo "BATCH_ID=$(cat batch_id.txt)" >> $GITHUB_ENV
+          echo "Saved batch meta:"
+          cat "autohome_reviews_${{ github.event.inputs.vehicle_id }}.batch.submit.json"
+
+      - name: Upload batch submit artifacts
+        if: ${{ github.event.inputs.mode == 'batch-submit' }}
         uses: actions/upload-artifact@v4
         with:
-          name: koubei-${{ inputs.series_id }}
-          retention-days: 14
+          name: koubei_batch_submit
           path: |
-            output/koubei/${{ inputs.series_id }}/
-            cache/koubei/${{ inputs.series_id }}/
+            autohome_reviews_*.batch.input.jsonl
+            autohome_reviews_*.batch.submit.json
+            batch_id.txt
+
+      - name: Collect Batch (mode=batch-collect)
+        if: ${{ github.event.inputs.mode == 'batch-collect' && github.event.inputs.batch_id != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/koubei_batch_collect.py "${{ github.event.inputs.batch_id }}" "${{ github.event.inputs.vehicle_id }}" "ja"
+
+      # === Story出力をoutput/koubei/<ID>/へ自動移動（上書き対応） ===
+      - name: Move story report into output directory
+        if: always()
+        run: |
+          mkdir -p output/koubei
+          for f in autohome_reviews_*_story.txt; do
+            [ -f "$f" ] || continue
+            id=$(echo "$f" | sed -E 's/.*autohome_reviews_([0-9]+)_story\.txt/\1/')
+            if [ -n "$id" ]; then
+              mkdir -p "output/koubei/${id}"
+              if [ -f "output/koubei/${id}/$(basename "$f")" ]; then
+                echo "Overwriting existing file for vehicle ${id}"
+                rm -f "output/koubei/${id}/$(basename "$f")"
+              fi
+              mv -f "$f" "output/koubei/${id}/"
+              echo "Moved $f → output/koubei/${id}/"
+            fi
+          done
+
+      # === コミットしてリポジトリに反映（上書き保存も対応） ===
+      - name: Commit story reports into repo
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A output/koubei/
+          git commit -m "Update koubei story reports for ${{ github.event.inputs.vehicle_id }} [skip ci]" || echo "No changes"
+          git push
+
+      - name: Upload results (if collect or normal)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_summary
+          path: |
             autohome_reviews_*.csv
-            autohome_reviews_*.json
-            autohome_reviews_*.md
             autohome_reviews_*.txt
+            autohome_reviews_*.md
+            autohome_reviews_*.json
+            output/koubei/**
