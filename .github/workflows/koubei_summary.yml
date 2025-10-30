@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       skip_llm:
-        description: "LLM最終ポリッシュをスキップ（1でOFF/0でON）"
+        description: "LLM最終ポリッシュをスキップ（1=OFF / 0=ON）"
         required: false
         default: "0"
         type: string
@@ -27,27 +27,43 @@ on:
         required: false
         default: "20"
         type: string
+      page_nav_timeout_ms:
+        description: "1ページのナビゲーションタイムアウト(ms)"
+        required: false
+        default: "15000"
+        type: string
+      page_retries:
+        description: "ページロード再試行回数"
+        required: false
+        default: "2"
+        type: string
+      wall_timeout_sec:
+        description: "ジョブ全体の壁時計タイムアウト(秒)"
+        required: false
+        default: "480"
+        type: string
   schedule:
-    # 必要ならスケジュール更新。例: JST 01:30
-    - cron: "30 16 * * *"  # UTC基準（JST+9=01:30）
+    # 例: UTC 16:30 = JST 01:30
+    - cron: "30 16 * * *"
   workflow_run:
-    # 上流のパイプライン完了で発火させたい場合はワークフロー名を合わせる
     workflows: ["autohome_pipeline"]
     types: [completed]
 
 permissions:
-  contents: write  # （コミットしないが、将来pushしたくなった時のためにONで問題なし）
+  contents: write  # commit/push 用
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # 既定値（workflow_dispatchのinputsが優先）
+      # 共通ENV（inputsがあればそちらが優先されます）
       SUMMARY_FMT_VER: ${{ inputs.summary_fmt_ver || 'v1' }}
       SKIP_LLM: ${{ inputs.skip_llm || '0' }}
       STOP_AFTER_CONSEC_KNOWN: ${{ inputs.stop_after_consec_known || '50' }}
       MAX_PAGES: ${{ inputs.max_pages || '20' }}
+      PAGE_NAV_TIMEOUT_MS: ${{ inputs.page_nav_timeout_ms || '15000' }}
+      PAGE_RETRIES: ${{ inputs.page_retries || '2' }}
+      WALL_TIMEOUT_SEC: ${{ inputs.wall_timeout_sec || '480' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +91,7 @@ jobs:
 
       - name: Summarize Koubei with cache (incremental)
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # SKIP_LLM=1なら未設定でもOK
           SERIES_ID: ${{ inputs.series_id }}
         run: |
           set -euo pipefail
@@ -98,3 +115,33 @@ jobs:
             cache/koubei/${{ inputs.series_id }}/summaries.jsonl
             cache/koubei/${{ inputs.series_id }}/raw_reviews.jsonl
             output/koubei/${{ inputs.series_id }}/*.md
+
+      - name: Commit outputs back to repo
+        if: ${{ always() }}  # 成功/失敗を問わず試み、変更なければスキップ
+        run: |
+          set -euo pipefail
+          sid="${{ inputs.series_id }}"
+
+          # detatched HEAD 対策: 実行ブランチ名にフォールバック（無ければ main）
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-main}}"
+
+          # git 設定とsafe.directory
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 変更をステージ（.gitignore を強制突破）
+          git add -f "output/koubei/${sid}" || true
+          git add -f "cache/koubei/${sid}/summaries.jsonl" || true
+          git add -f "cache/koubei/${sid}/raw_reviews.jsonl" || true
+
+          # 変更が無ければ終了
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          # コミット＆プッシュ
+          git commit -m "koubei: update summaries for ${sid} (fmt=${{ env.SUMMARY_FMT_VER }}) [skip ci]"
+          # リモートブランチが無いケースも作成してpush
+          git push origin "HEAD:${BRANCH}"
