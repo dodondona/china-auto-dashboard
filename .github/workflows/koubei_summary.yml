@@ -8,13 +8,15 @@ on:
         required: true
         type: string
       pages:
-        description: "巡回ページ数（必要に応じて）"
+        description: "巡回ページ数（従来どおり）"
         required: false
         default: "5"
         type: string
   schedule:
-    - cron: "30 16 * * *"  # JST 01:30
+    # 従来のスケジュールがある場合は合わせてください（例: UTC 16:30 = JST 01:30）
+    - cron: "30 16 * * *"
   workflow_run:
+    # 従来どおり、上流のパイプライン完了で発火する場合
     workflows: ["autohome_pipeline"]
     types: [completed]
 
@@ -34,6 +36,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # === 追加①：実行前に cache を復元（以外は従来どおり） ===
+      - name: Restore koubei cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/koubei/${{ inputs.series_id }}
+          key: koubei-cache-${{ inputs.series_id }}-${{ github.ref_name }}
+          restore-keys: |
+            koubei-cache-${{ inputs.series_id }}-
+            koubei-cache-
+
+      # （従来の依存インストール）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -43,30 +56,40 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 lxml openai
-          python -m playwright install chromium
+          pip install playwright beautifulsoup4 lxml openai || true
+          python -m playwright install chromium || true
 
-      - name: Prepare directories
+      - name: Prepare directories (従来どおりの出力先を維持)
         run: |
           set -euo pipefail
           mkdir -p "cache/koubei/${SERIES_ID}" || true
           mkdir -p "output/koubei/${SERIES_ID}" || true
 
-      - name: Run koubei summary (with cache support)
+      # ★★★ 従来の実行コマンドをそのまま維持 ★★★
+      - name: Run original koubei summary
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           set -euo pipefail
           python tools/koubei_summary_playwright.py "${SERIES_ID}" "${PAGES}"
 
+      # === 追加②：実行後に cache を保存（次回に引き継ぐ） ===
+      - name: Save koubei cache
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: cache/koubei/${{ inputs.series_id }}
+          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
+
+      # （従来どおりの成果物アップロード）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: koubei-${{ inputs.series_id }}
           retention-days: 14
           path: |
-            cache/koubei/${{ inputs.series_id }}/
             output/koubei/${{ inputs.series_id }}/
+            cache/koubei/${{ inputs.series_id }}/
             autohome_reviews_*.csv
             autohome_reviews_*.json
             autohome_reviews_*.md
