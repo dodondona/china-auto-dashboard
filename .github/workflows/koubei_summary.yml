@@ -107,6 +107,20 @@ jobs:
         run: |
           python tools/koubei_batch_collect.py "${{ github.event.inputs.batch_id }}" "${{ github.event.inputs.vehicle_id }}" "ja"
 
+      - name: Move story report into output directory
+        if: always()
+        run: |
+          mkdir -p output/koubei
+          for f in autohome_reviews_*_story.txt; do
+            [ -f "$f" ] || continue
+            id=$(echo "$f" | sed -E 's/.*autohome_reviews_([0-9]+)_story\.txt/\1/')
+            if [ -n "$id" ]; then
+              mkdir -p "output/koubei/${id}"
+              mv "$f" "output/koubei/${id}/"
+              echo "Moved $f → output/koubei/${id}/"
+            fi
+          done
+
       - name: Upload results (if collect or normal)
         if: always()
         uses: actions/upload-artifact@v4
