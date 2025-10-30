@@ -5,17 +5,6 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-"""
-Usage:
-  python tools/koubei_summary_playwright.py <series_id> <pages>
-
-最小方針（余計なことなし）:
-- 一覧は「左カラム（.con-left）」内のみから review_id を抽出（右カラムの固定リンクは除外）
-- 詳細は Playwright の response.body() を取得して <meta charset> を見てデコード（GBK/GB2312/UTF-8 自動判定）
-- 詳細アクセスは domcontentloaded + リトライ1回、timeout やや長め
-- 既存のキャッシュ/zip/artifact の流れはそのまま
-"""
-
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
 
 def build_list_url(series_id: str, page: int) -> str:
@@ -61,49 +50,17 @@ def extract_review_ids_from_list(html: str) -> list[str]:
 
     return list(ids)
 
-# ---------- 詳細: body バイトから charset 判定してデコード ----------
-CHARSET_RE = re.compile(br"charset\s*=\s*([a-zA-Z0-9\-\_]+)", re.I)
+# ---------- 詳細: DOMから直接テキスト抽出（文字化け不可） ----------
+DETAIL_SELECTORS = [
+    ".text-con p",          # 現行最有力
+    ".koubei-txt p",
+    ".mouthcon-text p",
+    ".text-con",
+    ".koubei-txt",
+    ".mouthcon-text",
+    "article"
+]
 
-def decode_html(body: bytes) -> str:
-    # <meta ... charset=...> を先頭32KBから検出
-    head = body[:32768]
-    m = CHARSET_RE.search(head)
-    enc = (m.group(1).decode("ascii", "ignore").lower() if m else "")
-    for cand in ([enc] if enc else []) + ["utf-8", "gbk", "gb2312", "gb18030"]:
-        if not cand:
-            continue
-        try:
-            return body.decode(cand, errors="strict")
-        except Exception:
-            continue
-    # 最後の手段
-    return body.decode("utf-8", errors="ignore")
-
-def parse_detail_html_bytes(body: bytes) -> dict:
-    html = decode_html(body)
-    soup = BeautifulSoup(html, "lxml")
-
-    title = ""
-    t = soup.find("title")
-    if t:
-        title = re.sub(r"_口碑_汽车之家.*", "", t.get_text(strip=True))
-
-    text_blocks = [p.get_text(" ", strip=True) for p in soup.select(".text-con p")]
-    if not text_blocks:
-        # フォールバックいくつか（最小限）
-        for css in [".koubei-txt p", ".mouthcon-text p", ".text-con", ".koubei-txt", ".mouthcon-text", "article"]:
-            nodes = soup.select(css)
-            if nodes:
-                if css.endswith(" p"):
-                    text_blocks = [p.get_text(" ", strip=True) for p in nodes]
-                else:
-                    text_blocks = [" ".join(n.get_text(" ", strip=True) for n in nodes)]
-                break
-    text = "\n".join([s for s in text_blocks if s]).strip()
-    text = re.sub(r"\s+", " ", text)
-    return {"title": title, "text": text}
-
-# ---------- 詳細取得（domcontentloaded・60s・1回リトライ） ----------
 def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
     cache_file = cache_dir / f"{reviewid}.json"
     if cache_file.exists():
@@ -112,43 +69,94 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
     url = DETAIL_URL.format(reviewid=reviewid)
     print(f"  fetching detail {url}")
 
-    def _once() -> bytes | None:
+    def _once() -> dict | None:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page()
-        # UAを固定（ブロック回避のため穏当なデスクトップUA）
         page.set_extra_http_headers({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         try:
-            resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            if not resp:
-                return None
-            body = resp.body()
-            return body
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            # 出現待ち（順番に当てる）— まずは p付きselector
+            waited = False
+            for css in DETAIL_SELECTORS:
+                try:
+                    to_wait = css if css.endswith(" p") else (css + " p")
+                    page.wait_for_selector(to_wait, timeout=8000)
+                    waited = True
+                    break
+                except Exception:
+                    continue
+            if not waited:
+                # 見出しなどしかない場合でも page.title() だけは拾える
+                pass
+
+            # タイトルはブラウザのDOMから（自動で正しいエンコーディング）
+            title = page.title().strip()
+            title = re.sub(r"_口碑_汽车之家.*", "", title)
+
+            # 本文は DOM から直接 innerText を収集（ブラウザが正しくUnicode化済み）
+            text = ""
+            for css in DETAIL_SELECTORS:
+                try:
+                    blocks = page.eval_on_selector_all(
+                        css if css.endswith(" p") else (css + " p"),
+                        "els => els.map(e => e.innerText.trim()).filter(Boolean)"
+                    )
+                    if not blocks and not css.endswith(" p"):
+                        # p要素が無いタイプ
+                        blocks = page.eval_on_selector_all(
+                            css, "els => els.map(e => e.innerText.trim()).filter(Boolean)"
+                        )
+                    if blocks:
+                        text = "\n".join(blocks)
+                        break
+                except Exception:
+                    continue
+
+            text = re.sub(r"\s+", " ", (text or "").strip())
+
+            return {"title": title, "text": text}
         finally:
             page.close()
             browser.close()
 
-    body = None
+    data = None
     try:
-        body = _once()
+        data = _once()
     except PWTimeout:
-        body = None
-
-    if body is None:
-        # 1回だけリトライ（軽く待つ）
+        data = None
+    if data is None or not (data.get("title") or data.get("text")):
+        # リトライ1回（軽く待つ）
         time.sleep(2)
         try:
-            body = _once()
+            data = _once()
         except Exception:
-            body = None
+            data = None
 
-    if body is None:
-        print(f"  !! failed {reviewid}: fetch timeout")
+    if not data:
+        print(f"  !! failed {reviewid}: fetch timeout or empty")
         return
 
-    data = parse_detail_html_bytes(body)
+    # 空テキスト対策：最終フォールバックとしてHTML全体のinnerTextを拾う
+    if not data.get("text"):
+        # どうしても空なら、ページ全体から
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            data["text"] = page.eval_on_selector_all(
+                "body", "els => els.map(e => e.innerText.trim()).filter(Boolean).join('\\n')"
+            ) or ""
+            data["text"] = re.sub(r"\s+", " ", data["text"]).strip()
+        except Exception:
+            pass
+        finally:
+            page.close()
+            browser.close()
+
     data["id"] = reviewid
     data["url"] = url
     with open(cache_file, "w", encoding="utf-8") as f:
@@ -172,7 +180,6 @@ def main(series_id: str, pages: int):
             print(f"[page {i}] fetching… {url}")
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                # 左カラムのリンクが現れるまで待つ（無ければ通常リンク）
                 try:
                     page.wait_for_selector(".con-left a[href*='/detail/view_']", timeout=20000)
                 except Exception:
@@ -195,7 +202,6 @@ def main(series_id: str, pages: int):
             except Exception as e:
                 print(f"  !! failed {rid}: {e}")
 
-    # zip 化（artifact 用）
     import shutil
     zipname = f"autohome_reviews_{series_id}"
     shutil.make_archive(zipname, "zip", cache_dir)
