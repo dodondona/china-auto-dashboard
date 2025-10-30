@@ -10,10 +10,10 @@ Usage:
   python tools/koubei_summary_playwright.py <series_id> <pages>
 
 方針:
-- 一覧抽出は従来通り（正規表現＋左カラム優先）
-- 詳細ページは JS描画後のDOMを page.content() で取得
-- 本文は div.tw-whitespace-pre-wrap（現行Tailwind構造）から抽出
-- キャッシュ構造やJSON出力形式は完全維持
+- 一覧ページからの review_id 抽出は旧方式（正規表現でHTML全体を走査）
+- 詳細ページ本文はJS描画後のDOMを page.content() から抽出
+- Tailwind構造(div.tw-whitespace-pre-wrap...)対応
+- 出力・キャッシュ形式は一切変更しない
 """
 
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
@@ -24,20 +24,13 @@ def build_list_url(series_id: str, page: int) -> str:
     else:
         return f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
 
-# ---------- 一覧抽出（変更なし） ----------
-ID_PAT = re.compile(r"/detail/view_([A-Za-z0-9]+)(?:\\.html|\\.)")
+# ---------- 一覧抽出（旧方式に戻す） ----------
+ID_PAT = re.compile(r"/detail/view_([0-9]+)\.html")
 
 def extract_review_ids_from_html(html: str):
-    soup = BeautifulSoup(html, "lxml")
-    left = soup.select_one(".con-left")
-    if not left:
-        return []
-    ids = []
-    for a in left.find_all("a", href=True):
-        m = ID_PAT.search(a["href"])
-        if m:
-            ids.append(m.group(1))
-    return list(dict.fromkeys(ids))
+    ids = ID_PAT.findall(html)
+    ids = list(dict.fromkeys(ids))  # 重複排除・順序維持
+    return ids
 
 # ---------- 詳細取得（Tailwind構造対応） ----------
 def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
@@ -55,14 +48,13 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
         page.set_viewport_size({"width": 1280, "height": 1800})
         try:
             page.goto(url, wait_until="networkidle", timeout=60000)
-
             # 展开全文クリック（あれば）
             try:
                 page.get_by_text("展开全文", exact=False).click(timeout=2000)
             except Exception:
                 pass
 
-            # 本文DOM出現を待つ（Tailwind構造）
+            # 本文DOM出現を待つ
             try:
                 page.wait_for_selector("div.tw-whitespace-pre-wrap", timeout=15000)
             except PWTimeout:
@@ -81,13 +73,13 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
                 if t:
                     title = t.get_text(strip=True)
 
-            # 本文（Tailwind対応）
+            # 本文（Tailwind構造）
             body = ""
             cont = soup.select_one("div.tw-whitespace-pre-wrap")
             if cont:
                 body = cont.get_text("\n", strip=True)
 
-            # 保険：旧構造(div.contentなど)
+            # 保険：旧構造
             if not body:
                 for sel in ["div.content", "section.content", "article", "div#content"]:
                     n = soup.select_one(sel)
