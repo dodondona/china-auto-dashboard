@@ -11,9 +11,13 @@ on:
         required: false
         default: "5"
       mode:
-        description: "ja=日本語JSON構造 / zh=中国語高速"
+        description: "ja=日本語JSON構造 / zh=中国語高速 / batch-submit=バッチ提出 / batch-collect=結果取得"
         required: false
         default: "ja"
+      batch_id:
+        description: "batch-collect時に指定するBatch ID"
+        required: false
+        default: ""
   schedule:
     - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
 
@@ -43,8 +47,9 @@ jobs:
           print('python:', sys.version)
           PY
 
-      # ① 口コミ抽出＋要約（既存メイン）
+      # ① 通常モード：口コミ抽出＋要約（既存メイン）
       - name: Run summary script
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -55,11 +60,13 @@ jobs:
 
       # ② 自然文レポ（既存の長め文章）
       - name: Build narrative report
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
         run: |
           python tools/koubei_summary_to_report.py "${{ github.event.inputs.vehicle_id }}"
 
       # ③ “あなた好みの自然文”版（段落構成・代表コメント活用）
       - name: Build story-style summary
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # 無くてもテンプレで出ます
         run: |
@@ -67,10 +74,40 @@ jobs:
 
       # ④ 今回の要望：各2〜3文の超要約（ポジ/ネガ）
       - name: Build 2-3 sentence brief
+        if: ${{ github.event.inputs.mode == 'ja' || github.event.inputs.mode == 'zh' }}
         run: |
           python tools/koubei_brief.py "${{ github.event.inputs.vehicle_id }}" --k 3
 
-      - name: Upload results
+      # === 以下 Batch API 拡張 ===
+      - name: Submit Batch (mode=batch-submit)
+        if: ${{ github.event.inputs.mode == 'batch-submit' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BATCH_MODEL: gpt-4.1-nano
+        run: |
+          python tools/koubei_batch_submit.py "${{ github.event.inputs.vehicle_id }}" "${{ github.event.inputs.pages }}" "ja" | tee batch_id.txt
+          echo "BATCH_ID=$(cat batch_id.txt)" >> $GITHUB_ENV
+          echo "Saved batch meta:"
+          cat "autohome_reviews_${{ github.event.inputs.vehicle_id }}.batch.submit.json"
+
+      - name: Upload batch submit artifacts
+        if: ${{ github.event.inputs.mode == 'batch-submit' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_batch_submit
+          path: |
+            autohome_reviews_*.batch.input.jsonl
+            autohome_reviews_*.batch.submit.json
+            batch_id.txt
+
+      - name: Collect Batch (mode=batch-collect)
+        if: ${{ github.event.inputs.mode == 'batch-collect' && github.event.inputs.batch_id != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python tools/koubei_batch_collect.py "${{ github.event.inputs.batch_id }}" "${{ github.event.inputs.vehicle_id }}" "ja"
+
+      - name: Upload results (if collect or normal)
         if: always()
         uses: actions/upload-artifact@v4
         with:
