@@ -21,6 +21,9 @@ on:
   schedule:
     - cron: "0 2 1 * *"  # 毎月1日 02:00 UTC
 
+permissions:
+  contents: write
+
 jobs:
   summarize_reviews:
     runs-on: ubuntu-latest
@@ -107,6 +110,7 @@ jobs:
         run: |
           python tools/koubei_batch_collect.py "${{ github.event.inputs.batch_id }}" "${{ github.event.inputs.vehicle_id }}" "ja"
 
+      # === Story出力をoutput/koubei/<ID>/へ自動移動（上書き対応） ===
       - name: Move story report into output directory
         if: always()
         run: |
@@ -116,10 +120,24 @@ jobs:
             id=$(echo "$f" | sed -E 's/.*autohome_reviews_([0-9]+)_story\.txt/\1/')
             if [ -n "$id" ]; then
               mkdir -p "output/koubei/${id}"
-              mv "$f" "output/koubei/${id}/"
+              if [ -f "output/koubei/${id}/$(basename "$f")" ]; then
+                echo "Overwriting existing file for vehicle ${id}"
+                rm -f "output/koubei/${id}/$(basename "$f")"
+              fi
+              mv -f "$f" "output/koubei/${id}/"
               echo "Moved $f → output/koubei/${id}/"
             fi
           done
+
+      # === コミットしてリポジトリに反映（上書き保存も対応） ===
+      - name: Commit story reports into repo
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A output/koubei/
+          git commit -m "Update koubei story reports for ${{ github.event.inputs.vehicle_id }} [skip ci]" || echo "No changes"
+          git push
 
       - name: Upload results (if collect or normal)
         if: always()
@@ -131,3 +149,4 @@ jobs:
             autohome_reviews_*.txt
             autohome_reviews_*.md
             autohome_reviews_*.json
+            output/koubei/**
