@@ -10,9 +10,10 @@ Usage:
   python tools/koubei_summary_playwright.py <series_id> <pages>
 
 方針:
-- 一覧ページ抽出ロジックは完全に旧方式へ戻す（con-left＋正規表現併用）
-- 詳細ページ本文はTailwind対応(div.tw-whitespace-pre-wrap)
-- 既存のキャッシュ・JSON出力フローは一切変更なし
+- 一覧部は完全に旧来方式：HTML全体からre.findallでreview_id抽出
+- BeautifulSoupは使用しない（JS描画後のDOM全体から直接拾う）
+- 詳細部のみTailwind構造対応
+- 出力・キャッシュ構造は一切変更しない
 """
 
 DETAIL_URL = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
@@ -23,29 +24,11 @@ def build_list_url(series_id: str, page: int) -> str:
     else:
         return f"https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
 
-# ---------- 一覧: con-left＋全体スキャン併用（旧構成完全復元） ----------
-ID_PAT = re.compile(r"/detail/view_([A-Za-z0-9]+)(?:\\.html|\\.)")
-
+# ---------- 一覧（元の挙動を完全再現） ----------
 def extract_review_ids_from_html(html: str):
-    soup = BeautifulSoup(html, "lxml")
-    ids = []
-
-    # 1) 左カラム優先
-    left = soup.select_one(".con-left")
-    if left:
-        for a in left.find_all("a", href=True):
-            m = ID_PAT.search(a["href"])
-            if m:
-                ids.append(m.group(1))
-
-    # 2) 念のため全体からも拾う（フォールバック）
-    ids_all = ID_PAT.findall(html)
-    for rid in ids_all:
-        if rid not in ids:
-            ids.append(rid)
-
-    # unique化（順序保持）
-    return list(dict.fromkeys(ids))
+    ids = re.findall(r"/detail/view_([0-9]+)\\.html", html)
+    ids = list(dict.fromkeys(ids))
+    return ids
 
 # ---------- 詳細取得（Tailwind構造対応） ----------
 def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
@@ -63,7 +46,6 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
         page.set_viewport_size({"width": 1280, "height": 1800})
         try:
             page.goto(url, wait_until="networkidle", timeout=60000)
-
             # 展开全文クリック（あれば）
             try:
                 page.get_by_text("展开全文", exact=False).click(timeout=2000)
@@ -95,7 +77,7 @@ def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
             if cont:
                 body = cont.get_text("\n", strip=True)
 
-            # 旧構造フォールバック
+            # 保険：旧構造
             if not body:
                 for sel in ["div.content", "section.content", "article", "div#content"]:
                     n = soup.select_one(sel)
