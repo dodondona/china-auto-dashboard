@@ -32,14 +32,15 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      # ▼▼ 追記1：前回のcacheを復元（初回は無いので許容） ▼▼
-      - name: Download previous cache
-        uses: actions/download-artifact@v4
+      # ✅ 前回実行時の cache を復元（別実行間でも有効）
+      - name: Restore koubei cache
+        uses: actions/cache/restore@v4
         with:
-          name: koubei-cache
           path: cache/
-        continue-on-error: true
-      # ▲▲ 追記1ここまで ▲▲
+          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
+          restore-keys: |
+            koubei-cache-${{ inputs.series_id }}-
+            koubei-cache-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -125,7 +126,7 @@ jobs:
             output/koubei/${{ inputs.series_id }}/story.txt
             output/koubei/${{ inputs.series_id }}/story.md
 
-      # ⑧ summary ZIP をローカルで作成（アーティファクトZIPから取り出すため）
+      # ⑧ summary ZIP をローカルで作成
       - name: Pack summary zip (autohome-summary-<id>.zip)
         run: |
           set -e
@@ -170,11 +171,10 @@ jobs:
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ inputs.series_id }}"
           git push
 
-      # ▼▼ 追記2：更新したcacheを保存 ▼▼
-      - name: Upload cache folder
+      # ✅ 更新後の cache を保存（次回実行で復元される）
+      - name: Save koubei cache
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v4
         with:
-          name: koubei-cache
           path: cache/
-      # ▲▲ 追記2ここまで ▲▲
+          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
