@@ -79,6 +79,7 @@ def decode_html(body: bytes) -> str:
     # 最後の手段
     return body.decode("utf-8", errors="ignore")
 
+# ---------- 本文抽出部のみ修正 ----------
 def parse_detail_html_bytes(body: bytes) -> dict:
     html = decode_html(body)
     soup = BeautifulSoup(html, "lxml")
@@ -88,17 +89,30 @@ def parse_detail_html_bytes(body: bytes) -> dict:
     if t:
         title = re.sub(r"_口碑_汽车之家.*", "", t.get_text(strip=True))
 
-    text_blocks = [p.get_text(" ", strip=True) for p in soup.select(".text-con p")]
-    if not text_blocks:
-        # フォールバックいくつか（最小限）
-        for css in [".koubei-txt p", ".mouthcon-text p", ".text-con", ".koubei-txt", ".mouthcon-text", "article"]:
-            nodes = soup.select(css)
-            if nodes:
-                if css.endswith(" p"):
-                    text_blocks = [p.get_text(" ", strip=True) for p in nodes]
-                else:
-                    text_blocks = [" ".join(n.get_text(" ", strip=True) for n in nodes)]
-                break
+    # 新レイアウト対応: p.kb-item-msg 優先
+    nodes = soup.select(".kb-con .kb-item .kb-item-msg, .kb-item-msg")
+    if nodes:
+        text_blocks = [n.get_text(" ", strip=True) for n in nodes]
+    else:
+        text_blocks = [p.get_text(" ", strip=True) for p in soup.select(".text-con p")]
+        if not text_blocks:
+            # 旧レイアウトのフォールバック（元のまま）
+            for css in [
+                ".koubei-txt p",
+                ".mouthcon-text p",
+                ".text-con",
+                ".koubei-txt",
+                ".mouthcon-text",
+                "article",
+            ]:
+                nodes = soup.select(css)
+                if nodes:
+                    if css.endswith(" p"):
+                        text_blocks = [p.get_text(" ", strip=True) for p in nodes]
+                    else:
+                        text_blocks = [" ".join(n.get_text(" ", strip=True) for n in nodes)]
+                    break
+
     text = "\n".join([s for s in text_blocks if s]).strip()
     text = re.sub(r"\s+", " ", text)
     return {"title": title, "text": text}
