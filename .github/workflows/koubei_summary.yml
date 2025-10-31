@@ -1,16 +1,12 @@
-name: koubei_summary
+# .github/workflows/koubei_storywriter.yml
+name: koubei_storywriter
 
 on:
   workflow_dispatch:
     inputs:
       series_id:
-        description: "Autohome series ID"
+        description: "Autohome series ID（例: 7806）"
         required: true
-        type: string
-      pages:
-        description: "Number of pages to fetch"
-        required: true
-        default: "5"
         type: string
 
 jobs:
@@ -32,48 +28,64 @@ jobs:
         run: |
           set -e
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 lxml
-          pip install pandas  # 既存ツールでCSVを使うため（必要なら）
-          python -m playwright install chromium
+          pip install pandas openai
+          pip install playwright beautifulsoup4 lxml requests || true
+          python -m playwright install chromium || true
 
-      # ① 口コミ（詳細）収集＋キャッシュ＋zip出力（artifact 確認用）
-      - name: Fetch koubei details (cache + zip)
-        run: |
-          set -euo pipefail
-          python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
-
-      - name: Upload koubei detail cache
-        uses: actions/upload-artifact@v4
+      # （任意）上流ジョブが Zip を artifact で出している場合に備えて取得を試行
+      - name: Try download artifact (autohome_reviews_<id>)
+        uses: actions/download-artifact@v4
         with:
           name: autohome_reviews_${{ inputs.series_id }}
-          path: autohome_reviews_${{ inputs.series_id }}.zip
+          path: .
+        continue-on-error: true
 
-      # ② 既存の集計/整形 → CSV/中間生成物（あなたの従来パイプ）
-      #    ※ 既存の tools/koubei_summary.py をそのまま使う想定（第二引数=ページ数）
-      - name: Build CSV summary (existing step)
-        run: |
-          set -euo pipefail
-          python tools/koubei_summary.py "${{ inputs.series_id }}" "${{ inputs.pages }}" || true
-
-      # ③ API不要の長文レポ（既存）
-      - name: Build narrative report
-        run: |
-          set -euo pipefail
-          python tools/koubei_summary_to_report.py "${{ inputs.series_id }}" || true
-
-      # ④ Story 生成（既存）: OPENAI_API_KEY があれば高品質化、無くてもテンプレで出力可能な実装にしてあるはず
-      - name: Build story-style summary
-        run: |
-          set -euo pipefail
-          python tools/koubei_storywriter.py "${{ inputs.series_id }}" --pros 5 --cons 4 --quotes 2 --style executive || true
-
-      # ⑤ 仕上げの成果物（Story含む）をアップロード
-      - name: Upload story & reports
-        uses: actions/upload-artifact@v4
+      - name: Try download artifact (koubei_story_and_reports_<id>)
+        uses: actions/download-artifact@v4
         with:
           name: koubei_story_and_reports_${{ inputs.series_id }}
+          path: .
+        continue-on-error: true
+
+      - name: Detect zip input
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          ID="${{ inputs.series_id }}"
+          ZIP=""
+          for cand in \
+            "koubei_story_and_reports_${ID}.zip" \
+            "autohome_reviews_${ID}.zip"
+          do
+            if [ -s "$cand" ]; then ZIP="$cand"; break; fi
+          done
+          # fallback: 似たファイル名がある場合の最初の1つ
+          if [ -z "$ZIP" ]; then
+            ZIP=$(ls -1 *"${ID}"*.zip 2>/dev/null | head -n1 || true)
+          fi
+          if [ -z "$ZIP" ]; then
+            echo "No zip found for series_id=${ID}" >&2
+            exit 1
+          fi
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Using ZIP: $ZIP"
+
+      - name: Build CSV from JSON zip
+        run: |
+          set -euo pipefail
+          python tools/koubei_summary_to_csv.py "${{ steps.detect.outputs.zip }}"
+
+      - name: Generate story summary (LLM or fallback)
+        run: |
+          set -euo pipefail
+          python tools/koubei_storywriter.py "${{ inputs.series_id }}"
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_story_${{ inputs.series_id }}
           path: |
-            output/koubei/${{ inputs.series_id }}/autohome_reviews_*_story.txt
-            output/koubei/${{ inputs.series_id }}/*.txt
-            output/koubei/${{ inputs.series_id }}/*.md
-            output/koubei/${{ inputs.series_id }}/*.csv
+            autohome_reviews_${{ inputs.series_id }}.csv
+            autohome_reviews_${{ inputs.series_id }}_story.txt
+            autohome_reviews_${{ inputs.series_id }}_story.md
