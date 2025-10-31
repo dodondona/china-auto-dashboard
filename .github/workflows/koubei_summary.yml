@@ -7,23 +7,23 @@ on:
         description: "Autohome series ID（例: 7806）"
         required: true
         type: string
-      # 任意: すでにZIPが手元（リポジトリ内パスや Actions のArtifactsダウンロード等）にあるなら指定
       zip_path:
-        description: "Optional: ZIP file path already in workspace"
+        description: "Optional: workspaceに既にあるZIPのパス"
         required: false
         default: ""
         type: string
-      # 任意: 最終手段として再取得したい場合のみ true（デフォルトは実行しない）
       allow_refetch:
-        description: "Optional: if no ZIP found, re-fetch details to build ZIP"
+        description: "ZIPが見つからない場合に再取得を許可"
         required: false
         default: "false"
         type: choice
-        options: ["false","true"]
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: read
-  actions: read    # ← gh run download 用に必要
+  actions: read
 
 jobs:
   run:
@@ -36,20 +36,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          set -e
-          python -m pip install --upgrade pip
-          pip install pandas openai
-          pip install playwright beautifulsoup4 lxml requests || true
-          python -m playwright install chromium || true
+      - name: Install deps
+        run: "python -m pip install --upgrade pip && pip install pandas openai && pip install playwright beautifulsoup4 lxml requests || true && python -m playwright install chromium || true"
 
-      # （まずは従来通り：同一実行内のArtifactsに存在すれば拾う）
       - name: Try download artifact (autohome_reviews_<id>)
         uses: actions/download-artifact@v4
         with:
@@ -64,104 +58,46 @@ jobs:
           path: .
         continue-on-error: true
 
-      # ★ 追加：過去ランからのフォールバック（gh CLI）
-      - name: Fallback: download from previous runs via gh CLI
+      - name: Fallback via gh (previous successful runs)
         if: always()
         shell: bash
-        run: |
-          set -euo pipefail
-          ID="${{ inputs.series_id }}"
+        run: "ID='${{ inputs.series_id }}'; ls *\"${ID}\"*.zip >/dev/null 2>&1 && echo 'ZIP already present' || (echo 'searching previous runs'; for RUN in $(gh run list -L 30 --json databaseId,conclusion -q '.[] | select(.conclusion==\"success\") | .databaseId'); do gh run download \"$RUN\" --name \"koubei_story_and_reports_${ID}\" --repo \"$GITHUB_REPOSITORY\" --dir . || true; gh run download \"$RUN\" --name \"autohome_reviews_${ID}\" --repo \"$GITHUB_REPOSITORY\" --dir . || true; ls *\"${ID}\"*.zip >/dev/null 2>&1 && echo \"downloaded from run $RUN\" && break; done)"
 
-          # 既にZIPがあればスキップ
-          if ls -1 *"${ID}"*.zip >/dev/null 2>&1; then
-            echo "ZIP already present. Skipping gh fallback."
-            exit 0
-          fi
-
-          echo "Searching last 30 successful runs for artifacts..."
-          # 最新30件の成功ランを新しい順に走査し、該当artifact名を順に試す
-          for RUN in $(gh run list -L 30 --json databaseId,conclusion -q '.[] | select(.conclusion=="success") | .databaseId'); do
-            echo "Trying run $RUN ..."
-            gh run download "$RUN" --name "koubei_story_and_reports_${ID}" --repo "$GITHUB_REPOSITORY" --dir . || true
-            gh run download "$RUN" --name "autohome_reviews_${ID}"        --repo "$GITHUB_REPOSITORY" --dir . || true
-            if ls -1 *"${ID}"*.zip >/dev/null 2>&1; then
-              echo "Downloaded ZIP(s) from run $RUN"
-              break
-            fi
-          done
-
-      # 任意：手元パス指定があればそれを採用（上のDLと併用可）
-      - name: Use provided zip_path (if any)
+      - name: Use provided zip_path if any
         if: ${{ inputs.zip_path != '' }}
-        run: |
-          set -euo pipefail
-          test -s "${{ inputs.zip_path }}" || (echo "zip_path not found"; exit 1)
-          cp -f "${{ inputs.zip_path }}" .
+        run: "test -s '${{ inputs.zip_path }}' && cp -f '${{ inputs.zip_path }}' ."
 
-      # ZIP を検出
-      - name: Detect zip input
+      - name: Detect ZIP
         id: detect
         shell: bash
-        run: |
-          set -euo pipefail
-          ID="${{ inputs.series_id }}"
-          ZIP=""
-          # 優先順に解決
-          for cand in \
-            "koubei_story_and_reports_${ID}.zip" \
-            "autohome_reviews_${ID}.zip"
-          do
-            if [ -s "$cand" ]; then ZIP="$cand"; break; fi
-          done
-          # フリーパターン
-          if [ -z "$ZIP" ]; then
-            ZIP=$(ls -1 *"${ID}"*.zip 2>/dev/null | head -n1 || true)
-          fi
+        run: "ID='${{ inputs.series_id }}'; ZIP=''; C1=\"koubei_story_and_reports_${ID}.zip\"; C2=\"autohome_reviews_${ID}.zip\"; [ -s \"$C1\" ] && ZIP=\"$C1\"; [ -z \"$ZIP\" ] && [ -s \"$C2\" ] && ZIP=\"$C2\"; [ -z \"$ZIP\" ] && ZIP=$(ls *\"${ID}\"*.zip 2>/dev/null | head -n1 || true); if [ -z \"$ZIP\" ]; then echo 'zip=' >> $GITHUB_OUTPUT; echo 'REFETCH=1' >> $GITHUB_OUTPUT; if [ '${{ inputs.allow_refetch }}' != 'true' ]; then echo 'No zip found'; exit 1; fi; else echo \"zip=$ZIP\" >> $GITHUB_OUTPUT; fi"
 
-          if [ -z "$ZIP" ]; then
-            echo "No zip found for series_id=${ID}"
-            if [ "${{ inputs.allow_refetch }}" = "true" ]; then
-              echo "REFETCH=1" >> "$GITHUB_OUTPUT"
-            else
-              exit 1
-            fi
-          else
-            echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-            echo "Using ZIP: $ZIP"
-          fi
-
-      # 最終手段：ZIPが無ければ再取得してZIPを作る（既存スクリプトを流用）
-      - name: Refetch details and build ZIP (only if enabled)
+      - name: Refetch details and build ZIP
         if: ${{ steps.detect.outputs.REFETCH == '1' }}
-        run: |
-          set -euo pipefail
-          ID="${{ inputs.series_id }}"
-          # 既存の取得スクリプトでキャッシュとZIPを生成（本文抽出済み）
-          python tools/koubei_summary_playwright.py "${ID}" "5"
+        run: "python tools/koubei_summary_playwright.py '${{ inputs.series_id }}' '5'"
 
-      # JSON ZIP → CSV 変換（前工程を一切変えない）
-      - name: Build CSV from JSON zip
-        run: |
-          set -euo pipefail
-          ID="${{ inputs.series_id }}"
-          ZIP="${{ steps.detect.outputs.zip }}"
-          if [ -z "${ZIP:-}" ]; then
-            # refetchで作成された ZIP を拾う
-            ZIP="autohome_reviews_${ID}.zip"
-          fi
-          python tools/koubei_summary_to_csv.py "${ZIP}"
+      - name: Build CSV from JSON ZIP
+        env:
+          DETECTED_ZIP: ${{ steps.detect.outputs.zip }}
+        run: "Z=\"$DETECTED_ZIP\"; if [ -z \"$Z\" ]; then Z='autohome_reviews_${{ inputs.series_id }}.zip'; fi; python tools/koubei_summary_to_csv.py \"$Z\""
 
-      # 既存の storywriter をそのまま実行
-      - name: Generate story summary (LLM or fallback)
-        run: |
-          set -euo pipefail
-          python tools/koubei_storywriter.py "${{ inputs.series_id }}"
+      - name: Generate story (use koubei_storywriter.py as-is)
+        run: "python tools/koubei_storywriter.py '${{ inputs.series_id }}'"
 
-      - name: Upload outputs
+      - name: Upload CSV
         uses: actions/upload-artifact@v4
         with:
-          name: koubei_story_${{ inputs.series_id }}
-          path: |
-            autohome_reviews_${{ inputs.series_id }}.csv
-            autohome_reviews_${{ inputs.series_id }}_story.txt
-            autohome_reviews_${{ inputs.series_id }}_story.md
+          name: koubei_story_${{ inputs.series_id }}_csv
+          path: autohome_reviews_${{ inputs.series_id }}.csv
+
+      - name: Upload story TXT
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_story_${{ inputs.series_id }}_txt
+          path: autohome_reviews_${{ inputs.series_id }}_story.txt
+
+      - name: Upload story MD
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei_story_${{ inputs.series_id }}_md
+          path: autohome_reviews_${{ inputs.series_id }}_story.md
