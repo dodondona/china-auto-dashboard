@@ -32,6 +32,15 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
+      # ▼▼ 追記1：前回のcacheを復元（初回は無いので許容） ▼▼
+      - name: Download previous cache
+        uses: actions/download-artifact@v4
+        with:
+          name: koubei-cache
+          path: cache/
+        continue-on-error: true
+      # ▲▲ 追記1ここまで ▲▲
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -71,27 +80,28 @@ jobs:
         run: |
           set -e
           python tools/koubei_storywriter.py "${{ inputs.series_id }}"
-          test -s "autohome_reviews_${{ inputs.series_id }}_story.txt"
-          test -s "autohome_reviews_${{ inputs.series_id }}_story.md"
+          test -s "output/koubei/${{ inputs.series_id }}/story.txt"
+          test -s "output/koubei/${{ inputs.series_id }}/story.md"
           mkdir -p "cache/${{ inputs.series_id }}"
-          cp "autohome_reviews_${{ inputs.series_id }}_story.txt" "cache/${{ inputs.series_id }}/story.txt"
+          cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ スキップ時の処理を修正：キャッシュがなければ1回だけ生成（その他一切変更なし）
+      # ⑤ スキップ時：キャッシュ再利用。なければ1回だけ生成してseed
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
           set -e
           ID="${{ inputs.series_id }}"
           if [ -s "cache/${ID}/story.txt" ]; then
-            cp "cache/${ID}/story.txt" "autohome_reviews_${ID}_story.txt"
-            cp "cache/${ID}/story.txt" "autohome_reviews_${ID}_story.md"
+            mkdir -p "output/koubei/${ID}"
+            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
+            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md"
           else
             echo "No cached story for ${ID}; generating once to seed cache."
             python tools/koubei_storywriter.py "${ID}"
-            test -s "autohome_reviews_${ID}_story.txt"
-            test -s "autohome_reviews_${ID}_story.md"
+            test -s "output/koubei/${ID}/story.txt"
+            test -s "output/koubei/${ID}/story.md"
             mkdir -p "cache/${ID}"
-            cp "autohome_reviews_${ID}_story.txt" "cache/${ID}/story.txt"
+            cp "output/koubei/${ID}/story.txt" "cache/${ID}/story.txt"
           fi
 
       # ⑥ サニティチェック
@@ -100,11 +110,11 @@ jobs:
           set -e
           ID="${{ inputs.series_id }}"
           ls -lh autohome_reviews_${ID}.zip autohome_reviews_${ID}.csv || true
-          ls -lh autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
+          ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
           wc -l autohome_reviews_${ID}.csv || true
-          wc -c autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
+          wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
-      # ⑦ 従来の成果物をアップロード（既存の命名・内容は維持）
+      # ⑦ 従来の成果物をアップロード（任意）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -112,10 +122,10 @@ jobs:
           path: |
             autohome_reviews_${{ inputs.series_id }}.zip
             autohome_reviews_${{ inputs.series_id }}.csv
-            autohome_reviews_${{ inputs.series_id }}_story.txt
-            autohome_reviews_${{ inputs.series_id }}_story.md
+            output/koubei/${{ inputs.series_id }}/story.txt
+            output/koubei/${{ inputs.series_id }}/story.md
 
-      # ⑧ summary ZIP をローカルで作成
+      # ⑧ summary ZIP をローカルで作成（アーティファクトZIPから取り出すため）
       - name: Pack summary zip (autohome-summary-<id>.zip)
         run: |
           set -e
@@ -124,8 +134,8 @@ jobs:
           zip -j "autohome-summary-${ID}.zip" \
             "autohome_reviews_${ID}.zip" \
             "autohome_reviews_${ID}.csv" \
-            "autohome_reviews_${ID}_story.txt" \
-            "autohome_reviews_${ID}_story.md"
+            "output/koubei/${ID}/story.txt" \
+            "output/koubei/${ID}/story.md"
 
       # ⑨ summary ZIP をアーティファクトとしてアップロード
       - name: Upload summary zip artifact
@@ -141,8 +151,8 @@ jobs:
           name: autohome-summary-${{ inputs.series_id }}
           path: _artifacts
 
-      # ⑪ ダウンロードしたアーティファクトZIPから story.txt を output/<id>/ に抽出
-      - name: Extract story.txt from artifact zip to output/<id>
+      # ⑪ ダウンロードしたアーティファクトZIPから story.txt を output/koubei/<id>/ に抽出
+      - name: Extract story.txt from artifact zip to output/koubei/<id>
         env:
           ARTIFACT_DIR: _artifacts
           SERIES_ID: ${{ inputs.series_id }}
@@ -156,6 +166,15 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "output/${{ inputs.series_id }}/story.txt"
-          git diff --cached --quiet || git commit -m "Add/Update story.txt for ${{ inputs.series_id }}"
+          git add "output/koubei/${{ inputs.series_id }}/story.txt"
+          git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ inputs.series_id }}"
           git push
+
+      # ▼▼ 追記2：更新したcacheを保存 ▼▼
+      - name: Upload cache folder
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koubei-cache
+          path: cache/
+      # ▲▲ 追記2ここまで ▲▲
