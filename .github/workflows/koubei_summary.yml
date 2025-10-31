@@ -1,12 +1,19 @@
-name: koubei_storywriter
+name: koubei_summary
 
 on:
   workflow_dispatch:
     inputs:
       series_id:
-        description: "Autohome series ID（例: 7806）"
+        description: "Autohome series ID"
         required: true
         type: string
+      pages:
+        description: "Number of review pages to fetch"
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   run:
@@ -18,61 +25,57 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        run: "python -m pip install --upgrade pip && pip install pandas openai && pip install playwright beautifulsoup4 lxml requests || true && python -m playwright install chromium || true"
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install playwright beautifulsoup4 lxml requests pandas openai
+          python -m playwright install chromium || true
 
-      # ① レビュー詳細を再取得して ZIP を作成（本文抽出は既存pyのまま）
-      - name: Fetch koubei details and build zip
-        run: "python tools/koubei_summary_playwright.py '${{ inputs.series_id }}' '5'"
+      # ① Playwrightでレビュー本文取得
+      - name: Fetch Koubei detail pages
+        run: |
+          python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
 
-      # ② ZIP → CSV 変換（既存 storywriter が読むCSVを生成）
-      - name: Build CSV from JSON zip
-        run: "python tools/koubei_summary_to_csv.py 'autohome_reviews_${{ inputs.series_id }}.zip'"
-
-      # ③ 既存の要約スクリプトを“そのまま”実行（変更なし）
-      - name: Generate story (use koubei_storywriter.py as-is)
-        run: "python tools/koubei_storywriter.py '${{ inputs.series_id }}'"
-
-      # 生成物を個別にアップロード（ヒア構文なし・パス1件ずつ）
-      - name: Upload CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: koubei_story_${{ inputs.series_id }}_csv
-          path: autohome_reviews_${{ inputs.series_id }}.csv
-
-      - name: Upload story TXT
-        uses: actions/upload-artifact@v4
-        with:
-          name: koubei_story_${{ inputs.series_id }}_txt
-          path: autohome_reviews_${{ inputs.series_id }}_story.txt
-
-      - name: Upload story MD
-        uses: actions/upload-artifact@v4
-        with:
-          name: koubei_story_${{ inputs.series_id }}_md
-          path: autohome_reviews_${{ inputs.series_id }}_story.md
-
+      # ② JSON→CSV化（ルート直下）
       - name: Build CSV/TXT from JSON
         run: |
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ inputs.series_id }}.zip"
 
-      - name: Install deps for storywriter
+      # ③ storywriter実行前確認（CSV内容ログ）
+      - name: Preflight check
         run: |
-          python -m pip install --upgrade pip
-          pip install openai pandas
+          python - <<'PY'
+          import pandas as pd
+          from tools.koubei_storywriter import detect_csv
+          sid = "${{ inputs.series_id }}".strip()
+          csv_path = detect_csv(sid)
+          df = pd.read_csv(csv_path)
+          print(f"[preflight] csv_path={csv_path}")
+          print(f"[preflight] rows={len(df)} cols={list(df.columns)}")
+          print(df.head(3).to_string(index=False))
+          PY
 
-      - name: Run storywriter (summary)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # ④ storywriterで要約生成
+      - name: Run storywriter
         run: |
           python tools/koubei_storywriter.py "${{ inputs.series_id }}"
 
-      - name: Upload artifacts (CSV & Story)
+      # ⑤ 出力確認
+      - name: Postflight verification
+        run: |
+          ID="${{ inputs.series_id }}"
+          ls -lh autohome_reviews_${ID}.csv autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md
+          wc -l autohome_reviews_${ID}.csv || true
+          wc -c autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
+
+      # ⑥ 成果物をArtifact化
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autohome-summary-${{ inputs.series_id }}
@@ -80,4 +83,3 @@ jobs:
             autohome_reviews_${{ inputs.series_id }}.csv
             autohome_reviews_${{ inputs.series_id }}_story.txt
             autohome_reviews_${{ inputs.series_id }}_story.md
-
