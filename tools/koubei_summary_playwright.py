@@ -1,216 +1,144 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import sys, re, json, time
+import sys, os, re, time, json
 from pathlib import Path
-from typing import Iterable, List, Dict, Optional
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
-# ========= 定数 =========
-LIST_URL_P1 = "https://k.autohome.com.cn/{series_id}"
-LIST_URL_PN = "https://k.autohome.com.cn/{series_id}/index_{page}.html?#listcontainer"
-DETAIL_URL   = "https://k.autohome.com.cn/detail/view_{reviewid}.html"
+# =====================================================
+# ユーティリティ
+# =====================================================
+def decode_html(body: bytes) -> str:
+    try:
+        return body.decode("utf-8", errors="ignore")
+    except Exception:
+        try:
+            return body.decode("gb18030", errors="ignore")
+        except Exception:
+            return body.decode("latin1", errors="ignore")
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
-# ========= 一覧ページから左カラムのみで review_id を抜く（現行方針のまま） =========
-def extract_review_ids_from_list_html(html: str) -> List[str]:
+def save_json(obj, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def save_text(text, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+# =====================================================
+# HTML解析: ここだけ修正版
+# =====================================================
+def parse_detail_html_bytes(body: bytes) -> dict:
+    html = decode_html(body)
     soup = BeautifulSoup(html, "lxml")
-    left = soup.select_one(".con-left") or soup  # 念のためフォールバック
-    ids: List[str] = []
-    for a in left.select("a[href]"):
-        m = re.search(r"/detail/view_([^.]+)\.html", a.get("href",""))
-        if m:
-            ids.append(m.group(1))
-    # 重複除去（順序維持）
-    seen = set()
-    out = []
-    for x in ids:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
 
-def fetch_list_review_ids(pw, series_id: str, pages: int) -> List[str]:
-    browser = pw.chromium.launch(headless=True)
-    page = browser.new_page()
-    page.set_extra_http_headers({
-        "User-Agent": UA,
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": f"https://k.autohome.com.cn/{series_id}"
-    })
+    title = ""
+    t = soup.find("title")
+    if t:
+        title = re.sub(r"_口碑_汽车之家.*", "", t.get_text(strip=True))
 
-    all_ids: List[str] = []
-    try:
-        for p in range(1, pages+1):
-            url = LIST_URL_P1.format(series_id=series_id) if p==1 \
-                  else LIST_URL_PN.format(series_id=series_id, page=p)
-            print(f"[page {p}] fetching… {url}")
-            # 一覧は静的に取れているので従来通り domcontentloaded でOK
-            resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            if not resp:
-                print(f"[page {p}] no response")
-                continue
-            html = page.content()  # ← ページ側のエンコードを意識せずUTF-8で取れる
-            ids = extract_review_ids_from_list_html(html)
-            print(f"[page {p}] found {len(ids)} reviews")
-            all_ids.extend(ids)
-    finally:
-        page.close()
-        browser.close()
+    # === 新レイアウト: 本文は p.kb-item-msg に格納 ===
+    # 例: div.kb-con > div.kb-item > p.kb-item-msg
+    nodes = soup.select(".kb-con .kb-item .kb-item-msg, .kb-item-msg")
+    if nodes:
+        text_blocks = [n.get_text(" ", strip=True) for n in nodes]
+    else:
+        # 旧レイアウトフォールバック（既存順序維持）
+        text_blocks = [p.get_text(" ", strip=True) for p in soup.select(".text-con p")]
+        if not text_blocks:
+            for css in [
+                ".koubei-txt p",
+                ".mouthcon-text p",
+                ".text-con",
+                ".koubei-txt",
+                ".mouthcon-text",
+                "article",
+            ]:
+                nodes = soup.select(css)
+                if nodes:
+                    if css.endswith(" p"):
+                        text_blocks = [p.get_text(" ", strip=True) for p in nodes]
+                    else:
+                        text_blocks = [" ".join(n.get_text(" ", strip=True) for n in nodes)]
+                    break
 
-    # 重複除去
-    seen, uniq = set(), []
-    for rid in all_ids:
-        if rid not in seen:
-            seen.add(rid)
-            uniq.append(rid)
-    return uniq
+    text = "\n".join([s for s in text_blocks if s]).strip()
+    text = re.sub(r"\s+", " ", text)
+    return {"title": title, "text": text}
 
-# ========= Shadow DOMを含め「描画後DOM」から本文を抜く =========
-_JS_GET_TEXT = r"""
-() => {
-  function collectText(root) {
-    let buf = [];
-    function walk(node) {
-      if (!node) return;
-      if (node.nodeType === Node.TEXT_NODE) {
-        const t = node.nodeValue.trim();
-        if (t) buf.push(t);
-      }
-      // Shadow DOM
-      if (node.shadowRoot) walk(node.shadowRoot);
-      // 子ノード
-      const kids = node.childNodes || [];
-      for (let i=0; i<kids.length; i++) walk(kids[i]);
-    }
-    walk(root);
-    let text = buf.join("\n");
-    // 連続改行の圧縮
-    text = text.replace(/\n{3,}/g, "\n\n");
-    return text;
-  }
 
-  // よくある候補を優先的に
-  const candidates = [
-    "article", ".text-con", ".content", ".con", ".review", ".kb-detail", ".kb-con",
-    ".main", ".wrap", "body"
-  ];
-  for (const sel of candidates) {
-    const el = document.querySelector(sel);
-    if (el) {
-      const t = collectText(el);
-      if (t && t.length > 80) return t;
-    }
-  }
-  // 最悪 body 全体
-  return collectText(document.body);
-}
-"""
+# =====================================================
+# ページ取得と解析
+# =====================================================
+def fetch_reviews_for_series(playwright, series_id: str, max_pages: int):
+    base_url = f"https://k.autohome.com.cn/{series_id}"
+    results = []
+    with playwright.chromium.launch(headless=True) as browser:
+        context = browser.new_context(locale="zh-CN")
+        page = context.new_page()
+        for page_num in range(1, max_pages + 1):
+            url = f"{base_url}/index_{page_num}.html#listcontainer" if page_num > 1 else base_url
+            print(f"[page {page_num}] fetching…")
+            page.goto(url, wait_until="networkidle", timeout=60000)
+            html = page.content()
+            soup = BeautifulSoup(html, "lxml")
+            items = soup.select(".mouthcon-cont .mouthcon-cont-right, .kb-list .kb-item")
+            print(f"[page {page_num}] found {len(items)} reviews")
+            for it in items:
+                a = it.select_one("a")
+                if not a or not a.get("href"):
+                    continue
+                link = a["href"]
+                if not link.startswith("http"):
+                    link = "https://k.autohome.com.cn" + link
+                results.append(link)
+        context.close()
+    return results
 
-def fetch_detail_rendered(page, reviewid: str) -> Optional[Dict]:
-    url = DETAIL_URL.format(reviewid=reviewid)
-    # SPA/ShadowDOM のため networkidle まで待つ（XHR/水位が落ちるまで）
-    page.set_extra_http_headers({
-        "User-Agent": UA,
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://k.autohome.com.cn/"
-    })
-    page.goto(url, wait_until="networkidle", timeout=90000)
-    # 明示的に body の可視化を待つ
-    page.wait_for_selector("body", timeout=30000)
 
-    # タイトルは document.title
-    title = page.evaluate("() => document.title || ''") or ""
+# =====================================================
+# メイン
+# =====================================================
+def main(series_id: str, pages: int):
+    outdir = Path(f"autohome_reviews_{series_id}")
+    outdir.mkdir(exist_ok=True)
+    all_reviews = []
 
-    # Shadow DOM 貫通で本文抽出
-    content = page.evaluate(_JS_GET_TEXT) or ""
-
-    # 文字数が少なすぎる場合は失敗扱い
-    if len(content.strip()) < 40:
-        return None
-
-    # ついでに目に見える日付らしき文字列を軽く拾う（失敗してもOK）
-    # 例: 2025-08-01 / 2025/08/01 / 2025年08月01日
-    visible = content
-    m = re.search(r"(20\d{2}[./\-年]\s*\d{1,2}[./\-月]\s*\d{1,2}日?)", visible)
-    date_guess = m.group(1) if m else None
-
-    return {
-        "title": title.strip() or None,
-        "date": date_guess,
-        "url": url,
-        "content": content.strip()
-    }
-
-# ========= 詳細をキャッシュに保存（JSON; UTF-8, ensure_ascii=False） =========
-def fetch_detail_into_cache(pw, reviewid: str, cache_dir: Path) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{reviewid}.json"
-    if cache_file.exists():
-        return
-
-    browser = pw.chromium.launch(headless=True)
-    page = browser.new_page(viewport={"width": 1280, "height": 1600})
-
-    try:
-        # 1回目トライ
-        data = fetch_detail_rendered(page, reviewid)
-        if data is None:
-            # 軽い再試行（クッキー／ブロック対策）
-            time.sleep(1.0)
-            page.reload(wait_until="networkidle", timeout=90000)
-            data = fetch_detail_rendered(page, reviewid)
-
-        if data is None:
-            print(f"    [warn] empty/short content: {reviewid}")
-            data = {"title": None, "date": None, "url": DETAIL_URL.format(reviewid=reviewid), "content": None}
-
-        with cache_file.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-    finally:
-        page.close()
-        browser.close()
-
-# ========= メイン =========
-def main(series_id: str, pages: int) -> None:
-    out_dir  = Path("output") / "koubei" / series_id
-    cache_dir = Path("cache") / "koubei" / series_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    with sync_playwright() as pw:
-        # 一覧（既存の取得方針はそのまま）
-        review_ids = fetch_list_review_ids(pw, series_id, pages)
-        if not review_ids:
-            print("[done] parsed 0 reviews (DOM未ロードの可能性あり)")
-            return
-
-        # 詳細（ここだけ手法を変更：描画後DOMから取得）
-        print(f"[detail] fetching {len(review_ids)} reviews…")
-        for i, rid in enumerate(review_ids, 1):
-            print(f"  [{i}/{len(review_ids)}] {rid}")
+    with sync_playwright() as p:
+        urls = fetch_reviews_for_series(p, series_id, pages)
+        print(f"[done] collected {len(urls)} review links")
+        context = p.chromium.launch(headless=True).new_context(locale="zh-CN")
+        page = context.new_page()
+        for i, url in enumerate(urls, 1):
+            print(f"[{i}/{len(urls)}] parsing {url}")
             try:
-                fetch_detail_into_cache(pw, rid, cache_dir)
-            except PWTimeout:
-                print(f"    [timeout] {rid}")
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                body = page.content().encode("utf-8", errors="ignore")
+                data = parse_detail_html_bytes(body)
+                data["url"] = url
+                all_reviews.append(data)
             except Exception as e:
-                print(f"    [error] {rid}: {e}")
+                print("Error:", e)
+                continue
+        context.close()
 
-    # zip化（artifact名は従来通り）
-    import shutil
-    zipname = f"autohome_reviews_{series_id}"
-    shutil.make_archive(zipname, "zip", cache_dir)
-    print(f"[done] cached and zipped -> {zipname}.zip")
+    # 保存
+    save_json(all_reviews, outdir / f"reviews_{series_id}.json")
+    text_concat = "\n\n".join([f"{r['title']}\n{r['text']}" for r in all_reviews])
+    save_text(text_concat, outdir / f"reviews_{series_id}.txt")
+    print(f"[done] parsed {len(all_reviews)} reviews")
 
+
+# =====================================================
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python tools/koubei_summary_playwright.py <series_id> <pages>")
+        print("Usage: python koubei_summary_playwright.py <series_id> <pages>")
         sys.exit(1)
-    series_id = sys.argv[1].strip()
+    series_id = sys.argv[1]
     pages = int(sys.argv[2])
     main(series_id, pages)
