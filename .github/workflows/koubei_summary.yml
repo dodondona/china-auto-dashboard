@@ -58,7 +58,7 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ inputs.series_id }}.zip"
           test -s "autohome_reviews_${{ inputs.series_id }}.csv"
 
-      # ③ 差分しきい値でLLM生成の要否を判定（新規レビューIDがMIN_DIFF件以上なら生成）
+      # ③ 差分しきい値でLLM生成の要否を判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
@@ -76,14 +76,23 @@ jobs:
           mkdir -p "cache/${{ inputs.series_id }}"
           cp "autohome_reviews_${{ inputs.series_id }}_story.txt" "cache/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ 生成をスキップした場合は前回キャッシュを再利用し、同名成果物を用意
-      - name: Reuse cached story when skipped
+      # ⑤ スキップ時の処理を修正：キャッシュがなければ1回だけ生成（その他一切変更なし）
+      - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
           set -e
-          test -s "cache/${{ inputs.series_id }}/story.txt" || { echo "No cached story for ${{ inputs.series_id }}"; exit 0; }
-          cp "cache/${{ inputs.series_id }}/story.txt" "autohome_reviews_${{ inputs.series_id }}_story.txt"
-          cp "cache/${{ inputs.series_id }}/story.txt" "autohome_reviews_${{ inputs.series_id }}_story.md"
+          ID="${{ inputs.series_id }}"
+          if [ -s "cache/${ID}/story.txt" ]; then
+            cp "cache/${ID}/story.txt" "autohome_reviews_${ID}_story.txt"
+            cp "cache/${ID}/story.txt" "autohome_reviews_${ID}_story.md"
+          else
+            echo "No cached story for ${ID}; generating once to seed cache."
+            python tools/koubei_storywriter.py "${ID}"
+            test -s "autohome_reviews_${ID}_story.txt"
+            test -s "autohome_reviews_${ID}_story.md"
+            mkdir -p "cache/${ID}"
+            cp "autohome_reviews_${ID}_story.txt" "cache/${ID}/story.txt"
+          fi
 
       # ⑥ サニティチェック
       - name: Sanity check outputs
@@ -106,7 +115,7 @@ jobs:
             autohome_reviews_${{ inputs.series_id }}_story.txt
             autohome_reviews_${{ inputs.series_id }}_story.md
 
-      # ⑧ summary ZIP をローカルで作成（アーティファクトZIPから取り出すため）
+      # ⑧ summary ZIP をローカルで作成
       - name: Pack summary zip (autohome-summary-<id>.zip)
         run: |
           set -e
@@ -125,7 +134,7 @@ jobs:
           name: autohome-summary-${{ inputs.series_id }}
           path: autohome-summary-${{ inputs.series_id }}.zip
 
-      # ⑩ 直後にアーティファクトをダウンロード（ZIPから取り出す運用に統一）
+      # ⑩ 直後にアーティファクトをダウンロード
       - name: Download summary zip artifact
         uses: actions/download-artifact@v4
         with:
