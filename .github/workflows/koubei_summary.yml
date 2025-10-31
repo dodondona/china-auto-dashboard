@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
 
+env:
+  SERIES_ID: ${{ inputs.series_id }}
+  MIN_DIFF: "3"  # 新規IDがこの数以上でLLM要約を再実行（省コストの閾値）
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -24,6 +28,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,49 +44,84 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
-      # ① Playwrightでレビュー本文取得
+      # ① Playwrightでレビュー本文取得（詳細HTML→JSONキャッシュ→zip化）
       - name: Fetch Koubei detail pages
         run: |
+          set -e
           python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
+          test -s "autohome_reviews_${{ inputs.series_id }}.zip"
 
-      # ② JSON→CSV化（ルート直下）
-      - name: Build CSV/TXT from JSON
+      # ② ZIP→CSV 変換（storywriterはCSVを入力とする前提）
+      - name: Convert ZIP to CSV
         run: |
+          set -e
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ inputs.series_id }}.zip"
+          test -s "autohome_reviews_${{ inputs.series_id }}.csv"
 
-      # ③ storywriter実行前確認（CSV内容ログ）
-      - name: Preflight check
+      # ③ 差分しきい値でLLM生成の要否を判定（新規レビューIDがMIN_DIFF件以上なら生成）
+      - name: Decide whether to (re)generate story by diff
+        id: diffguard
         run: |
-          python - <<'PY'
-          import pandas as pd
-          from tools.koubei_storywriter import detect_csv
-          sid = "${{ inputs.series_id }}".strip()
-          csv_path = detect_csv(sid)
-          df = pd.read_csv(csv_path)
-          print(f"[preflight] csv_path={csv_path}")
-          print(f"[preflight] rows={len(df)} cols={list(df.columns)}")
-          print(df.head(3).to_string(index=False))
-          PY
+          set -e
+          python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
-      # ④ storywriterで要約生成
-      - name: Run storywriter
+      # ④ LLMで要約を生成（差分が閾値以上のときのみ）
+      - name: Generate story with LLM
+        if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
+          set -e
           python tools/koubei_storywriter.py "${{ inputs.series_id }}"
+          # 生成物の存在確認
+          test -s "autohome_reviews_${{ inputs.series_id }}_story.txt"
+          test -s "autohome_reviews_${{ inputs.series_id }}_story.md"
+          # キャッシュにも保存（次回スキップ時に使う）
+          mkdir -p "cache/${{ inputs.series_id }}"
+          cp "autohome_reviews_${{ inputs.series_id }}_story.txt" "cache/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ 出力確認
-      - name: Postflight verification
+      # ⑤ 生成をスキップした場合は前回キャッシュを再利用し、同名成果物を用意
+      - name: Reuse cached story when skipped
+        if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
+          set -e
+          test -s "cache/${{ inputs.series_id }}/story.txt" || { echo "No cached story for ${{ inputs.series_id }}"; exit 0; }
+          cp "cache/${{ inputs.series_id }}/story.txt" "autohome_reviews_${{ inputs.series_id }}_story.txt"
+          cp "cache/${{ inputs.series_id }}/story.txt" "autohome_reviews_${{ inputs.series_id }}_story.md"
+
+      # ⑥ サニティチェック
+      - name: Sanity check outputs
+        run: |
+          set -e
           ID="${{ inputs.series_id }}"
-          ls -lh autohome_reviews_${ID}.csv autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md
+          ls -lh autohome_reviews_${ID}.zip autohome_reviews_${ID}.csv || true
+          ls -lh autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
           wc -l autohome_reviews_${ID}.csv || true
           wc -c autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
 
-      # ⑥ 成果物をArtifact化
+      # ⑦ 成果物をArtifact化（従来名を維持）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: autohome-summary-${{ inputs.series_id }}
           path: |
+            autohome_reviews_${{ inputs.series_id }}.zip
             autohome_reviews_${{ inputs.series_id }}.csv
             autohome_reviews_${{ inputs.series_id }}_story.txt
             autohome_reviews_${{ inputs.series_id }}_story.md
+
+      # ⑧ Artifact（zip）から story.txt を必ず output/<id>/ に展開
+      - name: Ensure story.txt -> output/<id> from artifact zip
+        run: |
+          set -e
+          # 直前に生成した同名zipをそのまま使う前提
+          # （別ジョブでdownloadする場合は download-artifact を追加してください）
+          python tools/extract_story_to_output.py
+
+      # ⑨ story.txt をコミット（差分があるときのみ）
+      - name: Commit story.txt to repository
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "output/${{ inputs.series_id }}/story.txt"
+          git diff --cached --quiet || git commit -m "Add/Update story.txt for ${{ inputs.series_id }}"
+          git push
