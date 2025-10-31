@@ -44,14 +44,14 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
-      # ① Playwrightでレビュー本文取得（詳細HTML→JSONキャッシュ→zip化）
+      # ① Playwrightでレビュー本文取得（詳細HTML/JSONを収集しZIP化）
       - name: Fetch Koubei detail pages
         run: |
           set -e
           python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
           test -s "autohome_reviews_${{ inputs.series_id }}.zip"
 
-      # ② ZIP→CSV 変換（storywriterはCSVを入力とする前提）
+      # ② ZIP→CSV 変換
       - name: Convert ZIP to CSV
         run: |
           set -e
@@ -71,10 +71,8 @@ jobs:
         run: |
           set -e
           python tools/koubei_storywriter.py "${{ inputs.series_id }}"
-          # 生成物の存在確認
           test -s "autohome_reviews_${{ inputs.series_id }}_story.txt"
           test -s "autohome_reviews_${{ inputs.series_id }}_story.md"
-          # キャッシュにも保存（次回スキップ時に使う）
           mkdir -p "cache/${{ inputs.series_id }}"
           cp "autohome_reviews_${{ inputs.series_id }}_story.txt" "cache/${{ inputs.series_id }}/story.txt"
 
@@ -97,26 +95,53 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c autohome_reviews_${ID}_story.txt autohome_reviews_${ID}_story.md || true
 
-      # ⑦ 成果物をArtifact化（従来名を維持）
+      # ⑦ 従来の成果物をアップロード（既存の命名・内容は維持）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-summary-${{ inputs.series_id }}
+          name: autohome-reviews-${{ inputs.series_id }}
           path: |
             autohome_reviews_${{ inputs.series_id }}.zip
             autohome_reviews_${{ inputs.series_id }}.csv
             autohome_reviews_${{ inputs.series_id }}_story.txt
             autohome_reviews_${{ inputs.series_id }}_story.md
 
-      # ⑧ Artifact（zip）から story.txt を必ず output/<id>/ に展開
-      - name: Ensure story.txt -> output/<id> from artifact zip
+      # ⑧ summary ZIP をローカルで作成（アーティファクトZIPから取り出すため）
+      - name: Pack summary zip (autohome-summary-<id>.zip)
         run: |
           set -e
-          # 直前に生成した同名zipをそのまま使う前提
-          # （別ジョブでdownloadする場合は download-artifact を追加してください）
+          ID="${{ inputs.series_id }}"
+          rm -f "autohome-summary-${ID}.zip"
+          zip -j "autohome-summary-${ID}.zip" \
+            "autohome_reviews_${ID}.zip" \
+            "autohome_reviews_${ID}.csv" \
+            "autohome_reviews_${ID}_story.txt" \
+            "autohome_reviews_${ID}_story.md"
+
+      # ⑨ summary ZIP をアーティファクトとしてアップロード
+      - name: Upload summary zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-summary-${{ inputs.series_id }}
+          path: autohome-summary-${{ inputs.series_id }}.zip
+
+      # ⑩ 直後にアーティファクトをダウンロード（ZIPから取り出す運用に統一）
+      - name: Download summary zip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: autohome-summary-${{ inputs.series_id }}
+          path: _artifacts
+
+      # ⑪ ダウンロードしたアーティファクトZIPから story.txt を output/<id>/ に抽出
+      - name: Extract story.txt from artifact zip to output/<id>
+        env:
+          ARTIFACT_DIR: _artifacts
+          SERIES_ID: ${{ inputs.series_id }}
+        run: |
+          set -e
           python tools/extract_story_to_output.py
 
-      # ⑨ story.txt をコミット（差分があるときのみ）
+      # ⑫ story.txt をコミット（変更がある場合のみ）
       - name: Commit story.txt to repository
         run: |
           set -e
