@@ -12,7 +12,6 @@ permissions:
   contents: write
 
 jobs:
-  # 上流パイプラインの成果物から series_id を集める
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
@@ -40,7 +39,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifact
-          # 上流 workflow_run の成果物を安全にダウンロード
           gh run download ${{ github.event.workflow_run.id }} \
             --name autohome-series-urls \
             --dir artifact \
@@ -52,25 +50,20 @@ jobs:
         id: mkjson
         run: |
           set -euo pipefail
-          # 安全に series_ids.txt を探索
           src="artifact/series_ids.txt"
           if [ ! -f "$src" ]; then
             echo "series_ids.txt not found directly under artifact/, trying fallback..."
             src=$(find artifact -type f -name "series_ids.txt" | head -n 1 || true)
           fi
-
           if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
             echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
-
           echo "Top of series IDs:"
           head -n 10 "$src" || true
-
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
 
-  # 各IDごとに autohome_config_test と同じ処理を実行
   run_per_series_like_test:
     needs: prepare_series_from_pipeline
     if: ${{ needs.prepare_series_from_pipeline.outputs.series != '' }}
@@ -109,8 +102,7 @@ jobs:
           set -e
           ID="${{ matrix.series }}"
           echo "Processing series: ${ID}"
-          python tools/autohome_config_to_csv.py "${ID}"
-          # 出力の存在チェック（スクリプト既定の出力想定）
+          python tools/autohome_config_to_csv.py --series "${ID}"
           test -s "output/autohome/${ID}/config_${ID}.csv"
 
       - name: Upload artifact (config CSV)
