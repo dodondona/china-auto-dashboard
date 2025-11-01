@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools (jq, unzip, curl)
+      - name: Install tools (jq, unzip, curl, gh)
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -40,6 +40,7 @@ jobs:
             --name autohome-series-urls \
             --dir artifact \
             --repo "${{ github.repository }}"
+          echo "Downloaded files under artifact/:"
           ls -R artifact || true
 
       - name: Make JSON array of series IDs
@@ -55,6 +56,7 @@ jobs:
             echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
+          echo "Top of series IDs:"
           head -n 10 "$src" || true
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
@@ -101,24 +103,34 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
+      # 1) 口コミHTML収集
       - name: Fetch Koubei detail pages
         run: |
           set -e
           python tools/koubei_summary_playwright.py "${{ matrix.series }}" "5"
           test -s "autohome_reviews_${{ matrix.series }}.zip"
 
+      # 2) ZIP→CSV化
       - name: Convert ZIP to CSV
         run: |
           set -e
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ matrix.series }}.zip"
           test -s "autohome_reviews_${{ matrix.series }}.csv"
 
+      # 3) 差分判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
           set -e
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
+      # 4) 翻訳列生成（_ja 列） ← ここに戻す（diff後・story前）
+      - name: Translate CSV columns (to generate _ja columns)
+        run: |
+          set -e
+          python tools/translate_columns.py "autohome_reviews_${{ matrix.series }}.csv"
+
+      # 5) ストーリー生成（条件付き）
       - name: Generate story with LLM
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         env:
@@ -159,20 +171,3 @@ jobs:
           ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-reviews-${{ matrix.series }}
-          path: |
-            autohome_reviews_${{ matrix.series }}.zip
-            autohome_reviews_${{ matrix.series }}.csv
-            output/koubei/${{ matrix.series }}/story.txt
-            output/koubei/${{ matrix.series }}/story.md
-
-      - name: Save koubei cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ matrix.series }}-${{ github.run_id }}
