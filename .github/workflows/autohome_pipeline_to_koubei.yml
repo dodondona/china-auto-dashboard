@@ -25,7 +25,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq unzip curl
 
-      # config_to_csv と同じく、artifactが確定するまで少し待つ（必要に応じて調整）
       - name: Wait for upstream artifacts to be ready
         run: |
           echo "Waiting 60 seconds for autohome-series-urls to finalize..."
@@ -37,27 +36,36 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifact
-          # 直近の autohome-series-urls アーティファクトを取得
-          # 実装は既存のまま（省略）
+          # 上流 workflow_run の成果物を安全にダウンロード
+          gh run download ${{ github.event.workflow_run.id }} \
+            --name autohome-series-urls \
+            --dir artifact \
+            --repo "${{ github.repository }}"
+          echo "Downloaded files under artifact/:"
+          ls -R artifact || true
 
       - name: Make JSON array of series IDs
         id: mkjson
         run: |
           set -euo pipefail
-          # 既存実装のまま：artifact 内から series_id をかき集めて /tmp/series_ids.tmp => artifact/series_ids.txt => JSON
-          # （省略：元ファイルのパース・正規表現は現行のあなたのYAMLどおり）
-          if [ -f artifact/series_ids.txt ]; then
-            src="artifact/series_ids.txt"
-          else
-            # （既存のgrep処理一式をここに保持）
-            :
+          # 安全に series_ids.txt を探索
+          src="artifact/series_ids.txt"
+          if [ ! -f "$src" ]; then
+            echo "series_ids.txt not found directly under artifact/, trying fallback..."
+            src=$(find artifact -type f -name "series_ids.txt" | head -n 1 || true)
           fi
+
+          if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
+            echo "series_ids.txt not found anywhere under artifact/"
+            exit 1
+          fi
+
           echo "Top of series IDs:"
           head -n 10 "$src" || true
+
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
 
-  # ここから各IDで koubei を回す（koubei_summary.yml の内容を完全移植）
   koubei_from_pipeline:
     needs: prepare_series_from_pipeline
     if: ${{ needs.prepare_series_from_pipeline.outputs.series != '' }}
@@ -70,7 +78,7 @@ jobs:
 
     env:
       SERIES_ID: ${{ matrix.series }}
-      MIN_DIFF: "3"  # 新規IDがこの数以上でLLM要約を再実行（省コストの閾値）
+      MIN_DIFF: "3"
 
     steps:
       - name: Checkout
@@ -79,7 +87,6 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      # ✅ 前回実行時の cache を復元（別実行間でも有効）
       - name: Restore koubei cache
         uses: actions/cache/restore@v4
         with:
@@ -101,28 +108,24 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
-      # ① Playwrightでレビュー本文取得（詳細HTML/JSONを収集しZIP化）
       - name: Fetch Koubei detail pages
         run: |
           set -e
           python tools/koubei_summary_playwright.py "${{ matrix.series }}" "5"
           test -s "autohome_reviews_${{ matrix.series }}.zip"
 
-      # ② ZIP→CSV 変換
       - name: Convert ZIP to CSV
         run: |
           set -e
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ matrix.series }}.zip"
           test -s "autohome_reviews_${{ matrix.series }}.csv"
 
-      # ③ 差分しきい値でLLM生成の要否を判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
           set -e
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
-      # ④ LLMで要約を生成（差分が閾値以上のときのみ）
       - name: Generate story with LLM
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         env:
@@ -135,7 +138,6 @@ jobs:
           mkdir -p "cache/${{ matrix.series }}"
           cp "output/koubei/${{ matrix.series }}/story.txt" "cache/${{ matrix.series }}/story.txt"
 
-      # ⑤ スキップ時：キャッシュ再利用。なければ1回だけ生成してseed
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         env:
@@ -156,7 +158,6 @@ jobs:
             cp "output/koubei/${ID}/story.txt" "cache/${ID}/story.txt"
           fi
 
-      # ⑥ サニティチェック
       - name: Sanity check outputs
         run: |
           set -e
@@ -166,7 +167,6 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
-      # ⑦ 従来の成果物をアップロード（任意）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -177,7 +177,6 @@ jobs:
             output/koubei/${{ matrix.series }}/story.txt
             output/koubei/${{ matrix.series }}/story.md
 
-      # ⑧ summary ZIP をローカルで作成
       - name: Pack summary zip (autohome-summary-<id>.zip)
         run: |
           set -e
@@ -189,21 +188,18 @@ jobs:
             "output/koubei/${ID}/story.txt" \
             "output/koubei/${ID}/story.md"
 
-      # ⑨ summary ZIP をアーティファクトとしてアップロード
       - name: Upload summary zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: autohome-summary-${{ matrix.series }}
           path: autohome-summary-${{ matrix.series }}.zip
 
-      # ⑩ 直後にアーティファクトをダウンロード
       - name: Download summary zip artifact
         uses: actions/download-artifact@v4
         with:
           name: autohome-summary-${{ matrix.series }}
           path: _artifacts
 
-      # ⑪ ダウンロードしたアーティファクトZIPから story.txt を output/koubei/<id>/ に抽出
       - name: Extract story.txt from artifact zip to output/koubei/<id>
         env:
           ARTIFACT_DIR: _artifacts
@@ -212,7 +208,6 @@ jobs:
           set -e
           python tools/extract_story_to_output.py
 
-      # ⑫ story.txt をコミット（変更がある場合のみ）
       - name: Commit story.txt to repository
         run: |
           set -e
@@ -222,7 +217,6 @@ jobs:
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ matrix.series }}"
           git push
 
-      # ✅ 更新後の cache を保存（次回実行で復元される）
       - name: Save koubei cache
         if: always()
         uses: actions/cache/save@v4
