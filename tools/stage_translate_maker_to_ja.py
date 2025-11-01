@@ -51,7 +51,7 @@ DICT_ZH_TO_JA = {
     "三菱": "三菱",
     "铃木": "スズキ",
     "斯巴鲁": "スバル",
-    "雷克萨斯": "レクサス",
+    "雷克萨ス": "レクサス",
 }
 
 DICT_KEYS_SORTED = sorted(DICT_ZH_TO_JA.keys(), key=len, reverse=True)
@@ -225,7 +225,10 @@ def process_csv(csv_path: Path) -> Path | None:
     insert_at = df.columns.get_loc("name") + 1
     df.insert(insert_at, "global_name", globals_)
 
-    out = csv_path.with_name(csv_path.stem + "_with_maker_with_maker_ja.csv")
+    # ✅ ファイル名修正：末尾の _with_maker を1回だけ除去
+    base = re.sub(r"_with_maker$", "", csv_path.stem)
+    out = csv_path.with_name(base + "_with_maker_with_maker_ja.csv")
+
     df.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"✅ saved: {out}  rows={len(df)}")
     return out
