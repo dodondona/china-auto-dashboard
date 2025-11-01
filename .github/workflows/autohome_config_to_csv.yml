@@ -12,12 +12,13 @@ permissions:
   contents: write
 
 jobs:
-  # 上流パイプラインの成果物から series_id を集める（既存の連携どおり）
+  # 上流パイプラインの成果物から series_id を集める
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       series: ${{ steps.mkjson.outputs.series }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +27,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq unzip curl
+          sudo apt-get install -y jq unzip curl gh
 
       - name: Wait for upstream artifacts to be ready
         run: |
@@ -39,21 +40,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifact
-          # 直近の autohome-series-urls アーティファクト取得（あなたの現行実装を踏襲）
-          # 例）gh run download --name autohome-series-urls --dir artifact --repo "${{ github.repository }}"
-          # ※ ここはあなたの現在の手順そのままにしてください
+          # 上流 workflow_run の成果物を安全にダウンロード
+          gh run download ${{ github.event.workflow_run.id }} \
+            --name autohome-series-urls \
+            --dir artifact \
+            --repo "${{ github.repository }}"
+          echo "Downloaded files under artifact/:"
+          ls -R artifact || true
 
       - name: Make JSON array of series IDs
         id: mkjson
         run: |
           set -euo pipefail
-          # 既存の抽出ロジックを踏襲（artifact 内の txt/csv から series_id を正規表現で抽出）
-          # 例示：artifact/series_ids.txt がある前提
+          # 安全に series_ids.txt を探索
           src="artifact/series_ids.txt"
           if [ ! -f "$src" ]; then
-            echo "series_ids.txt not found under artifact/"
+            echo "series_ids.txt not found directly under artifact/, trying fallback..."
+            src=$(find artifact -type f -name "series_ids.txt" | head -n 1 || true)
+          fi
+
+          if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
+            echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
+
+          echo "Top of series IDs:"
+          head -n 10 "$src" || true
+
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
 
@@ -68,7 +81,6 @@ jobs:
       matrix:
         series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
 
-    # testyml と同じ環境変数を注入（必要に応じて）
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CURRENCY: ${{ secrets.CURRENCY }}
