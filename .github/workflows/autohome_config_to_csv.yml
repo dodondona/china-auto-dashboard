@@ -13,10 +13,11 @@ permissions:
 
 jobs:
   prepare_series_from_pipeline:
-    if: ${{ github.event_name == 'workflow_run' }}
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       series: ${{ steps.mkjson.outputs.series }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq unzip
+          sudo apt-get install -y jq unzip curl gh
 
       - name: Wait for upstream artifacts to be ready
         run: |
@@ -37,7 +38,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh run download ${{ github.event.workflow_run.id }} --name autohome-series-urls --dir artifact --repo "${{ github.repository }}"
+          mkdir -p artifact
+          gh run download ${{ github.event.workflow_run.id }} \
+            --name autohome-series-urls \
+            --dir artifact \
+            --repo "${{ github.repository }}"
+          echo "Downloaded files under artifact/:"
           ls -R artifact || true
 
       - name: Make JSON array of series IDs
@@ -53,6 +59,7 @@ jobs:
             echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
+          echo "Top of series IDs:"
           head -n 10 "$src" || true
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
@@ -77,23 +84,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Restore config cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            cache/
-            output/autohome/${{ matrix.series }}/
-          key: autohome-config-cache-${{ matrix.series }}-${{ github.run_id }}
-          restore-keys: |
-            autohome-config-cache-${{ matrix.series }}-
-            autohome-config-cache-
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies (same as test)
         run: |
           set -e
           python -m pip install --upgrade pip
@@ -109,26 +105,9 @@ jobs:
           python tools/autohome_config_to_csv.py --series "${ID}"
           test -s "output/autohome/${ID}/config_${ID}.csv"
 
-      - name: Translate columns (add _ja)
-        run: |
-          set -e
-          ID="${{ matrix.series }}"
-          python tools/translate_columns.py "output/autohome/${ID}/config_${ID}.csv"
-
       - name: Upload artifact (config CSV)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-config-${{ matrix.series }}
           path: |
             output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.csv
-            output/autohome/${{ matrix.series }}/config_${{ matrix.series }}.ja.csv
-            output/autohome/${{ matrix.series }}/config_${{ matrix.series }}_ja.csv
-
-      - name: Save config cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            cache/
-            output/autohome/${{ matrix.series }}/
-          key: autohome-config-cache-${{ matrix.series }}-${{ github.run_id }}
