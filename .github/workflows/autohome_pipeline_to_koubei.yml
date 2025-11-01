@@ -40,7 +40,6 @@ jobs:
             --name autohome-series-urls \
             --dir artifact \
             --repo "${{ github.repository }}"
-          echo "Downloaded files under artifact/:"
           ls -R artifact || true
 
       - name: Make JSON array of series IDs
@@ -56,7 +55,6 @@ jobs:
             echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
-          echo "Top of series IDs:"
           head -n 10 "$src" || true
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
@@ -115,11 +113,6 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ matrix.series }}.zip"
           test -s "autohome_reviews_${{ matrix.series }}.csv"
 
-      - name: Translate CSV columns (to generate _ja columns)
-        run: |
-          set -e
-          python tools/translate_columns.py "autohome_reviews_${{ matrix.series }}.csv"
-
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
@@ -166,3 +159,20 @@ jobs:
           ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-reviews-${{ matrix.series }}
+          path: |
+            autohome_reviews_${{ matrix.series }}.zip
+            autohome_reviews_${{ matrix.series }}.csv
+            output/koubei/${{ matrix.series }}/story.txt
+            output/koubei/${{ matrix.series }}/story.md
+
+      - name: Save koubei cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cache/
+          key: koubei-cache-${{ matrix.series }}-${{ github.run_id }}
