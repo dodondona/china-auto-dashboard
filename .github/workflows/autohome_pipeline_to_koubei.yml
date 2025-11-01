@@ -2,10 +2,8 @@ name: autohome_pipeline_to_koubei
 
 on:
   workflow_run:
-    workflows:
-      - autohome_pipeline
-    types:
-      - completed
+    workflows: ["autohome_pipeline"]
+    types: [completed]
 
 jobs:
   prepare_series_from_pipeline:
@@ -13,21 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       series: ${{ steps.mkjson.outputs.series }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools (jq, unzip, curl)
+      - name: Install jq and unzip
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq unzip curl
+          sudo apt-get install -y jq unzip
 
+      # config_to_csv と同じく、artifactが確定するまで少し待つ（必要に応じて調整）
       - name: Wait for upstream artifacts to be ready
         run: |
           echo "Waiting 60 seconds for autohome-series-urls to finalize..."
           sleep 60
 
+      # 上流ラン（このトリガの run-id）の artifacts から autohome-series-urls を取得
       - name: Download artifact (autohome-series-urls)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,28 +36,50 @@ jobs:
           set -euo pipefail
           run_id="${{ github.event.workflow_run.id }}"
           api="https://api.github.com/repos/${{ github.repository }}/actions/runs/${run_id}/artifacts"
-          curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
-               -H "X-GitHub-Api-Version: 2022-11-28" "$api" > artifacts.json
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "$api" > artifacts.json
           url=$(jq -r '.artifacts[] | select(.name=="autohome-series-urls") | .archive_download_url' artifacts.json)
           test -n "$url"
           curl -sSL -H "Authorization: Bearer $GH_TOKEN" -L "$url" -o series_artifact.zip
           mkdir -p artifact && unzip -o series_artifact.zip -d artifact
           ls -la artifact || true
 
+      # JSON配列（["4745","7806",...]）を作る
       - id: mkjson
         name: Build matrix
         run: |
           set -euo pipefail
+          # 優先: series_ids.txt（config_to_csv 用と同じフォーマット）
           if [ -s artifact/series_ids.txt ]; then
             src="artifact/series_ids.txt"
           else
-            src="artifact/series_urls.csv"
-            awk -F, 'NR>1 {match($2, /series\/([0-9]+)/, m); if (m[1]!="") print m[1]}' "$src" > artifact/series_ids.txt
+            # 代替: URL列からID抽出（autohome_config_to_csv 用URLでも「/series/4745.html」等から数字だけ抜く）
+            # artifact直下のcsv/jsonlから拾う（必要に応じてパターン追加）
+            : > /tmp/series_ids.tmp
+            if compgen -G "artifact/*.csv" > /dev/null; then
+              grep -rhoE '/series/[0-9]+\.html' artifact/*.csv 2>/dev/null | grep -oE '[0-9]+' >> /tmp/series_ids.tmp || true
+              grep -rhoE 'https?://k\.autohome\.com\.cn/[0-9]+' artifact/*.csv 2>/dev/null | grep -oE '[0-9]+' >> /tmp/series_ids.tmp || true
+            fi
+            if compgen -G "artifact/*.jsonl" > /dev/null; then
+              grep -rhoE '/series/[0-9]+\.html' artifact/*.jsonl 2>/dev/null | grep -oE '[0-9]+' >> /tmp/series_ids.tmp || true
+              grep -rhoE 'https?://k\.autohome\.com\.cn/[0-9]+' artifact/*.jsonl 2>/dev/null | grep -oE '[0-9]+' >> /tmp/series_ids.tmp || true
+              grep -rhoE '"series_id"\s*:\s*[0-9]+' artifact/*.jsonl 2>/dev/null | grep -oE '[0-9]+' >> /tmp/series_ids.tmp || true
+            fi
+            if [ ! -s /tmp/series_ids.tmp ]; then
+              echo "::error::No series IDs were found in autohome-series-urls artifact."
+              exit 1
+            fi
+            sort -u /tmp/series_ids.tmp > artifact/series_ids.txt
+            src="artifact/series_ids.txt"
           fi
-          jq -R . artifact/series_ids.txt | jq -s -c '{series: .}' > matrix.json
-          echo "series=$(jq -r '.series' matrix.json)" >> $GITHUB_OUTPUT
-          cat matrix.json
 
+          echo "Top of series IDs:"
+          head -n 10 "$src" || true
+
+          # 必要なら上限（例: 100件）を調整
+          json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
+          echo "series=$json" >> "$GITHUB_OUTPUT"
+
+  # ここから各IDで koubei を回す
   koubei_from_pipeline:
     needs: prepare_series_from_pipeline
     if: ${{ needs.prepare_series_from_pipeline.outputs.series != '' }}
@@ -68,6 +91,8 @@ jobs:
         series: ${{ fromJSON(needs.prepare_series_from_pipeline.outputs.series) }}
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SERIES_ID: ${{ matrix.series }}
+      MIN_DIFF: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,13 +100,14 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
+      # ✅ 前回実行時の cache を復元（別実行間でも有効）
       - name: Restore koubei cache
         uses: actions/cache/restore@v4
         with:
           path: cache/
-          key: koubei-cache-${{ matrix.series }}-${{ github.run_id }}
+          key: koubei-cache-${{ env.SERIES_ID }}-${{ github.run_id }}
           restore-keys: |
-            koubei-cache-${{ matrix.series }}-
+            koubei-cache-${{ env.SERIES_ID }}-
             koubei-cache-
 
       - name: Set up Python
@@ -96,39 +122,50 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
+      # ① Playwrightでレビュー本文取得（詳細HTML/JSONを収集しZIP化）
       - name: Fetch Koubei detail pages
         run: |
           set -e
-          python tools/koubei_summary_playwright.py "${{ matrix.series }}" "5"
-          test -s "autohome_reviews_${{ matrix.series }}.zip"
+          python tools/koubei_summary_playwright.py "${{ env.SERIES_ID }}" "5"
+          test -s "autohome_reviews_${{ env.SERIES_ID }}.zip"
 
+      # ② ZIP→CSV 変換
       - name: Convert ZIP to CSV
         run: |
           set -e
-          python tools/koubei_summary_to_csv.py "autohome_reviews_${{ matrix.series }}.zip"
-          test -s "autohome_reviews_${{ matrix.series }}.csv"
+          python tools/koubei_summary_to_csv.py "autohome_reviews_${{ env.SERIES_ID }}.zip"
+          test -s "autohome_reviews_${{ env.SERIES_ID }}.csv"
 
+      # ③ 差分しきい値でLLM生成の要否を判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
           set -e
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
+          cat diffguard.json || true
+          if jq -e '.do_story == true' diffguard.json >/dev/null 2>&1; then
+            echo "do_story=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "do_story=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Generate story with LLM
+      # ④ do_story=true の場合のみ LLM で要約生成
+      - name: Generate koubei story (LLM)
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
           set -e
-          python tools/koubei_storywriter.py "${{ matrix.series }}"
-          test -s "output/koubei/${{ matrix.series }}/story.txt"
-          test -s "output/koubei/${{ matrix.series }}/story.md"
-          mkdir -p "cache/${{ matrix.series }}"
-          cp "output/koubei/${{ matrix.series }}/story.txt" "cache/${{ matrix.series }}/story.txt"
+          python tools/koubei_storywriter.py "${{ env.SERIES_ID }}"
+          test -s "output/koubei/${{ env.SERIES_ID }}/story.txt"
+          test -s "output/koubei/${{ env.SERIES_ID }}/story.md"
+          mkdir -p "cache/${{ env.SERIES_ID }}"
+          cp "output/koubei/${{ env.SERIES_ID }}/story.txt" "cache/${{ env.SERIES_ID }}/story.txt"
 
-      - name: Ensure story when skipped (reuse cache or generate once)
+      # ⑤ do_story=false の場合は cache をコピーして成果物化
+      - name: Reuse cached story
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
           set -e
-          ID="${{ matrix.series }}"
+          ID="${{ env.SERIES_ID }}"
           if [ -s "cache/${ID}/story.txt" ]; then
             mkdir -p "output/koubei/${ID}"
             cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
@@ -142,65 +179,44 @@ jobs:
             cp "output/koubei/${ID}/story.txt" "cache/${ID}/story.txt"
           fi
 
+      # ⑥ サニティチェック
       - name: Sanity check outputs
         run: |
           set -e
-          ID="${{ matrix.series }}"
+          ID="${{ env.SERIES_ID }}"
           ls -lh autohome_reviews_${ID}.zip autohome_reviews_${ID}.csv || true
           ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
+          wc -l autohome_reviews_${ID}.csv || true
+          wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
+      # ⑦ 従来の成果物をアップロード（任意）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-reviews-${{ matrix.series }}
+          name: koubei-summary
           path: |
-            autohome_reviews_${{ matrix.series }}.zip
-            autohome_reviews_${{ matrix.series }}.csv
-            output/koubei/${{ matrix.series }}/story.txt
-            output/koubei/${{ matrix.series }}/story.md
+            autohome_reviews_*.csv
+            autohome_reviews_*.txt
+            autohome_reviews_*.md
+            autohome_reviews_*.json
+          if-no-files-found: warn
 
-      - name: Pack summary zip
-        run: |
-          set -e
-          ID="${{ matrix.series }}"
-          zip -j "autohome-summary-${ID}.zip" \
-            "autohome_reviews_${ID}.zip" \
-            "autohome_reviews_${ID}.csv" \
-            "output/koubei/${ID}/story.txt" \
-            "output/koubei/${ID}/story.md"
-
-      - name: Upload summary zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-summary-${{ matrix.series }}
-          path: autohome-summary-${{ matrix.series }}.zip
-
-      - name: Download summary zip artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: autohome-summary-${{ matrix.series }}
-          path: _artifacts
-
-      - name: Extract story.txt from artifact
+      # ✅ 生成物（特に story.txt / story.md）をリポジトリにコミットして履歴化
+      - name: Commit outputs
         env:
-          ARTIFACT_DIR: _artifacts
-          SERIES_ID: ${{ matrix.series }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          python tools/extract_story_to_output.py
-
-      - name: Commit story.txt to repository
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "output/koubei/${{ matrix.series }}/story.txt"
-          git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ matrix.series }}"
+          git add "output/koubei/${{ env.SERIES_ID }}/story.txt"
+          git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ env.SERIES_ID }}"
           git push
 
+      # ✅ 更新後の cache を保存（次回実行で復元される）
       - name: Save koubei cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: cache/
-          key: koubei-cache-${{ matrix.series }}-${{ github.run_id }}
+          key: koubei-cache-${{ env.SERIES_ID }}-${{ github.run_id }}
