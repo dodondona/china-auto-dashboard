@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y jq unzip curl
+          sudo apt-get install -y jq unzip curl gh
 
       - name: Wait for upstream artifacts to be ready
         run: |
@@ -36,7 +36,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifact
-          # 上流 workflow_run の成果物を安全にダウンロード
           gh run download ${{ github.event.workflow_run.id }} \
             --name autohome-series-urls \
             --dir artifact \
@@ -48,21 +47,17 @@ jobs:
         id: mkjson
         run: |
           set -euo pipefail
-          # 安全に series_ids.txt を探索
           src="artifact/series_ids.txt"
           if [ ! -f "$src" ]; then
             echo "series_ids.txt not found directly under artifact/, trying fallback..."
             src=$(find artifact -type f -name "series_ids.txt" | head -n 1 || true)
           fi
-
           if [ -z "${src:-}" ] || [ ! -f "$src" ]; then
             echo "series_ids.txt not found anywhere under artifact/"
             exit 1
           fi
-
           echo "Top of series IDs:"
           head -n 10 "$src" || true
-
           json=$(awk 'NF>0' "$src" | sed 's/[^0-9]//g' | awk 'NF>0' | jq -R -s -c 'split("\n")|map(select(length>0))')
           echo "series=$json" >> "$GITHUB_OUTPUT"
 
@@ -120,6 +115,11 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ matrix.series }}.zip"
           test -s "autohome_reviews_${{ matrix.series }}.csv"
 
+      - name: Translate CSV columns (to generate _ja columns)
+        run: |
+          set -e
+          python tools/translate_columns.py "autohome_reviews_${{ matrix.series }}.csv"
+
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         run: |
@@ -166,60 +166,3 @@ jobs:
           ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-reviews-${{ matrix.series }}
-          path: |
-            autohome_reviews_${{ matrix.series }}.zip
-            autohome_reviews_${{ matrix.series }}.csv
-            output/koubei/${{ matrix.series }}/story.txt
-            output/koubei/${{ matrix.series }}/story.md
-
-      - name: Pack summary zip (autohome-summary-<id>.zip)
-        run: |
-          set -e
-          ID="${{ matrix.series }}"
-          rm -f "autohome-summary-${ID}.zip"
-          zip -j "autohome-summary-${ID}.zip" \
-            "autohome_reviews_${ID}.zip" \
-            "autohome_reviews_${ID}.csv" \
-            "output/koubei/${ID}/story.txt" \
-            "output/koubei/${ID}/story.md"
-
-      - name: Upload summary zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-summary-${{ matrix.series }}
-          path: autohome-summary-${{ matrix.series }}.zip
-
-      - name: Download summary zip artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: autohome-summary-${{ matrix.series }}
-          path: _artifacts
-
-      - name: Extract story.txt from artifact zip to output/koubei/<id>
-        env:
-          ARTIFACT_DIR: _artifacts
-          SERIES_ID: ${{ matrix.series }}
-        run: |
-          set -e
-          python tools/extract_story_to_output.py
-
-      - name: Commit story.txt to repository
-        run: |
-          set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "output/koubei/${{ matrix.series }}/story.txt"
-          git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ matrix.series }}"
-          git push
-
-      - name: Save koubei cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ matrix.series }}-${{ github.run_id }}
