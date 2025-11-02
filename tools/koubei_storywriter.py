@@ -74,16 +74,15 @@ def make_payload(df: pd.DataFrame):
     def safe(v):
         return str(v).strip() if pd.notna(v) else ""
 
-    # ✅ pros_ja が無い場合は text 列を代替使用
-    if "pros_ja" in df.columns:
-        pros_col = "pros_ja"
-    elif "text" in df.columns:
-        pros_col = "text"
-    else:
-        raise KeyError("Neither 'pros_ja' nor 'text' column found in CSV")
+    # ✅ 本文候補の列を順番に探索（pros_ja, text, pros など）
+    possible_cols = ["pros_ja", "text", "pros", "content", "review", "comment"]
+    pros_col = next((c for c in possible_cols if c in df.columns), None)
+    if not pros_col:
+        raise KeyError(f"No valid text column found in CSV (checked {possible_cols})")
 
     pros = [safe(x) for x in df[pros_col].dropna().head(30).tolist()]
-    cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()] if "cons_ja" in df.columns else []
+    cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()] if "cons_ja" in df.columns else (
+            [safe(x) for x in df["cons"].dropna().head(30).tolist()] if "cons" in df.columns else [])
     reps = [safe(x) for x in df["title"].dropna().head(10).tolist()] if "title" in df.columns else []
     meta = f"レビュー数: {len(df)}件"
     return {"pros": pros, "cons": cons, "representatives": reps, "meta": meta}
