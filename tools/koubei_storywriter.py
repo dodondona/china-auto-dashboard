@@ -39,7 +39,7 @@ def build_prompt(payload, style):
         "2) ポジティブの要点（2〜4点）\n"
         "3) ネガティブの要点（2〜4点）\n"
         "4) 向いているユーザー像と、購入時の注意点を1段落\n"
-        "5) 但し書きや日付表記は不要です。\n"  # ← 修正点①：但し書きを削除指示
+        "5) 但し書きや日付表記は不要です。\n"
         "6) すべて日本語。適度に接続詞を入れて自然に。\n"
         "7) 代表コメントは必要に応じて“例：〜”の形で軽く引用可。\n"
         "8) 全体の分量は、これまでよりやや厚め（倍程度を目安）にし、"
@@ -64,7 +64,7 @@ def ask_model(client, system, user):
             {"role": "user", "content": user},
         ],
         temperature=0.4,
-        max_tokens=2200,  # 分量確保
+        max_tokens=2200,
     )
     return comp.choices[0].message.content.strip()
 
@@ -73,6 +73,13 @@ def make_payload(df: pd.DataFrame):
     """CSVから入力データを整形"""
     def safe(v):
         return str(v).strip() if pd.notna(v) else ""
+
+    # ✅ フォールバック追加: ja列がなければ原文列を使う
+    if "pros_ja" not in df.columns:
+        df["pros_ja"] = df.get("pros", "")
+    if "cons_ja" not in df.columns:
+        df["cons_ja"] = df.get("cons", "")
+
     pros = [safe(x) for x in df["pros_ja"].dropna().head(30).tolist()]
     cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()]
     reps = [safe(x) for x in df["title"].dropna().head(10).tolist()]
@@ -94,7 +101,6 @@ def main(series_id: str, style: str = "formal"):
 
     story = ask_model(client, system, prompt)
 
-    # 出力ディレクトリを output/koubei/<series_id>/ に変更（修正点②）
     out_dir = Path("output") / "koubei" / series_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
