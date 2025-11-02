@@ -68,6 +68,15 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ inputs.series_id }}.zip"
           test -s "autohome_reviews_${{ inputs.series_id }}.csv"
 
+      # ✅ ②.5 pros/cons列を日本語化（pros_ja, cons_jaを追加）
+      - name: Translate review columns to Japanese
+        run: |
+          set -e
+          python tools/translate_columns.py "autohome_reviews_${{ inputs.series_id }}.csv"
+          test -s "autohome_reviews_${{ inputs.series_id }}_ja.csv"
+          mv "autohome_reviews_${{ inputs.series_id }}_ja.csv" "autohome_reviews_${{ inputs.series_id }}.csv"
+
+
       # ③ 差分しきい値でLLM生成の要否を判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
