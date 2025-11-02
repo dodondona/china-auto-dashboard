@@ -8,7 +8,7 @@ from openai import OpenAI
 # =========================================================
 # 概要:
 #   autohome_reviews_<id>.csv をもとに、要約文を生成
-#   出力は output/koubei/<id>/story.txt / story.md
+#   出力は autohome_reviews_<id>_story.txt / .md
 # =========================================================
 
 def detect_csv(series_id: str) -> Path:
@@ -39,7 +39,7 @@ def build_prompt(payload, style):
         "2) ポジティブの要点（2〜4点）\n"
         "3) ネガティブの要点（2〜4点）\n"
         "4) 向いているユーザー像と、購入時の注意点を1段落\n"
-        "5) 但し書きや日付表記は不要です。\n"  # ← 修正点①：但し書きを削除指示
+        "5) 最後に但し書き（サンプル範囲・時期により変動）\n"
         "6) すべて日本語。適度に接続詞を入れて自然に。\n"
         "7) 代表コメントは必要に応じて“例：〜”の形で軽く引用可。\n"
         "8) 全体の分量は、これまでよりやや厚め（倍程度を目安）にし、"
@@ -64,7 +64,7 @@ def ask_model(client, system, user):
             {"role": "user", "content": user},
         ],
         temperature=0.4,
-        max_tokens=2200,  # 分量確保
+        max_tokens=2200,
     )
     return comp.choices[0].message.content.strip()
 
@@ -73,9 +73,18 @@ def make_payload(df: pd.DataFrame):
     """CSVから入力データを整形"""
     def safe(v):
         return str(v).strip() if pd.notna(v) else ""
-    pros = [safe(x) for x in df["pros_ja"].dropna().head(30).tolist()]
-    cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()]
-    reps = [safe(x) for x in df["title"].dropna().head(10).tolist()]
+
+    # ✅ pros_ja が無い場合は text 列を代替使用
+    if "pros_ja" in df.columns:
+        pros_col = "pros_ja"
+    elif "text" in df.columns:
+        pros_col = "text"
+    else:
+        raise KeyError("Neither 'pros_ja' nor 'text' column found in CSV")
+
+    pros = [safe(x) for x in df[pros_col].dropna().head(30).tolist()]
+    cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()] if "cons_ja" in df.columns else []
+    reps = [safe(x) for x in df["title"].dropna().head(10).tolist()] if "title" in df.columns else []
     meta = f"レビュー数: {len(df)}件"
     return {"pros": pros, "cons": cons, "representatives": reps, "meta": meta}
 
@@ -94,13 +103,8 @@ def main(series_id: str, style: str = "formal"):
 
     story = ask_model(client, system, prompt)
 
-    # 出力ディレクトリを output/koubei/<series_id>/ に変更（修正点②）
-    out_dir = Path("output") / "koubei" / series_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    txt_path = out_dir / "story.txt"
-    md_path = out_dir / "story.md"
-
+    txt_path = Path(f"autohome_reviews_{series_id}_story.txt")
+    md_path = Path(f"autohome_reviews_{series_id}_story.md")
     txt_path.write_text(story, encoding="utf-8")
     md_path.write_text(story, encoding="utf-8")
 
