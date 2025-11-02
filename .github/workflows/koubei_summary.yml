@@ -13,7 +13,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: write  # ✅ リポジトリへのpush権限（output, cache保存に必要）
 
 env:
   SERIES_ID: ${{ inputs.series_id }}
@@ -31,13 +31,6 @@ jobs:
         with:
           persist-credentials: true
           fetch-depth: 0
-
-      # ✅ 前回実行時の cache を復元（別実行間でも有効）
-      - name: Restore koubei cache
-        uses: actions/cache/restore@v4
-        with:
-          path: cache
-          key: koubei-cache
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -70,30 +63,46 @@ jobs:
         run: |
           set -e
           ID="${SERIES_ID}"
-          if [ -s "cache/${ID}/story.txt" ]; then
-            echo "[cache hit] Found cache/${ID}/story.txt"
-            mkdir -p "output/koubei/${ID}"
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md"
+          CACHE_DIR="cache/koubei/${ID}"
+          OUTPUT_DIR="output/koubei/${ID}"
+
+          if [ -s "${CACHE_DIR}/story.txt" ]; then
+            echo "[cache hit] Found ${CACHE_DIR}/story.txt"
+            mkdir -p "${OUTPUT_DIR}"
+            cp "${CACHE_DIR}/story.txt" "${OUTPUT_DIR}/story.txt"
+            cp "${CACHE_DIR}/story.txt" "${OUTPUT_DIR}/story.md"
           else
             echo "No cached story for ${ID}; generating once to seed cache."
             python tools/koubei_storywriter.py "${ID}"
 
             # ✅ Pythonはルート直下に出力するため、そこからコピーする
-            mkdir -p "output/koubei/${ID}"
-            cp "autohome_reviews_${ID}_story.txt" "output/koubei/${ID}/story.txt"
-            cp "autohome_reviews_${ID}_story.md" "output/koubei/${ID}/story.md"
+            mkdir -p "${OUTPUT_DIR}"
+            cp "autohome_reviews_${ID}_story.txt" "${OUTPUT_DIR}/story.txt"
+            cp "autohome_reviews_${ID}_story.md" "${OUTPUT_DIR}/story.md"
 
-            # ✅ 確認
-            test -s "output/koubei/${ID}/story.txt"
-            test -s "output/koubei/${ID}/story.md"
+            # ✅ 出力確認
+            test -s "${OUTPUT_DIR}/story.txt"
+            test -s "${OUTPUT_DIR}/story.md"
 
-            # ✅ キャッシュ更新
-            mkdir -p "cache/${ID}"
-            cp "output/koubei/${ID}/story.txt" "cache/${ID}/story.txt"
+            # ✅ キャッシュ更新（リポジトリ内）
+            mkdir -p "${CACHE_DIR}"
+            cp "${OUTPUT_DIR}/story.txt" "${CACHE_DIR}/story.txt"
+            echo "[done] cache updated at ${CACHE_DIR}/story.txt"
+
+            # ✅ Gitに反映（cacheとoutputを同時コミット）
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "${CACHE_DIR}/story.txt" "${OUTPUT_DIR}/story.txt" "${OUTPUT_DIR}/story.md" || true
+            if git diff --cached --quiet; then
+              echo "No cache/output update to commit."
+            else
+              git commit -m "Update koubei outputs and cache for series ${ID}"
+              git push origin HEAD:${{ github.ref_name }}
+              echo "[git] cache/output committed and pushed."
+            fi
           fi
 
-      # ✅ 成果物を保存
+      # ✅ 成果物を保存（Actions Artifacts）
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -103,10 +112,3 @@ jobs:
             output/koubei/${{ env.SERIES_ID }}/story.md
             autohome_reviews_${{ env.SERIES_ID }}.csv
           if-no-files-found: warn
-
-      # ✅ キャッシュ更新を保存
-      - name: Save koubei cache
-        uses: actions/cache/save@v4
-        with:
-          path: cache
-          key: koubei-cache
