@@ -115,11 +115,11 @@ def main(series_id: str, style: str = "formal"):
     story = ask_model(client, system, prompt)
 
     # 出力先ディレクトリ
-outdir = Path(f"output/koubei/{series_id}")
-outdir.mkdir(parents=True, exist_ok=True)
+    outdir = Path(f"output/koubei/{series_id}")
+    outdir.mkdir(parents=True, exist_ok=True)
 
-txt_path = outdir / "story.txt"
-md_path = outdir / "story.md"
+    txt_path = outdir / "story.txt"
+    md_path = outdir / "story.md"
     txt_path.write_text(story, encoding="utf-8")
     md_path.write_text(story, encoding="utf-8")
 
