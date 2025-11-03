@@ -37,7 +37,7 @@ def sniff_ids_from_csv(p: Path):
             for row in reader:
                 for k in candidates:
                     v = row.get(k) or row.get(k.upper()) or row.get(k.capitalize())
-                    if v and str(v).isdigit():
+                    if v and re.match(r"^[0-9A-Za-z]+$", str(v)):
                         ids.add(str(v)); break
     except Exception:
         pass
