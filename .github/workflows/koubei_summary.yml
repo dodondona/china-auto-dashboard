@@ -32,16 +32,6 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      # ✅ 前回実行時の cache を復元（別実行間でも有効）
-      - name: Restore koubei cache
-        uses: actions/cache/restore@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ inputs.series_id }}
-          restore-keys: |
-            koubei-cache-${{ inputs.series_id }}-
-            koubei-cache-
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -60,6 +50,18 @@ jobs:
           set -e
           python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
           test -s "autohome_reviews_${{ inputs.series_id }}.zip"
+
+      # ★ 追加：Playwright生成のJSON群をリポジトリ内 cache/koubei/<id>/ に永続化
+      - name: Persist raw review JSONs
+        run: |
+          set -e
+          ID="${{ inputs.series_id }}"
+          SRC_DIR="cache/${ID}"
+          DST_DIR="cache/koubei/${ID}"
+          mkdir -p "${DST_DIR}"
+          # すべての .json をコピー（存在しない場合はスルー）
+          cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
+          echo "✅ Persisted raw review JSONs to ${DST_DIR}"
 
       # ② ZIP→CSV 変換
       - name: Convert ZIP to CSV
@@ -83,10 +85,10 @@ jobs:
           python tools/koubei_storywriter.py "${{ inputs.series_id }}" "story"
           test -s "output/koubei/${{ inputs.series_id }}/story.txt"
           test -s "output/koubei/${{ inputs.series_id }}/story.md"
-          mkdir -p "cache/${{ inputs.series_id }}"
-          cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/${{ inputs.series_id }}/story.txt"
+          mkdir -p "cache/koubei/${{ inputs.series_id }}"
+          cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ スキップ時：キャッシュ再利用。なければ1回だけ生成してseed
+      # ⑤ スキップ時：キャッシュ再利用 or 既存出力をseed
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
@@ -95,11 +97,8 @@ jobs:
           OUT_DIR="output/koubei/${ID}"
           OUT_TXT="${OUT_DIR}/story.txt"
           OUT_MD="${OUT_DIR}/story.md"
-
-          # ✅ キャッシュの統一パス
           CACHE_DIR="cache/koubei/${ID}"
           CACHE_TXT="${CACHE_DIR}/story.txt"
-
           mkdir -p "${OUT_DIR}" "${CACHE_DIR}"
 
           if [ -s "${CACHE_TXT}" ]; then
@@ -108,11 +107,9 @@ jobs:
             cp "${CACHE_TXT}" "${OUT_MD}"
           else
             if [ -s "${OUT_TXT}" ]; then
-              # LLMスキップでも output に story が既にある場合 → キャッシュへ種付け
               echo "No cache yet; seeding cache from existing output for ${ID}"
               cp "${OUT_TXT}" "${CACHE_TXT}"
             else
-              # どこにも無ければ初回生成
               echo "No cached/output story; generating once to seed cache for ${ID}."
               python tools/koubei_storywriter.py "${ID}"
               test -s "${OUT_TXT}"
@@ -130,7 +127,7 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
-      # ⑦ 従来の成果物をアップロード（任意）
+      # ⑦ 成果物をアップロード
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -140,61 +137,16 @@ jobs:
             autohome_reviews_${{ inputs.series_id }}.csv
             output/koubei/${{ inputs.series_id }}/story.txt
             output/koubei/${{ inputs.series_id }}/story.md
+            cache/koubei/${{ inputs.series_id }}/*.json   # ★ JSON群もartifactに含める
 
-      # ⑧ summary ZIP をローカルで作成
-      - name: Pack summary zip (autohome-summary-<id>.zip)
-        run: |
-          set -e
-          ID="${{ inputs.series_id }}"
-          rm -f "autohome-summary-${ID}.zip"
-          zip -j "autohome-summary-${ID}.zip" \
-            "autohome_reviews_${ID}.zip" \
-            "autohome_reviews_${ID}.csv" \
-            "output/koubei/${ID}/story.txt" \
-            "output/koubei/${ID}/story.md"
-
-      # ⑨ summary ZIP をアーティファクトとしてアップロード
-      - name: Upload summary zip artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: autohome-summary-${{ inputs.series_id }}
-          path: autohome-summary-${{ inputs.series_id }}.zip
-
-      # ⑩ 直後にアーティファクトをダウンロード
-      - name: Download summary zip artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: autohome-summary-${{ inputs.series_id }}
-          path: _artifacts
-
-      # ⑪ ダウンロードしたアーティファクトZIPから story.txt を output/koubei/<id>/ に抽出
-      - name: Extract story.txt from artifact zip to output/koubei/<id>
-        env:
-          ARTIFACT_DIR: _artifacts
-          SERIES_ID: ${{ inputs.series_id }}
-        run: |
-          set -e
-          python tools/extract_story_to_output.py
-
-      # ⑫ story.txt をコミット（変更がある場合のみ）
+      # ⑧ story.txtをコミット
       - name: Commit story.txt to repository
         run: |
           set -e
           ID="${{ inputs.series_id }}"
-
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          mkdir -p "cache/koubei/${ID}"
           git pull --rebase origin main || true
           git add "output/koubei/${ID}/story.txt" "cache/koubei/${ID}" || true
           git diff --cached --quiet || git commit -m "Add/Update koubei story & cache for ${ID}"
           git push || true
-
-      # ✅ 更新後の cache を保存（次回実行で復元される）
-      - name: Save koubei cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
