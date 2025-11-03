@@ -11,13 +11,10 @@ def sniff_ids_from_json(p: Path):
         return set()
     ids = set()
     def add_from_obj(o):
-        for k in ("id","review_id","kId","kid","KID"):
+        for k in ("id", "review_id", "kId", "kid", "KID"):
             if isinstance(o, dict) and k in o:
                 v = o[k]
-                if isinstance(v, (int, str)) and re.match(r"^[0-9A-Za-z]+$", str(v)):
-                    # 🚫 kmなどの単位を含む値を除外
-                    if re.search(r"(km|mm|cm|kg|m)$", str(v).lower()):
-                        return
+                if isinstance(v, int) or (isinstance(v, str) and v.isdigit()):
                     ids.add(str(v))
     if isinstance(data, list):
         for o in data: add_from_obj(o)
@@ -35,15 +32,12 @@ def sniff_ids_from_csv(p: Path):
     try:
         with p.open("r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
-            cols = [(c or "").strip().lower() for c in (reader.fieldnames or [])]
-            candidates = [k for k in ("id","review_id","kid") if k in cols]
+            cols = [c.lower() for c in (reader.fieldnames or [])]
+            candidates = [k for k in ("id", "review_id", "kid", "kId", "KID") if k in cols]
             for row in reader:
                 for k in candidates:
                     v = row.get(k) or row.get(k.upper()) or row.get(k.capitalize())
-                    if v and re.match(r"^[0-9A-Za-z]+$", str(v)):
-                        # 🚫 kmなどの単位を含む値を除外
-                        if re.search(r"(km|mm|cm|kg|m)$", str(v).lower()):
-                            continue
+                    if v and str(v).isdigit():
                         ids.add(str(v))
                         break
     except Exception:
@@ -56,33 +50,22 @@ def sniff_ids_from_txt(p: Path):
         text = p.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return ids
-    for m in re.finditer(r'\b(?:id|review_id|kid)\s*[:=]\s*([0-9A-Za-z]+)\b', text, flags=re.IGNORECASE):
-        val = m.group(1)
-        if not re.search(r"(km|mm|cm|kg|m)$", val.lower()):
-            ids.add(val)
-    for m in re.finditer(r'/([0-9A-Za-z]{4,})', text):
-        val = m.group(1)
-        if not re.search(r"(km|mm|cm|kg|m)$", val.lower()):
-            ids.add(val)
+    for m in re.finditer(r'\b(?:id|review_id|kid)\s*[:=]\s*(\d+)\b', text, flags=re.IGNORECASE):
+        ids.add(m.group(1))
+    for m in re.finditer(r'/(\d{4,})', text):
+        ids.add(m.group(1))
     return ids
 
 def collect_current_ids():
     ids = set()
-    for pattern in [
-        "autohome_reviews_*.json",
-        "autohome_reviews_*.csv",
-        "autohome_reviews_*.txt",
-        "cache/**/*.json",
-        "cache/**/*.csv",
-        "cache/**/*.txt",
-    ]:
-        for p in sorted(Path(".").glob(pattern)):
-            if p.suffix == ".json":
-                ids |= sniff_ids_from_json(p)
-            elif p.suffix == ".csv":
-                ids |= sniff_ids_from_csv(p)
-            elif p.suffix == ".txt":
-                ids |= sniff_ids_from_txt(p)
+    for p in sorted(Path(".").glob("autohome_reviews_*.json")):
+        ids |= sniff_ids_from_json(p)
+    for p in sorted(Path(".").glob("autohome_reviews_*.csv")):
+        ids |= sniff_ids_from_csv(p)
+    for p in sorted(Path(".").glob("autohome_reviews_*.txt")):
+        ids |= sniff_ids_from_txt(p)
+    # ✅ 文字列 "100km" のような非IDノイズを除外
+    ids = {x for x in ids if re.fullmatch(r"\d{4,}", x)}
     return ids
 
 def main():
@@ -90,14 +73,15 @@ def main():
     ap.add_argument("--min-diff", type=int, default=3)
     args = ap.parse_args()
 
-    series_id = os.environ.get("SERIES_ID","").strip()
+    series_id = os.environ.get("SERIES_ID", "").strip()
     if not series_id:
-        print("SERIES_ID is required", file=sys.stderr); sys.exit(2)
+        print("SERIES_ID is required", file=sys.stderr)
+        sys.exit(2)
 
     cur_ids = collect_current_ids()
-    cache_dir = Path("cache")/series_id
+    cache_dir = Path("cache") / series_id
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir/"review_ids.json"
+    cache_file = cache_dir / "review_ids.json"
 
     prev_ids = set()
     if cache_file.exists():
@@ -106,9 +90,19 @@ def main():
         except Exception:
             prev_ids = set()
 
+    # ✅ 追加: cache/koubei/<id> 側をフォールバックで読む
+    if not prev_ids:
+        alt = Path("cache") / "koubei" / series_id / "review_ids.json"
+        if alt.exists():
+            try:
+                prev_ids = set(json.loads(alt.read_text(encoding="utf-8")))
+            except Exception:
+                prev_ids = set()
+
     new_ids = cur_ids - prev_ids
     do_story = len(new_ids) >= args.min_diff
 
+    # 現在のIDを保存（次回比較用）
     cache_file.write_text(json.dumps(sorted(cur_ids), ensure_ascii=False), encoding="utf-8")
 
     gh_out = os.environ.get("GITHUB_OUTPUT")
