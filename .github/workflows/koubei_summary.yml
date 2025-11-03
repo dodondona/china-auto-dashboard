@@ -92,13 +92,20 @@ jobs:
         run: |
           set -e
           ID="${{ inputs.series_id }}"
-          if [ -s "cache/${ID}/story.txt" ] || [ -s "cache/koubei/${ID}/story.txt" ]; then
+
+          # キャッシュ存在チェック（厳格）
+          if [ -f "cache/${ID}/story.txt" ] || [ -f "cache/koubei/${ID}/story.txt" ]; then
             echo "✅ Reused cached story for ${ID}"
             mkdir -p "output/koubei/${ID}"
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt" 2>/dev/null || true
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md" 2>/dev/null || true
-            cp "cache/koubei/${ID}/story.txt" "output/koubei/${ID}/story.txt" 2>/dev/null || true
-            cp "cache/koubei/${ID}/story.txt" "output/koubei/${ID}/story.md" 2>/dev/null || true
+
+            if [ -f "cache/${ID}/story.txt" ]; then
+              cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
+              cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md"
+            elif [ -f "cache/koubei/${ID}/story.txt" ]; then
+              cp "cache/koubei/${ID}/story.txt" "output/koubei/${ID}/story.txt"
+              cp "cache/koubei/${ID}/story.txt" "output/koubei/${ID}/story.md"
+            fi
+
           else
             echo "No cached story for ${ID}; generating once to seed cache."
             python tools/koubei_storywriter.py "${ID}"
@@ -107,6 +114,7 @@ jobs:
             mkdir -p "cache/${ID}"
             cp "output/koubei/${ID}/story.txt" "cache/${ID}/story.txt"
           fi
+
 
       # ⑥ サニティチェック
       - name: Sanity check outputs
