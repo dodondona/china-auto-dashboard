@@ -1,3 +1,4 @@
+# tools/koubei_summary_to_csv.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, re, json, zipfile
@@ -10,9 +11,8 @@ from bs4 import BeautifulSoup
   autohome_reviews_<series_id>.zip 内の JSON または HTML を解析し、
   結果を autohome_reviews_<series_id>.csv に出力する。
 
-変更点:
-  - JSONが list 形式の場合（[ {...}, {...} ]）でも処理できるように修正。
-  - data = json.load(f) の直後に list → dict 変換ガードを追加。
+変更点（最小限）:
+  - JSON中に pros/cons が無い場合、text を pros に流し込む
 """
 
 def parse_json_from_zip(zip_path: Path):
@@ -25,15 +25,16 @@ def parse_json_from_zip(zip_path: Path):
             try:
                 with zf.open(name) as f:
                     data = json.load(f)
-                    # ✅ list形式の場合は先頭要素を使う
+                    # list形式の対応（念のため）
                     if isinstance(data, list) and len(data) > 0:
                         data = data[0]
                     if not isinstance(data, dict):
                         continue
                     rid = data.get("id") or Path(name).stem
                     title = data.get("title", "")
-                    pros = "、".join(data.get("pros", []))
-                    cons = "、".join(data.get("cons", []))
+                    # ✅ pros/cons が無ければ text を pros に使用
+                    pros = "、".join(data.get("pros", [])) if "pros" in data else data.get("text", "")
+                    cons = "、".join(data.get("cons", [])) if "cons" in data else ""
                     rows.append({
                         "id": rid,
                         "title": title,
