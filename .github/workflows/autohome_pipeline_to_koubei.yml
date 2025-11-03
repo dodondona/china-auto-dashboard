@@ -5,6 +5,9 @@ on:
     workflows: ["autohome_pipeline"]
     types: [completed]
 
+permissions:
+  contents: write  # ← これを追加！
+
 jobs:
   prepare_series_from_pipeline:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' }}
