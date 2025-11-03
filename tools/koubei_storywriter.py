@@ -85,12 +85,16 @@ def make_payload(df: pd.DataFrame):
     """CSVから入力データを整形"""
     def safe(v):
         return str(v).strip() if pd.notna(v) else ""
-    pros = [safe(x) for x in df["pros_ja"].dropna().head(30).tolist()]
-    cons = [safe(x) for x in df["cons_ja"].dropna().head(30).tolist()]
+
+    # ✅ フォールバック処理を追加（旧版と同じ）
+    pros_col = "pros_ja" if "pros_ja" in df.columns else "pros"
+    cons_col = "cons_ja" if "cons_ja" in df.columns else "cons"
+
+    pros = [safe(x) for x in df[pros_col].dropna().head(30).tolist()]
+    cons = [safe(x) for x in df[cons_col].dropna().head(30).tolist()]
     reps = [safe(x) for x in df["title"].dropna().head(10).tolist()]
     meta = f"レビュー数: {len(df)}件"
     return {"pros": pros, "cons": cons, "representatives": reps, "meta": meta}
-
 
 def main(series_id: str, style: str = "formal"):
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
