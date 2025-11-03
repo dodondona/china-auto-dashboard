@@ -136,3 +136,19 @@ jobs:
           git commit -m "update koubei story ${{ env.SERIES_ID }}" || echo "No changes"
           git pull --rebase || true
           git push || true
+
+      - name: Sync cached story to output and push
+        run: |
+          set -e
+          ID="${{ env.SERIES_ID }}"
+          mkdir -p "output/koubei/${ID}"
+          if [ -s "cache/${ID}/story.txt" ]; then
+            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
+            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md"
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A "output/koubei/${ID}/"
+            git commit -m "sync cache to output for ${ID}" || echo "no changes"
+            git pull --rebase || true
+            git push || true
+          fi
