@@ -14,8 +14,10 @@ def sniff_ids_from_json(p: Path):
         for k in ("id","review_id","kId","kid","KID"):
             if isinstance(o, dict) and k in o:
                 v = o[k]
-                # ✅ 英数字混在IDも許可
                 if isinstance(v, (int, str)) and re.match(r"^[0-9A-Za-z]+$", str(v)):
+                    # 🚫 kmなどの単位を含む値を除外
+                    if re.search(r"(km|mm|cm|kg|m)$", str(v).lower()):
+                        return
                     ids.add(str(v))
     if isinstance(data, list):
         for o in data: add_from_obj(o)
@@ -38,8 +40,10 @@ def sniff_ids_from_csv(p: Path):
             for row in reader:
                 for k in candidates:
                     v = row.get(k) or row.get(k.upper()) or row.get(k.capitalize())
-                    # ✅ 英数字混在IDを許可（数字のみ限定しない）
                     if v and re.match(r"^[0-9A-Za-z]+$", str(v)):
+                        # 🚫 kmなどの単位を含む値を除外
+                        if re.search(r"(km|mm|cm|kg|m)$", str(v).lower()):
+                            continue
                         ids.add(str(v))
                         break
     except Exception:
@@ -53,14 +57,17 @@ def sniff_ids_from_txt(p: Path):
     except Exception:
         return ids
     for m in re.finditer(r'\b(?:id|review_id|kid)\s*[:=]\s*([0-9A-Za-z]+)\b', text, flags=re.IGNORECASE):
-        ids.add(m.group(1))
+        val = m.group(1)
+        if not re.search(r"(km|mm|cm|kg|m)$", val.lower()):
+            ids.add(val)
     for m in re.finditer(r'/([0-9A-Za-z]{4,})', text):
-        ids.add(m.group(1))
+        val = m.group(1)
+        if not re.search(r"(km|mm|cm|kg|m)$", val.lower()):
+            ids.add(val)
     return ids
 
 def collect_current_ids():
     ids = set()
-    # ✅ 検索範囲を拡大：cache配下やサブディレクトリも含める
     for pattern in [
         "autohome_reviews_*.json",
         "autohome_reviews_*.csv",
