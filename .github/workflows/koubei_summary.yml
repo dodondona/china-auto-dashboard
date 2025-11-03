@@ -32,16 +32,6 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      # ✅ 前回実行時の cache を復元（別実行間でも有効）
-      - name: Restore koubei cache
-        uses: actions/cache/restore@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
-          restore-keys: |
-            koubei-cache-${{ inputs.series_id }}-
-            koubei-cache-
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -171,10 +161,16 @@ jobs:
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ inputs.series_id }}"
           git push
 
-      # ✅ 更新後の cache を保存（次回実行で復元される）
-      - name: Save koubei cache
+      # ✅ cache をリポジトリに永続保存（actions/cache は使用しない）
+      - name: Commit koubei cache to repository
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: cache/
-          key: koubei-cache-${{ inputs.series_id }}-${{ github.run_id }}
+        run: |
+          set -e
+          ID="${{ inputs.series_id }}"
+          mkdir -p cache/koubei/${ID}
+          cp -r cache/${ID}/* cache/koubei/${ID}/ || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cache/koubei/${ID}
+          git diff --cached --quiet || git commit -m "update koubei cache ${ID} [skip ci]"
+          git push
