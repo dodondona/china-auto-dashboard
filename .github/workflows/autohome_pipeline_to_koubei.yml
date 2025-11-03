@@ -212,17 +212,17 @@ jobs:
           set -e
           python tools/extract_story_to_output.py
 
-      # ✅ 強制fetch→merge→pushで競合回避（確実にpush成功）
+      # ✅ 各series専用ブランチ(koubei-<id>)でpushする版（衝突・lock防止）
       - name: Commit story.txt to repository
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="koubei-${{ env.SERIES_ID }}"
+          git checkout -b "$BRANCH"
           git add "output/koubei/${{ env.SERIES_ID }}/story.txt"
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ env.SERIES_ID }}"
-          git fetch origin main
-          git merge --strategy-option=ours origin/main || true
-          git push --force-with-lease origin HEAD:main
+          git push origin HEAD:"$BRANCH" --force-with-lease
 
       - name: Save koubei cache
         if: always()
