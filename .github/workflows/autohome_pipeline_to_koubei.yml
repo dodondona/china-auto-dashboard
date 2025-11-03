@@ -6,7 +6,7 @@ on:
     types: [completed]
 
 permissions:
-  contents: write  # ✅ push権限付与（403対策）
+  contents: write
 
 jobs:
   prepare_series_from_pipeline:
@@ -212,7 +212,7 @@ jobs:
           set -e
           python tools/extract_story_to_output.py
 
-      # ✅ 修正版（push競合対策：git pull --rebaseを追加）
+      # ✅ 強制fetch→merge→pushで競合回避（確実にpush成功）
       - name: Commit story.txt to repository
         run: |
           set -e
@@ -220,8 +220,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "output/koubei/${{ env.SERIES_ID }}/story.txt"
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ env.SERIES_ID }}"
-          git pull --rebase origin main || true
-          git push origin HEAD:main
+          git fetch origin main
+          git merge --strategy-option=ours origin/main || true
+          git push --force-with-lease origin HEAD:main
 
       - name: Save koubei cache
         if: always()
