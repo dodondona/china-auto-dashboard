@@ -80,7 +80,7 @@ jobs:
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
           set -e
-          python tools/koubei_storywriter.py "${{ inputs.series_id }}"
+          python tools/koubei_storywriter.py "${{ inputs.series_id }}" "story"
           test -s "output/koubei/${{ inputs.series_id }}/story.txt"
           test -s "output/koubei/${{ inputs.series_id }}/story.md"
           mkdir -p "cache/${{ inputs.series_id }}"
