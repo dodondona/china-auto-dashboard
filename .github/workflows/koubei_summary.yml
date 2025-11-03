@@ -159,6 +159,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "output/koubei/${{ inputs.series_id }}/story.txt"
           git diff --cached --quiet || git commit -m "Add/Update koubei story for ${{ inputs.series_id }}"
+          git pull --rebase origin main || true
           git push
 
       # ✅ cache をリポジトリに永続保存（actions/cache は使用しない）
@@ -173,4 +174,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add cache/koubei/${ID}
           git diff --cached --quiet || git commit -m "update koubei cache ${ID} [skip ci]"
+          git pull --rebase origin main || true
           git push
