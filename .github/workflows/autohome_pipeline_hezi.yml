@@ -3,7 +3,6 @@ name: autohome_pipeline_hezi
 on:
   workflow_dispatch:
   schedule:
-    # 元の運用に干渉しない時間に。必要あれば調整してください
     - cron: "25 1 * * *"
 
 permissions:
@@ -19,7 +18,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install CJK fonts (same as original)
+      - name: Install CJK fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -40,9 +39,8 @@ jobs:
           pip install playwright openai pandas beautifulsoup4 lxml requests
           python -m playwright install chromium
 
-      # --- ここから元パイプラインの構成を厳守 ---
-
-      - name: Warm-up (open hezi ranking page)
+      # --- heziページをクロール ---
+      - name: Warm-up (hezi)
         run: |
           python - <<'PY'
           import asyncio
@@ -52,34 +50,29 @@ jobs:
                   b = await p.chromium.launch()
                   page = await b.new_page()
                   await page.goto("https://www.autohome.com.cn/rank/1-1-0-0_9000-hezi-x-x/", timeout=60000)
-                  await page.wait_for_load_state("networkidle", timeout=60000)
+                  await page.wait_for_load_state("networkidle")
                   await page.wait_for_timeout(1500)
                   await b.close()
           asyncio.run(main())
           PY
 
-      - name: Run ranking crawler (same script; URL only replaced in temp copy)
+      - name: Run ranking crawler (URL置換の一時コピー)
         run: |
           set -euo pipefail
           mkdir -p tmpcopy
           cp tools/rank_capture_images_and_csv.py tmpcopy/rank_capture_images_and_csv_hezi.py
-          # 元スクリプトを汚さず、実行時だけ hezi URL に置換
           sed -i 's#https://www\.autohome\.com\.cn/rank/1#https://www.autohome.com.cn/rank/1-1-0-0_9000-hezi-x-x/#g' tmpcopy/rank_capture_images_and_csv_hezi.py
-
-          # 以降は元パイプライン同様の3段構成（CSV→メーカー付与→日本語化）
           python tmpcopy/rank_capture_images_and_csv_hezi.py
           python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
           python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
 
-      # hezi のランキングCSVをアーティファクト化（ファイル名・列は元と同一）
-      - name: Upload artifact (hezi ranking csvs)
+      - name: Upload artifact (hezi ranking csv)
         uses: actions/upload-artifact@v4
         with:
           name: autohome-hezi-ranking-csvs
           path: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
           if-no-files-found: warn
 
-      # hezi のランキング画像も分離して保存（フォルダ名で hezi を識別）
       - name: Upload artifact (hezi ranking images)
         uses: actions/upload-artifact@v4
         with:
@@ -87,36 +80,24 @@ jobs:
           path: public/autohome_images
           if-no-files-found: warn
 
-      # --- 重複除外を入れた series_id / series_url 生成 ---
-      - name: Build series ids and links (dedupe against base pipeline)
+      - name: Build series ids and links (dedupe with base pipeline)
         run: |
           set -euo pipefail
           mkdir -p artifact
-
           csv="public/autohome_ranking_with_image_urls.csv"
-          if [ ! -s "$csv" ]; then
-            echo "missing: $csv" >&2
-            exit 1
-          fi
-
           : > artifact/series_ids.txt
           printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
-
-          # ★ 既存（rank/1）で既に配布済みの ID を参照（存在するなら）
           EXCLUDE="output/pipeline/autohome-series-urls/series_ids.txt"
           EXOPT=""
-          if [ -s "$EXCLUDE" ]; then
-            EXOPT="-v exfile=$EXCLUDE"
-          fi
+          [ -s "$EXCLUDE" ] && EXOPT="-v exfile=$EXCLUDE"
 
-          # 元パイプラインと同じ：CSVの link 列から /{id}/ を抽出
           awk -F',' $EXOPT '
             BEGIN{
               OFS=",";
               if (exfile) {
                 while ((getline line < exfile) > 0) {
                   gsub(/\r/,"",line);
-                  if (line ~ /^[0-9]+$/) skip[line]=1;  # 既存ID（rank/1）を除外集合に
+                  if (line ~ /^[0-9]+$/) skip[line]=1;
                 }
                 close(exfile)
               }
@@ -134,7 +115,7 @@ jobs:
               gsub(/^"|"$/, "", url)
               if (match(url,/autohome\.com\.cn\/([0-9]+)/,m)) {
                 sid=m[1]
-                if(!(sid in seen) && !(sid in skip)){ # hezi側の重複を排除、rank/1のIDはスキップ
+                if(!(sid in seen) && !(sid in skip)){
                   seen[sid]=1
                   print sid >> "artifact/series_ids.txt"
                   printf "%s,https://www.autohome.com.cn/series/%s.html,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
@@ -145,7 +126,6 @@ jobs:
             }
           ' "$csv"
 
-      # ↓ 後段が拾えるよう、artifact 名は元に合わせて固定（autohome-series-urls）
       - name: Upload artifact (series ids and links)
         uses: actions/upload-artifact@v4
         with:
@@ -153,16 +133,16 @@ jobs:
           path: artifact/
           if-no-files-found: warn
 
-      # --- ここから元パイプラインと同じ：「artifact → output/pipeline へ差し替え」 ---
+      # --- ここから hezi専用の output/pipeline 配置 ---
       - name: Download artifacts (this run)
         uses: actions/download-artifact@v4
         with:
           path: _artifacts
 
-      - name: Replace output/pipeline from artifacts
+      - name: Replace output/pipeline/hezi from artifacts
         run: |
           set -euo pipefail
-          OUT="output/pipeline"
+          OUT="output/pipeline/hezi"
           rm -rf "$OUT"
           mkdir -p "$OUT"
           shopt -s nullglob dotglob
@@ -173,15 +153,15 @@ jobs:
           echo "==== Tree of $OUT ===="
           find "$OUT" -maxdepth 3 -type f | sort || true
 
-      - name: Commit & push if changed
+      - name: Commit & push if changed (hezi only)
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A output/pipeline
+          git add -A output/pipeline/hezi
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
-          git commit -m "chore(pipeline-hezi): refresh output/pipeline from artifacts [skip ci]"
+          git commit -m "chore(pipeline-hezi): update output/pipeline/hezi from artifacts [skip ci]"
           git push
