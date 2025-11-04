@@ -61,8 +61,12 @@ jobs:
       # ③ 差分しきい値でLLM生成の要否を判定
       - name: Decide whether to (re)generate story by diff
         id: diffguard
+        env:
+          SERIES_ID: ${{ inputs.series_id }}   # ← これを追加！
+          MIN_DIFF: ${{ env.MIN_DIFF }}
         run: |
           set -e
+          echo "[series] ${SERIES_ID}"
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
       # ④ LLMで要約を生成（差分が閾値以上のときのみ）
