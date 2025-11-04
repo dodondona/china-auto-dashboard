@@ -1,0 +1,97 @@
+name: autohome_pipeline_hezi
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "25 1 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install playwright pandas beautifulsoup4 lxml requests
+          python -m playwright install chromium
+
+      - name: Run crawler (hezi ranking)
+        run: |
+          set -e
+          python tools/rank_capture_images_and_csv_hezi.py
+
+      - name: Build series ids and links
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          csv="public/autohome_ranking_with_image_urls.csv"
+          if [ ! -s "$csv" ]; then
+            echo "missing: $csv" >&2
+            exit 1
+          fi
+
+          : > artifact/series_ids.txt
+          printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
+
+          # ★重複除外：rank/1 側の既存IDを除外対象に読み込む（存在すれば）
+          EXCLUDE="output/pipeline/autohome-series-urls/series_ids.txt"
+          EXOPT=""
+          if [ -s "$EXCLUDE" ]; then
+            EXOPT="-v exfile=$EXCLUDE"
+          fi
+
+          awk -F',' $EXOPT '
+            BEGIN{
+              OFS=",";
+              if (exfile) {
+                while ((getline line < exfile) > 0) {
+                  gsub(/\r/,"",line);
+                  if (line ~ /^[0-9]+$/) skip[line]=1;
+                }
+                close(exfile)
+              }
+            }
+            NR==1{
+              for(i=1;i<=NF;i++){
+                h=$i; gsub(/^"|"$/, "", h)
+                if(h=="link") lc=i
+                if(h=="series_url") sc=i
+              }
+              next
+            }
+            {
+              col = (lc?lc:sc)
+              if(!col) next
+              url = $col
+              gsub(/^"|"$/, "", url)
+              if (match(url,/autohome\.com\.cn\/([0-9]+)/,m)) {
+                sid=m[1]
+                if(!(sid in seen) && !(sid in skip)){
+                  seen[sid]=1
+                  print sid >> "artifact/series_ids.txt"
+                  printf "%s,https://www.autohome.com.cn/%s,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
+                  n++
+                  if(n==100) exit
+                }
+              }
+            }
+          ' "$csv"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-hezi-series-urls
+          path: artifact/
