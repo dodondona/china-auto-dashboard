@@ -98,16 +98,18 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ env.SERIES_ID }}.zip"
           test -s "autohome_reviews_${{ env.SERIES_ID }}.csv"
 
+      # ③ 差分検出（閾値未満ならスキップ）
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         env:
-          SERIES_ID: ${{ inputs.series_id }}
+          SERIES_ID: ${{ env.SERIES_ID }}
           MIN_DIFF: ${{ env.MIN_DIFF }}
         run: |
           set -e
           echo "[series] ${SERIES_ID}"
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
+      # ④ LLMでstory生成（差分が閾値以上のときのみ）
       - name: Generate story with LLM
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
@@ -118,6 +120,7 @@ jobs:
           mkdir -p "cache/koubei/${{ inputs.series_id }}"
           cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
 
+      # ⑤ LLM実行時のみJSON群をcacheに反映
       - name: Persist raw review JSONs (only when LLM re-generated)
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
@@ -130,6 +133,7 @@ jobs:
           cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
           echo "✅ Persisted raw review JSONs for ${ID} (LLM executed)"
 
+      # ⑥ スキップ時（既存story再利用 or seed）
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
@@ -158,6 +162,7 @@ jobs:
             fi
           fi
 
+      # ⑦ チェック
       - name: Sanity check outputs
         run: |
           set -e
@@ -167,6 +172,7 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
+      # ⑧ アーティファクト化
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -178,7 +184,7 @@ jobs:
             output/koubei/${{ inputs.series_id }}/story.md
             cache/koubei/${{ inputs.series_id }}/*.json
 
-      # ✅ 修正版：config_to_csv.ymlと同じpushロジックのみ反映
+      # ✅ pushロジック（config_to_csv.yml と同一）
       - name: Commit repo cache and outputs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
