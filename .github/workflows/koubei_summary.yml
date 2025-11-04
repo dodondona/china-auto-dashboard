@@ -44,32 +44,32 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests pandas openai
           python -m playwright install chromium || true
 
-      # ① Playwrightでレビュー本文取得（詳細HTML/JSONを収集しZIP化）
+      # ① PlaywrightでレビューHTML/JSONを収集
       - name: Fetch Koubei detail pages
         run: |
           set -e
           python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
           test -s "autohome_reviews_${{ inputs.series_id }}.zip"
 
-      # ② ZIP→CSV 変換
+      # ② ZIP→CSV変換
       - name: Convert ZIP to CSV
         run: |
           set -e
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ inputs.series_id }}.zip"
           test -s "autohome_reviews_${{ inputs.series_id }}.csv"
 
-      # ③ 差分しきい値でLLM生成の要否を判定
+      # ③ 差分検出（閾値未満ならスキップ）
       - name: Decide whether to (re)generate story by diff
         id: diffguard
         env:
-          SERIES_ID: ${{ inputs.series_id }}   # ← これを追加！
+          SERIES_ID: ${{ inputs.series_id }}
           MIN_DIFF: ${{ env.MIN_DIFF }}
         run: |
           set -e
           echo "[series] ${SERIES_ID}"
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
-      # ④ LLMで要約を生成（差分が閾値以上のときのみ）
+      # ④ LLMでstory生成（差分が閾値以上のときのみ）
       - name: Generate story with LLM
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
@@ -80,7 +80,7 @@ jobs:
           mkdir -p "cache/koubei/${{ inputs.series_id }}"
           cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ LLMが実行された場合のみ、JSONをcacheに反映（★変更点）
+      # ⑤ LLM実行時のみJSON群をcacheに反映
       - name: Persist raw review JSONs (only when LLM re-generated)
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
@@ -89,12 +89,11 @@ jobs:
           SRC_DIR="cache/${ID}"
           DST_DIR="cache/koubei/${ID}"
           mkdir -p "${DST_DIR}"
-          # LLM実行時のみ、既存のJSONを入れ替え
           rm -f ${DST_DIR}/*.json 2>/dev/null || true
           cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
           echo "✅ Persisted raw review JSONs for ${ID} (LLM executed)"
 
-      # ⑥ スキップ時：キャッシュ再利用 or 既存出力をseed
+      # ⑥ スキップ時（既存story再利用 or seed）
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
@@ -123,7 +122,7 @@ jobs:
             fi
           fi
 
-      # ⑦ サニティチェック
+      # ⑦ チェック
       - name: Sanity check outputs
         run: |
           set -e
@@ -133,7 +132,7 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
-      # ⑧ 成果物をアップロード
+      # ⑧ アーティファクト化
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -143,9 +142,9 @@ jobs:
             autohome_reviews_${{ inputs.series_id }}.csv
             output/koubei/${{ inputs.series_id }}/story.txt
             output/koubei/${{ inputs.series_id }}/story.md
-            cache/koubei/${{ inputs.series_id }}/*.json   # JSON群もartifactに含める
+            cache/koubei/${{ inputs.series_id }}/*.json
 
-      # ⑨ story.txtをコミット（JSONはLLMが動いた時のみ更新される）
+      # ⑨ story.txt と cache/koubei を commit
       - name: Commit story.txt to repository
         run: |
           set -e
