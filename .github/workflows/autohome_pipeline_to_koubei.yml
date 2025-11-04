@@ -2,7 +2,7 @@ name: autohome_pipeline_to_koubei
 
 on:
   workflow_run:
-    workflows: ["autohome_pipeline"]
+    workflows: ["autohome_pipeline", "autohome_pipeline_hezi"]
     types: [completed]
 
 permissions:
