@@ -98,57 +98,100 @@ jobs:
           python tools/koubei_summary_to_csv.py "autohome_reviews_${{ env.SERIES_ID }}.zip"
           test -s "autohome_reviews_${{ env.SERIES_ID }}.csv"
 
-      - name: Diff and decide
+      # ③ 差分検出（閾値未満ならスキップ）
+      - name: Decide whether to (re)generate story by diff
         id: diffguard
+        env:
+          SERIES_ID: ${{ inputs.series_id }}
+          MIN_DIFF: ${{ env.MIN_DIFF }}
         run: |
           set -e
+          echo "[series] ${SERIES_ID}"
           python tools/koubei_review_diff.py --min-diff "${MIN_DIFF}"
 
-      - name: Generate story if needed
+      # ④ LLMでstory生成（差分が閾値以上のときのみ）
+      - name: Generate story with LLM
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
           set -e
-          python tools/koubei_storywriter.py "${{ env.SERIES_ID }}" "story"
-          mkdir -p "cache/${{ env.SERIES_ID }}"
-          cp "output/koubei/${{ env.SERIES_ID }}/story.txt" "cache/${{ env.SERIES_ID }}/story.txt"
+          python tools/koubei_storywriter.py "${{ inputs.series_id }}" "story"
+          test -s "output/koubei/${{ inputs.series_id }}/story.txt"
+          test -s "output/koubei/${{ inputs.series_id }}/story.md"
+          mkdir -p "cache/koubei/${{ inputs.series_id }}"
+          cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
 
-      - name: Ensure story reuse if skipped
+      # ⑤ LLM実行時のみJSON群をcacheに反映
+      - name: Persist raw review JSONs (only when LLM re-generated)
+        if: ${{ steps.diffguard.outputs.do_story == 'true' }}
+        run: |
+          set -e
+          ID="${{ inputs.series_id }}"
+          SRC_DIR="cache/${ID}"
+          DST_DIR="cache/koubei/${ID}"
+          mkdir -p "${DST_DIR}"
+          rm -f ${DST_DIR}/*.json 2>/dev/null || true
+          cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
+          echo "✅ Persisted raw review JSONs for ${ID} (LLM executed)"
+
+      # ⑥ スキップ時（既存story再利用 or seed）
+      - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
           set -e
-          ID="${{ env.SERIES_ID }}"
-          mkdir -p "output/koubei/${ID}"
-          if [ -s "cache/${ID}/story.txt" ]; then
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
+          ID="${{ inputs.series_id }}"
+          OUT_DIR="output/koubei/${ID}"
+          OUT_TXT="${OUT_DIR}/story.txt"
+          OUT_MD="${OUT_DIR}/story.md"
+          CACHE_DIR="cache/koubei/${ID}"
+          CACHE_TXT="${CACHE_DIR}/story.txt"
+          mkdir -p "${OUT_DIR}" "${CACHE_DIR}"
+
+          if [ -s "${CACHE_TXT}" ]; then
+            echo "Reused cached story for ${ID}"
+            cp "${CACHE_TXT}" "${OUT_TXT}"
+            cp "${CACHE_TXT}" "${OUT_MD}"
+          else
+            if [ -s "${OUT_TXT}" ]; then
+              echo "No cache yet; seeding cache from existing output for ${ID}"
+              cp "${OUT_TXT}" "${CACHE_TXT}"
+            else
+              echo "No cached/output story; generating once to seed cache for ${ID}."
+              python tools/koubei_storywriter.py "${ID}"
+              test -s "${OUT_TXT}"
+              cp "${OUT_TXT}" "${CACHE_TXT}"
+            fi
           fi
 
-      - name: Commit outputs & cache (config_to_csv方式)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ⑦ チェック
+      - name: Sanity check outputs
         run: |
           set -e
-          git config --global user.name  "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          mkdir -p "cache/${{ env.SERIES_ID }}" || true
-          git add -A "output/koubei/${{ env.SERIES_ID }}/" || true
-          git add -A "cache/${{ env.SERIES_ID }}/" || true
-          git commit -m "update koubei story ${{ env.SERIES_ID }}" || echo "No changes"
-          git pull --rebase || true
+          ID="${{ inputs.series_id }}"
+          ls -lh autohome_reviews_${ID}.zip autohome_reviews_${ID}.csv || true
+          ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
+          wc -l autohome_reviews_${ID}.csv || true
+          wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
+
+      # ⑧ アーティファクト化
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-reviews-${{ inputs.series_id }}
+          path: |
+            autohome_reviews_${{ inputs.series_id }}.zip
+            autohome_reviews_${{ inputs.series_id }}.csv
+            output/koubei/${{ inputs.series_id }}/story.txt
+            output/koubei/${{ inputs.series_id }}/story.md
+            cache/koubei/${{ inputs.series_id }}/*.json
+
+      # ⑨ story.txt と cache/koubei を commit
+      - name: Commit story.txt to repository
+        run: |
+          set -e
+          ID="${{ inputs.series_id }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add "output/koubei/${ID}/story.txt" "cache/koubei/${ID}" || true
+          git diff --cached --quiet || git commit -m "Add/Update koubei story & cache for ${ID}"
           git push || true
-
-      - name: Sync cached story to output and push
-        run: |
-          set -e
-          ID="${{ env.SERIES_ID }}"
-          mkdir -p "output/koubei/${ID}"
-          if [ -s "cache/${ID}/story.txt" ]; then
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.txt"
-            cp "cache/${ID}/story.txt" "output/koubei/${ID}/story.md"
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A "output/koubei/${ID}/"
-            git commit -m "sync cache to output for ${ID}" || echo "no changes"
-            git pull --rebase || true
-            git push || true
-          fi
