@@ -3,18 +3,30 @@ name: autohome_pipeline_hezi
 on:
   workflow_dispatch:
   schedule:
+    # 元の運用に干渉しない時間に。必要あれば調整してください
     - cron: "25 1 * * *"
 
 permissions:
   contents: write
 
 jobs:
-  run:
+  autohome_pipeline_hezi:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install CJK fonts (same as original)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            fonts-noto-cjk fonts-noto-cjk-extra \
+            fonts-wqy-zenhei fonts-wqy-microhei \
+            fonts-noto-color-emoji
+          fc-cache -f -v
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -25,18 +37,62 @@ jobs:
         run: |
           set -e
           python -m pip install --upgrade pip
-          pip install playwright pandas beautifulsoup4 lxml requests
+          pip install playwright openai pandas beautifulsoup4 lxml requests
           python -m playwright install chromium
 
-      - name: Run crawler (hezi ranking)
-        run: |
-          set -e
-          python tools/rank_capture_images_and_csv_hezi.py
+      # --- ここから元パイプラインの構成を厳守 ---
 
-      - name: Build series ids and links
+      - name: Warm-up (open hezi ranking page)
+        run: |
+          python - <<'PY'
+          import asyncio
+          from playwright.async_api import async_playwright
+          async def main():
+              async with async_playwright() as p:
+                  b = await p.chromium.launch()
+                  page = await b.new_page()
+                  await page.goto("https://www.autohome.com.cn/rank/1-1-0-0_9000-hezi-x-x/", timeout=60000)
+                  await page.wait_for_load_state("networkidle", timeout=60000)
+                  await page.wait_for_timeout(1500)
+                  await b.close()
+          asyncio.run(main())
+          PY
+
+      - name: Run ranking crawler (same script; URL only replaced in temp copy)
+        run: |
+          set -euo pipefail
+          mkdir -p tmpcopy
+          cp tools/rank_capture_images_and_csv.py tmpcopy/rank_capture_images_and_csv_hezi.py
+          # 元スクリプトを汚さず、実行時だけ hezi URL に置換
+          sed -i 's#https://www\.autohome\.com\.cn/rank/1#https://www.autohome.com.cn/rank/1-1-0-0_9000-hezi-x-x/#g' tmpcopy/rank_capture_images_and_csv_hezi.py
+
+          # 以降は元パイプライン同様の3段構成（CSV→メーカー付与→日本語化）
+          python tmpcopy/rank_capture_images_and_csv_hezi.py
+          python tools/stage_add_manufacturer_from_title.py public/autohome_ranking_with_image_urls.csv
+          python tools/stage_translate_maker_to_ja.py public/autohome_ranking_with_image_urls_with_maker.csv
+
+      # hezi のランキングCSVをアーティファクト化（ファイル名・列は元と同一）
+      - name: Upload artifact (hezi ranking csvs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-hezi-ranking-csvs
+          path: public/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv
+          if-no-files-found: warn
+
+      # hezi のランキング画像も分離して保存（フォルダ名で hezi を識別）
+      - name: Upload artifact (hezi ranking images)
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome-hezi-ranking-images
+          path: public/autohome_images
+          if-no-files-found: warn
+
+      # --- 重複除外を入れた series_id / series_url 生成 ---
+      - name: Build series ids and links (dedupe against base pipeline)
         run: |
           set -euo pipefail
           mkdir -p artifact
+
           csv="public/autohome_ranking_with_image_urls.csv"
           if [ ! -s "$csv" ]; then
             echo "missing: $csv" >&2
@@ -46,20 +102,21 @@ jobs:
           : > artifact/series_ids.txt
           printf 'series_id,series_url,config_url\n' > artifact/series_urls.csv
 
-          # ★重複除外：rank/1 側の既存IDを除外対象に読み込む（存在すれば）
+          # ★ 既存（rank/1）で既に配布済みの ID を参照（存在するなら）
           EXCLUDE="output/pipeline/autohome-series-urls/series_ids.txt"
           EXOPT=""
           if [ -s "$EXCLUDE" ]; then
             EXOPT="-v exfile=$EXCLUDE"
           fi
 
+          # 元パイプラインと同じ：CSVの link 列から /{id}/ を抽出
           awk -F',' $EXOPT '
             BEGIN{
               OFS=",";
               if (exfile) {
                 while ((getline line < exfile) > 0) {
                   gsub(/\r/,"",line);
-                  if (line ~ /^[0-9]+$/) skip[line]=1;
+                  if (line ~ /^[0-9]+$/) skip[line]=1;  # 既存ID（rank/1）を除外集合に
                 }
                 close(exfile)
               }
@@ -68,21 +125,19 @@ jobs:
               for(i=1;i<=NF;i++){
                 h=$i; gsub(/^"|"$/, "", h)
                 if(h=="link") lc=i
-                if(h=="series_url") sc=i
               }
               next
             }
             {
-              col = (lc?lc:sc)
-              if(!col) next
-              url = $col
+              if(!lc) next
+              url=$lc
               gsub(/^"|"$/, "", url)
               if (match(url,/autohome\.com\.cn\/([0-9]+)/,m)) {
                 sid=m[1]
-                if(!(sid in seen) && !(sid in skip)){
+                if(!(sid in seen) && !(sid in skip)){ # hezi側の重複を排除、rank/1のIDはスキップ
                   seen[sid]=1
                   print sid >> "artifact/series_ids.txt"
-                  printf "%s,https://www.autohome.com.cn/%s,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
+                  printf "%s,https://www.autohome.com.cn/series/%s.html,https://www.autohome.com.cn/config/series/%s.html#pvareaid=3454437\n", sid, sid, sid >> "artifact/series_urls.csv"
                   n++
                   if(n==100) exit
                 }
@@ -90,8 +145,43 @@ jobs:
             }
           ' "$csv"
 
-      - name: Upload artifacts
+      # ↓ 後段が拾えるよう、artifact 名は元に合わせて固定（autohome-series-urls）
+      - name: Upload artifact (series ids and links)
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-hezi-series-urls
+          name: autohome-series-urls
           path: artifact/
+          if-no-files-found: warn
+
+      # --- ここから元パイプラインと同じ：「artifact → output/pipeline へ差し替え」 ---
+      - name: Download artifacts (this run)
+        uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+
+      - name: Replace output/pipeline from artifacts
+        run: |
+          set -euo pipefail
+          OUT="output/pipeline"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          shopt -s nullglob dotglob
+          for d in _artifacts/*; do
+            cp -R "$d" "$OUT"/
+          done
+          rm -rf _artifacts artifact public
+          echo "==== Tree of $OUT ===="
+          find "$OUT" -maxdepth 3 -type f | sort || true
+
+      - name: Commit & push if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A output/pipeline
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(pipeline-hezi): refresh output/pipeline from artifacts [skip ci]"
+          git push
