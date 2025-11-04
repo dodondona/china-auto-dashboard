@@ -1,80 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import json, os, sys
+"""
+目的:
+  - AutohomeレビューCSV (autohome_reviews_{series_id}.csv) のIDリストを
+    直近キャッシュと比較して差分を検出
+  - 閾値 (MIN_DIFF) 以上の差分がある場合のみ LLM 要約を再実行する
+"""
+
+import os, sys, json, pandas as pd
 from pathlib import Path
-import pandas as pd
 
-MIN_DIFF = int(os.getenv("MIN_DIFF", "3"))
-
-def load_jsons_from_cache(cache_dir):
-    files = sorted(Path(cache_dir).glob("*.json"))
-    ids = [f.stem for f in files]
-    return set(ids)
-
-def load_ids_from_csv(csv_path):
+def load_ids_from_csv(csv_path: str):
     df = pd.read_csv(csv_path)
-    # 各レビューID列を特定（ID列のパターンに応じて柔軟に）
-    candidates = [c for c in df.columns if "id" in c.lower()]
-    if not candidates:
-        print("[warn] no id column detected, returning empty set")
-        return set()
-    col = candidates[0]
-    ids = df[col].astype(str).dropna().unique().tolist()
-    return set(ids)
+    if "id" in df.columns:
+        return set(df["id"].astype(str))
+    if "review_id" in df.columns:
+        return set(df["review_id"].astype(str))
+    return set()
 
-def save_cache_jsons(series_id, json_dir, output_dir):
-    """キャッシュへの保存（LLM発火時のみ呼ばれる）"""
+def load_prev_ids(series_id: str):
     cache_dir = Path(f"cache/koubei/{series_id}")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    for json_file in Path(json_dir).glob("*.json"):
-        dest = cache_dir / json_file.name
-        dest.write_bytes(json_file.read_bytes())
-    story_src = Path(f"output/koubei/{series_id}/story.txt")
-    if story_src.exists():
-        story_dst = cache_dir / "story.txt"
-        story_dst.write_bytes(story_src.read_bytes())
-    print(f"[cache] updated cache for {series_id} ({len(list(cache_dir.glob('*.json')))} jsons)")
+    if not cache_dir.exists():
+        return set()
+    ids = set()
+    for p in cache_dir.glob("*.json"):
+        ids.add(p.stem)
+    return ids
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: koubei_review_diff.py <series_id>")
+    series_id = os.environ.get("SERIES_ID", "").strip()
+    if not series_id:
+        print("❌ SERIES_ID is missing. Please set it in workflow env.")
         sys.exit(1)
-    series_id = sys.argv[1]
-    cache_dir = Path(f"cache/koubei/{series_id}")
-    csv_path = Path(f"autohome_reviews_{series_id}.csv")
 
-    # 現在・過去IDセット読み込み
-    cur_ids = load_ids_from_csv(csv_path)
-    prev_ids = load_jsons_from_cache(cache_dir) if cache_dir.exists() else set()
+    csv_path = f"autohome_reviews_{series_id}.csv"
+    if not os.path.exists(csv_path):
+        print(f"❌ CSV not found: {csv_path}")
+        sys.exit(1)
 
-    # 差分判定
-    diff_new = cur_ids - prev_ids
-    diff_del = prev_ids - cur_ids
-    diff_total = len(diff_new) + len(diff_del)
-
+    min_diff = int(os.environ.get("MIN_DIFF", "3"))
     print(f"[series] {series_id}")
-    print(f"[diffguard] prev={len(prev_ids)} new={len(cur_ids)} diff={diff_total}")
 
-    # LLM発火要否
-    do_story = diff_total >= MIN_DIFF
+    cur_ids = load_ids_from_csv(csv_path)
+    prev_ids = load_prev_ids(series_id)
+
+    new_ids = cur_ids - prev_ids
+    diff_count = len(new_ids)
+
+    print(f"[diffguard] prev={len(prev_ids)} new={len(cur_ids)} diff={diff_count}")
+
+    do_story = diff_count >= min_diff
     if do_story:
-        print(f"[run] diff >= {MIN_DIFF} → regenerate story with LLM")
+        print(f"[run] diff {diff_count} >= {min_diff} → regenerate story")
     else:
-        print(f"[skip] diff below threshold ({diff_total} < {MIN_DIFF}) → reuse cache")
+        print(f"[skip] diff below threshold ({diff_count} < {min_diff})")
 
-    # 結果を環境ファイルに出力
-    with open(os.environ["GITHUB_ENV"], "a") as f:
-        f.write(f"DO_STORY={'true' if do_story else 'false'}\n")
-
-    # ✅ LLMを実行した場合のみ cache を更新
-    if do_story:
-        json_dir = Path(f"output/koubei/{series_id}")
-        if json_dir.exists():
-            save_cache_jsons(series_id, json_dir, "output")
-        else:
-            print(f"[warn] no json output directory found for {series_id}")
-    else:
-        print(f"[cache] unchanged; skip writing cache")
+    # GitHub Actions 用出力
+    output_line = f"do_story={'true' if do_story else 'false'}"
+    print(f"::set-output name=do_story::{ 'true' if do_story else 'false' }")
 
 if __name__ == "__main__":
     main()
