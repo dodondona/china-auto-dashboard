@@ -1,98 +1,101 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, sys, json, re, csv
+"""
+koubei_review_diff.py
+目的:
+  - cache/koubei/{series_id}/ 内に保存された既存レビューID群と
+    今回ZIPから展開された autohome_reviews_{series_id}.csv (またはjson群)
+    に含まれるレビューID群を比較し、差分数に応じて再生成を判定する。
+  - 差分が閾値を超えた場合:
+      → LLM再生成フラグをON
+      → キャッシュ内の古いレビューJSONを全削除し、最新ZIP内容で再保存。
+  - 差分が閾値未満の場合:
+      → キャッシュ・storyともに変更せずスキップ。
+
+使用例:
+  python tools/koubei_review_diff.py 7740
+"""
+
+import os
+import json
 from pathlib import Path
-import argparse
+import pandas as pd
 
-def sniff_ids_from_json(p: Path):
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+# ====== 設定 ======
+SERIES_ID = os.environ.get("SERIES_ID") or "7740"
+MIN_DIFF = int(os.environ.get("MIN_DIFF", "3"))
+
+base_cache_dir = Path(f"cache/koubei/{SERIES_ID}")
+output_dir = Path(f"output/koubei/{SERIES_ID}")
+csv_path = Path(f"autohome_reviews_{SERIES_ID}.csv")
+
+# ====== 関数 ======
+def load_existing_ids(cache_dir: Path):
+    """キャッシュに存在するレビューID一覧を取得"""
+    ids = set()
+    if not cache_dir.exists():
+        return ids
+    for p in cache_dir.glob("*.json"):
+        ids.add(p.stem)
+    return ids
+
+
+def load_new_ids_from_csv(csv_file: Path):
+    """CSVからreview_id列を抽出"""
+    if not csv_file.exists():
+        print(f"[warn] CSV not found: {csv_file}")
         return set()
-    ids = set()
-    def add_from_obj(o):
-        for k in ("id","review_id","kId","kid","KID"):
-            if isinstance(o, dict) and k in o:
-                v = o[k]
-                if isinstance(v, (int, str)) and str(v).isdigit():
-                    ids.add(str(v))
-    if isinstance(data, list):
-        for o in data: add_from_obj(o)
-    elif isinstance(data, dict):
-        for v in data.values():
-            if isinstance(v, list):
-                for o in v: add_from_obj(o)
-            elif isinstance(v, dict):
-                add_from_obj(v)
-        add_from_obj(data)
-    return ids
-
-def sniff_ids_from_csv(p: Path):
-    ids = set()
     try:
-        with p.open("r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            cols = [c.lower() for c in (reader.fieldnames or [])]
-            candidates = [k for k in ("id","review_id","kid","kId","KID") if k in cols]
-            for row in reader:
-                for k in candidates:
-                    v = row.get(k) or row.get(k.upper()) or row.get(k.capitalize())
-                    if v and str(v).isdigit():
-                        ids.add(str(v)); break
-    except Exception:
-        pass
-    return ids
+        df = pd.read_csv(csv_file)
+        if "review_id" in df.columns:
+            return set(df["review_id"].astype(str).tolist())
+        elif "id" in df.columns:
+            return set(df["id"].astype(str).tolist())
+        else:
+            # ID列がない場合、空集合を返す
+            return set()
+    except Exception as e:
+        print(f"[error] CSV load failed: {e}")
+        return set()
 
-def collect_current_ids(series_id: str):
-    """cache/koubei/<series_id>/ 内の全レビューjsonを収集"""
-    ids = set()
-    koubei_dir = Path("cache") / "koubei" / series_id
-    if koubei_dir.exists():
-        for p in koubei_dir.glob("*.json"):
-            ids |= sniff_ids_from_json(p)
-    # fallback: autohome_reviews_*.csv からも拾う
-    for p in Path(".").glob(f"autohome_reviews_{series_id}.csv"):
-        ids |= sniff_ids_from_csv(p)
-    return ids
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--min-diff", type=int, default=3)
-    args = ap.parse_args()
+def clear_and_copy_cache(src_json_dir: Path, dst_cache_dir: Path):
+    """キャッシュを全削除し、最新レビューJSON群をコピー"""
+    import shutil
+    if dst_cache_dir.exists():
+        shutil.rmtree(dst_cache_dir)
+    dst_cache_dir.mkdir(parents=True, exist_ok=True)
+    for p in src_json_dir.glob("*.json"):
+        shutil.copy2(p, dst_cache_dir / p.name)
+    print(f"[cache] refreshed {dst_cache_dir}")
 
-    series_id = os.environ.get("SERIES_ID", "").strip()
-    if not series_id:
-        print("SERIES_ID missing", file=sys.stderr)
-        sys.exit(2)
 
-    # review_ids.json のパスを cache/koubei/<id>/ に変更
-    cache_dir = Path("cache") / "koubei" / series_id
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / "review_ids.json"
+# ====== メイン処理 ======
+print(f"[series] {SERIES_ID}")
 
-    prev_ids = set()
-    if cache_file.exists():
-        try:
-            prev_ids = set(json.loads(cache_file.read_text(encoding="utf-8")))
-        except Exception:
-            prev_ids = set()
+# 現在キャッシュにあるID
+prev_ids = load_existing_ids(base_cache_dir)
+# 今回CSV内のID
+new_ids = load_new_ids_from_csv(csv_path)
 
-    cur_ids = collect_current_ids(series_id)
+# 両者の差分
+added = new_ids - prev_ids
+removed = prev_ids - new_ids
+diff_count = len(added | removed)
 
-    new_ids = cur_ids - prev_ids
-    do_story = len(new_ids) >= args.min_diff
+print(f"[diffguard] prev={len(prev_ids)} new={len(new_ids)} diff={diff_count}")
 
-    cache_file.write_text(json.dumps(sorted(cur_ids), ensure_ascii=False, indent=2), encoding="utf-8")
+# 閾値判定
+if diff_count >= MIN_DIFF:
+    print(f"[trigger] Detected {diff_count} ID changes (>= {MIN_DIFF}), will regenerate story & refresh cache.")
+    print("::set-output name=do_story::true")
 
-    gh_out = os.environ.get("GITHUB_OUTPUT")
-    line = f"do_story={'true' if do_story else 'false'}\n"
-    if gh_out:
-        with open(gh_out, "a", encoding="utf-8") as f:
-            f.write(line)
+    # キャッシュディレクトリを全更新
+    src_json_dir = Path(f"tmp_reviews_{SERIES_ID}")  # ZIP展開先を仮定
+    if src_json_dir.exists():
+        clear_and_copy_cache(src_json_dir, base_cache_dir)
     else:
-        print(line.strip())
-
-    print(f"[diffguard] cur={len(cur_ids)} prev={len(prev_ids)} new={len(new_ids)} do_story={do_story}")
-
-if __name__ == "__main__":
-    main()
+        print(f"[warn] source json dir not found: {src_json_dir}")
+else:
+    print(f"[skip] diff below threshold ({diff_count} < {MIN_DIFF})")
+    print("::set-output name=do_story::false")
