@@ -51,18 +51,6 @@ jobs:
           python tools/koubei_summary_playwright.py "${{ inputs.series_id }}" "${{ inputs.pages }}"
           test -s "autohome_reviews_${{ inputs.series_id }}.zip"
 
-      # ★ 追加：Playwright生成のJSON群をリポジトリ内 cache/koubei/<id>/ に永続化
-      - name: Persist raw review JSONs
-        run: |
-          set -e
-          ID="${{ inputs.series_id }}"
-          SRC_DIR="cache/${ID}"
-          DST_DIR="cache/koubei/${ID}"
-          mkdir -p "${DST_DIR}"
-          # すべての .json をコピー（存在しない場合はスルー）
-          cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
-          echo "✅ Persisted raw review JSONs to ${DST_DIR}"
-
       # ② ZIP→CSV 変換
       - name: Convert ZIP to CSV
         run: |
@@ -88,7 +76,21 @@ jobs:
           mkdir -p "cache/koubei/${{ inputs.series_id }}"
           cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
 
-      # ⑤ スキップ時：キャッシュ再利用 or 既存出力をseed
+      # ⑤ LLMが実行された場合のみ、JSONをcacheに反映（★変更点）
+      - name: Persist raw review JSONs (only when LLM re-generated)
+        if: ${{ steps.diffguard.outputs.do_story == 'true' }}
+        run: |
+          set -e
+          ID="${{ inputs.series_id }}"
+          SRC_DIR="cache/${ID}"
+          DST_DIR="cache/koubei/${ID}"
+          mkdir -p "${DST_DIR}"
+          # LLM実行時のみ、既存のJSONを入れ替え
+          rm -f ${DST_DIR}/*.json 2>/dev/null || true
+          cp -r ${SRC_DIR}/*.json "${DST_DIR}/" 2>/dev/null || true
+          echo "✅ Persisted raw review JSONs for ${ID} (LLM executed)"
+
+      # ⑥ スキップ時：キャッシュ再利用 or 既存出力をseed
       - name: Ensure story when skipped (reuse cache or generate once)
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
@@ -117,7 +119,7 @@ jobs:
             fi
           fi
 
-      # ⑥ サニティチェック
+      # ⑦ サニティチェック
       - name: Sanity check outputs
         run: |
           set -e
@@ -127,7 +129,7 @@ jobs:
           wc -l autohome_reviews_${ID}.csv || true
           wc -c output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
 
-      # ⑦ 成果物をアップロード
+      # ⑧ 成果物をアップロード
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -137,9 +139,9 @@ jobs:
             autohome_reviews_${{ inputs.series_id }}.csv
             output/koubei/${{ inputs.series_id }}/story.txt
             output/koubei/${{ inputs.series_id }}/story.md
-            cache/koubei/${{ inputs.series_id }}/*.json   # ★ JSON群もartifactに含める
+            cache/koubei/${{ inputs.series_id }}/*.json   # JSON群もartifactに含める
 
-      # ⑧ story.txtをコミット
+      # ⑨ story.txtをコミット（JSONはLLMが動いた時のみ更新される）
       - name: Commit story.txt to repository
         run: |
           set -e
