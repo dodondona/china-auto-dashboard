@@ -1,63 +1,57 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+koubei_review_diff.py
 目的:
-  - AutohomeレビューCSV (autohome_reviews_{series_id}.csv) のIDリストを
-    直近キャッシュと比較して差分を検出
-  - 閾値 (MIN_DIFF) 以上の差分がある場合のみ LLM 要約を再実行する
+  - autohome_reviews_{series_id}.csv の review ID 一覧を取得
+  - cache/koubei/{series_id}/ 内に存在する過去 JSON 群から前回 ID 一覧を取得
+  - 新旧の差分数を比較して、MIN_DIFF を超えた場合のみ story 再生成フラグを立てる
+出力:
+  - diff 数などをログ出力
+  - 環境ファイルに do_story=true/false を書き込む
 """
 
-import os, sys, json, pandas as pd
+import os
+import pandas as pd
 from pathlib import Path
 
 def load_ids_from_csv(csv_path: str):
     df = pd.read_csv(csv_path)
-    if "id" in df.columns:
-        return set(df["id"].astype(str))
-    if "review_id" in df.columns:
-        return set(df["review_id"].astype(str))
-    return set()
+    # review_id 列があることを前提
+    return df["id"].astype(str).tolist()
 
-def load_prev_ids(series_id: str):
-    cache_dir = Path(f"cache/koubei/{series_id}")
-    if not cache_dir.exists():
-        return set()
-    ids = set()
-    for p in cache_dir.glob("*.json"):
-        ids.add(p.stem)
+def load_ids_from_cache(cache_dir: Path):
+    ids = []
+    if cache_dir.exists():
+        for f in cache_dir.glob("*.json"):
+            ids.append(f.stem)
     return ids
 
 def main():
-    series_id = os.environ.get("SERIES_ID", "").strip()
-    if not series_id:
-        print("❌ SERIES_ID is missing. Please set it in workflow env.")
-        sys.exit(1)
-
-    csv_path = f"autohome_reviews_{series_id}.csv"
-    if not os.path.exists(csv_path):
-        print(f"❌ CSV not found: {csv_path}")
-        sys.exit(1)
-
+    series_id = os.environ.get("SERIES_ID") or ""
     min_diff = int(os.environ.get("MIN_DIFF", "3"))
+    csv_path = f"autohome_reviews_{series_id}.csv"
+    cache_dir = Path(f"cache/koubei/{series_id}")
+
     print(f"[series] {series_id}")
 
     cur_ids = load_ids_from_csv(csv_path)
-    prev_ids = load_prev_ids(series_id)
+    prev_ids = load_ids_from_cache(cache_dir)
 
-    new_ids = cur_ids - prev_ids
-    diff_count = len(new_ids)
+    diff = len(set(cur_ids) ^ set(prev_ids))
+    print(f"[diffguard] prev={len(prev_ids)} new={len(cur_ids)} diff={diff}")
 
-    print(f"[diffguard] prev={len(prev_ids)} new={len(cur_ids)} diff={diff_count}")
-
-    do_story = diff_count >= min_diff
+    do_story = diff >= min_diff
     if do_story:
-        print(f"[run] diff {diff_count} >= {min_diff} → regenerate story")
+        print(f"[run] diff {diff} >= {min_diff} → regenerate story")
     else:
-        print(f"[skip] diff below threshold ({diff_count} < {min_diff})")
+        print(f"[skip] diff below threshold ({diff} < {min_diff})")
 
-    # GitHub Actions 用出力
-    output_line = f"do_story={'true' if do_story else 'false'}"
-    print(f"::set-output name=do_story::{ 'true' if do_story else 'false' }")
+    # ✅ GitHub Actions 新方式: 環境ファイルに書き込む
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            f.write(f"do_story={'true' if do_story else 'false'}\n")
 
 if __name__ == "__main__":
     main()
