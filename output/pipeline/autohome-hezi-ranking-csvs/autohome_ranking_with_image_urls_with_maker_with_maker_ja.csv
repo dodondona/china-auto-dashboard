@@ -1,0 +1,101 @@
+﻿rank,name,global_name,units,delta_vs_last_month,link,price,image_url,manufacturer,manufacturer_ja
+1,轩逸,シルフィ,33323,,https://www.autohome.com.cn/448,7.99-17.49万,/autohome_images/001_轩逸.png,日产,日産
+2,速腾,速騰(su teng),24622,1.0,https://www.autohome.com.cn/442,13.99-17.29万,/autohome_images/002_速腾.png,大众,フォルクスワーゲン
+3,朗逸,ラヴィーダ,22310,-1.0,https://www.autohome.com.cn/614,8.00-15.19万,/autohome_images/003_朗逸.png,大众,フォルクスワーゲン
+4,凯美瑞,カムリ,20517,5.0,https://www.autohome.com.cn/110,17.18-25.98万,/autohome_images/004_凯美瑞.png,丰田,トヨタ
+5,RAV4荣放,RAV4,19712,1.0,https://www.autohome.com.cn/770,16.98-23.88万,/autohome_images/005_RAV4荣放.png,丰田,トヨタ
+6,途观L,ティグアンL,19441,-1.0,https://www.autohome.com.cn/4274,18.68-26.68万,/autohome_images/006_途观L.png,大众,フォルクスワーゲン
+7,帕萨特,パサート,18592,-3.0,https://www.autohome.com.cn/528,16.45-30.98万,/autohome_images/007_帕萨特.png,大众,フォルクスワーゲン
+8,迈腾,マゴタン,17613,,https://www.autohome.com.cn/496,17.49-24.69万,/autohome_images/008_迈腾.png,大众,フォルクスワーゲン
+9,奥迪A6L,A6L,16011,5.0,https://www.autohome.com.cn/18,42.79-65.68万,/autohome_images/009_奥迪A6L.png,奥迪,アウディ
+10,探岳,タイロン,15999,,https://www.autohome.com.cn/4744,19.89-25.99万,/autohome_images/010_探岳.png,大众,フォルクスワーゲン
+11,卡罗拉锐放,カローラクロス,15737,-4.0,https://www.autohome.com.cn/6428,12.68-18.48万,/autohome_images/011_卡罗拉锐放.png,丰田,トヨタ
+12,本田CR-V,CR-V,14345,1.0,https://www.autohome.com.cn/314,18.59-26.39万,/autohome_images/012_本田CR-V.png,本田,ホンダ
+13,锋兰达,フロントランダー,13715,-2.0,https://www.autohome.com.cn/6414,12.88-18.48万,/autohome_images/013_锋兰达.png,丰田,トヨタ
+14,雅阁,アコード,13230,4.0,https://www.autohome.com.cn/78,17.98-23.88万,/autohome_images/014_雅阁.png,本田,ホンダ
+15,奔驰E级,Eクラス,13103,10.0,https://www.autohome.com.cn/197,45.18-59.98万,/autohome_images/015_奔驰E级.png,奔驰,メルセデス・ベンツ
+16,昂科威Plus,昂科威(ang ke wei)Plus,12772,1.0,https://www.autohome.com.cn/3554,22.99-25.99万,/autohome_images/016_昂科威Plus.png,别克,别克
+17,宝马3系,3シリーズ,12569,-2.0,https://www.autohome.com.cn/66,31.99-39.99万,/autohome_images/017_宝马3系.png,宝马,BMW
+18,途岳,途岳(tu yue),12371,-6.0,https://www.autohome.com.cn/4745,12.59-21.66万,/autohome_images/018_途岳.png,大众,フォルクスワーゲン
+19,奥迪Q5L,Q5L,12315,5.0,https://www.autohome.com.cn/4851,34.98-42.98万,/autohome_images/019_奥迪Q5L.png,奥迪,アウディ
+20,威兰达,ウィランダー,12166,-1.0,https://www.autohome.com.cn/5472,17.38-26.48万,/autohome_images/020_威兰达.png,丰田,トヨタ
+21,亚洲龙,アバロン,11640,2.0,https://www.autohome.com.cn/4962,17.88-25.68万,/autohome_images/021_亚洲龙.png,丰田,トヨタ
+22,奔驰GLC,GLC,11600,-1.0,https://www.autohome.com.cn/3862,42.78-53.13万,/autohome_images/022_奔驰GLC.png,奔驰,メルセデス・ベンツ
+23,奔驰C级,Cクラス,10430,-7.0,https://www.autohome.com.cn/588,33.48-38.06万,/autohome_images/023_奔驰C级.png,奔驰,メルセデス・ベンツ
+24,皓影,ブリーズ,9954,-4.0,https://www.autohome.com.cn/5393,18.59-26.39万,/autohome_images/024_皓影.png,本田,ホンダ
+25,宝马5系,5シリーズ,9087,1.0,https://www.autohome.com.cn/65,43.99-52.59万,/autohome_images/025_宝马5系.png,宝马,BMW
+26,铂智3X,鉑智(bo zhi)3X,9017,3.0,https://www.autohome.com.cn/7712,10.98-15.98万,/autohome_images/026_铂智3X.png,丰田,トヨタ
+27,赛那SIENNA,シエナ,8168,,https://www.autohome.com.cn/6272,29.98-39.38万,/autohome_images/027_赛那SIENNA.png,丰田,トヨタ
+28,宝马X3,X3,7998,2.0,https://www.autohome.com.cn/4658,34.99-44.99万,/autohome_images/028_宝马X3.png,宝马,BMW
+29,奥迪A4L,A4L,7638,5.0,https://www.autohome.com.cn/692,28.98-36.28万,/autohome_images/029_奥迪A4L.png,奥迪,アウディ
+30,逍客,キャシュカイ,7380,3.0,https://www.autohome.com.cn/564,12.59-17.49万,/autohome_images/030_逍客.png,日产,日産
+31,卡罗拉,カローラ,7107,-3.0,https://www.autohome.com.cn/526,11.68-15.58万,/autohome_images/031_卡罗拉.png,丰田,トヨタ
+32,别克GL8新能源,GL8,7017,6.0,https://www.autohome.com.cn/7658,24.99-41.99万,/autohome_images/032_别克GL8新能源.png,别克,别克
+33,宝来,ボーラ,6982,-1.0,https://www.autohome.com.cn/633,11.29-14.39万,/autohome_images/033_宝来.png,大众,フォルクスワーゲン
+34,日产N7,日产N7,6410,-12.0,https://www.autohome.com.cn/7935,11.99-14.99万,/autohome_images/034_日产N7.png,日产,日産
+35,奥迪A3,奥迪A3,6017,4.0,https://www.autohome.com.cn/3170,16.59-20.99万,/autohome_images/035_奥迪A3.png,奥迪,アウディ
+36,宝马X5,宝马X5,5885,8.0,https://www.autohome.com.cn/6548,61.50-83.00万,/autohome_images/036_宝马X5.png,宝马,BMW
+37,汉兰达,汉兰达,5669,-6.0,https://www.autohome.com.cn/771,24.98-32.58万,/autohome_images/037_汉兰达.png,丰田,トヨタ
+38,沃尔沃XC60,沃尔沃XC60,5640,-3.0,https://www.autohome.com.cn/3411,39.69-47.49万,/autohome_images/038_沃尔沃XC60.png,沃尔沃,沃尔沃
+39,格瑞维亚,格瑞维亚,5373,-3.0,https://www.autohome.com.cn/6672,29.98-41.68万,/autohome_images/039_格瑞维亚.png,丰田,トヨタ
+40,英仕派,英仕派,5158,2.0,https://www.autohome.com.cn/4809,18.28-21.38万,/autohome_images/040_英仕派.png,本田,ホンダ
+41,君越,君越,4918,,https://www.autohome.com.cn/834,20.99-23.99万,/autohome_images/041_君越.png,别克,别克
+42,皇冠陆放,皇冠陆放,4822,-2.0,https://www.autohome.com.cn/6030,28.48-33.28万,/autohome_images/042_皇冠陆放.png,丰田,トヨタ
+43,捷达VS5,捷达VS5,4438,,https://www.autohome.com.cn/5138,8.79-12.19万,/autohome_images/043_捷达VS5.png,捷达,捷达
+44,凯迪拉克XT5,凯迪拉克XT5,4359,10.0,https://www.autohome.com.cn/3989,37.99-45.99万,/autohome_images/044_凯迪拉克XT5.png,凯迪拉克,凯迪拉克
+45,别克GL8,别克GL8,4260,1.0,https://www.autohome.com.cn/166,19.99-36.99万,/autohome_images/045_别克GL8.png,别克,别克
+46,奥迪A5L,奥迪A5L,4120,28.0,https://www.autohome.com.cn/7855,25.58-30.98万,/autohome_images/046_奥迪A5L.png,奥迪,アウディ
+47,思域,思域,4035,3.0,https://www.autohome.com.cn/135,12.99-18.79万,/autohome_images/047_思域.png,本田,ホンダ
+48,宝马X1,宝马X1,3801,,https://www.autohome.com.cn/2561,28.89-34.99万,/autohome_images/048_宝马X1.png,宝马,BMW
+49,奇骏,奇骏,3726,3.0,https://www.autohome.com.cn/656,16.08-26.29万,/autohome_images/049_奇骏.png,日产,日産
+50,蒙迪欧,蒙迪欧,3623,-13.0,https://www.autohome.com.cn/117,14.98-22.98万,/autohome_images/050_蒙迪欧.png,福特,福特
+51,天籁,天籁,3563,-4.0,https://www.autohome.com.cn/634,17.98-23.98万,/autohome_images/051_天籁.png,日产,日産
+52,凌渡,凌渡,3561,23.0,https://www.autohome.com.cn/3457,15.09-19.59万,/autohome_images/052_凌渡.png,大众,フォルクスワーゲン
+53,T-ROC探歌,T-ROC探歌,3435,-8.0,https://www.autohome.com.cn/4674,15.89-17.87万,/autohome_images/053_T-ROC探歌.png,大众,フォルクスワーゲン
+54,马自达EZ-60,马自达EZ-60,3317,,https://www.autohome.com.cn/7717,11.99-16.09万,/autohome_images/054_马自达EZ-60.png,马自达,マツダ
+55,途昂,途昂,3206,,https://www.autohome.com.cn/4232,28.90-35.99万,/autohome_images/055_途昂.png,大众,フォルクスワーゲン
+56,奥迪A5L Sportback,奥迪A5L Sportback,3150,23.0,https://www.autohome.com.cn/7817,27.99-39.99万,/autohome_images/056_奥迪A5L_Sportback.png,奥迪,アウディ
+57,君威,君威,3145,-6.0,https://www.autohome.com.cn/164,15.98-17.58万,/autohome_images/057_君威.png,别克,别克
+58,锐界,锐界,3105,-2.0,https://www.autohome.com.cn/3615,22.68-30.98万,/autohome_images/058_锐界.png,福特,福特
+59,丰田bZ5,丰田bZ5,3019,11.0,https://www.autohome.com.cn/7713,12.98-19.98万,/autohome_images/059_丰田bZ5.png,丰田,トヨタ
+60,伊兰特,伊兰特,2977,-11.0,https://www.autohome.com.cn/51,9.98-14.98万,/autohome_images/060_伊兰特.png,现代,现代
+61,捷达VA3,捷达VA3,2825,2.0,https://www.autohome.com.cn/5137,6.78-9.48万,/autohome_images/061_捷达VA3.png,捷达,捷达
+62,凯迪拉克CT5,凯迪拉克CT5,2790,-2.0,https://www.autohome.com.cn/5349,28.99-34.59万,/autohome_images/062_凯迪拉克CT5.png,凯迪拉克,凯迪拉克
+63,奔驰GLB,奔驰GLB,2747,-2.0,https://www.autohome.com.cn/5348,31.19-36.79万,/autohome_images/063_奔驰GLB.png,奔驰,メルセデス・ベンツ
+64,奥迪Q3,奥迪Q3,2742,-2.0,https://www.autohome.com.cn/2951,25.18-29.68万,/autohome_images/064_奥迪Q3.png,奥迪,アウディ
+65,大众ID.3,大众ID.3,2622,-7.0,https://www.autohome.com.cn/6265,12.99-15.59万,/autohome_images/065_大众ID_3.png,大众,フォルクスワーゲン
+66,高尔夫,高尔夫,2366,-9.0,https://www.autohome.com.cn/871,12.99-15.89万,/autohome_images/066_高尔夫.png,大众,フォルクスワーゲン
+67,马自达CX-5,马自达CX-5,2169,-2.0,https://www.autohome.com.cn/2987,12.58-15.38万,/autohome_images/067_马自达CX-5.png,马自达,マツダ
+68,宝马i3,宝马i3,2117,13.0,https://www.autohome.com.cn/6544,35.39-41.39万,/autohome_images/068_宝马i3.png,宝马,BMW
+69,揽巡,揽巡,2095,-5.0,https://www.autohome.com.cn/6738,24.29-29.99万,/autohome_images/069_揽巡.png,大众,フォルクスワーゲン
+70,普拉多,普拉多,2066,2.0,https://www.autohome.com.cn/46,44.98-55.98万,/autohome_images/070_普拉多.png,丰田,トヨタ
+71,沃尔沃S60,沃尔沃S60,2008,-5.0,https://www.autohome.com.cn/3158,30.69-38.49万,/autohome_images/071_沃尔沃S60.png,沃尔沃,沃尔沃
+72,smart精灵#1,smart精灵#1,1995,-1.0,https://www.autohome.com.cn/6369,15.49-24.99万,/autohome_images/072_smart精灵_1.png,smart,smart
+73,赛图斯,赛图斯,1830,7.0,https://www.autohome.com.cn/7201,10.99-15.99万,/autohome_images/073_赛图斯.png,起亚,起亚
+74,途胜,途胜,1668,-5.0,https://www.autohome.com.cn/358,15.98-20.78万,/autohome_images/074_途胜.png,现代,现代
+75,雷凌,雷凌,1615,-2.0,https://www.autohome.com.cn/3462,11.38-14.88万,/autohome_images/075_雷凌.png,丰田,トヨタ
+76,奥德赛,奥德赛,1606,2.0,https://www.autohome.com.cn/880,23.58-43.98万,/autohome_images/076_奥德赛.png,本田,ホンダ
+77,沃尔沃S90,沃尔沃S90,1593,6.0,https://www.autohome.com.cn/4206,40.69-50.59万,/autohome_images/077_沃尔沃S90.png,沃尔沃,沃尔沃
+78,奕跑,奕跑,1590,-10.0,https://www.autohome.com.cn/4824,6.98-8.38万,/autohome_images/078_奕跑.png,起亚,起亚
+79,林肯Z,林肯Z,1557,7.0,https://www.autohome.com.cn/6477,23.58-36.58万,/autohome_images/079_林肯Z.png,林肯,林肯
+80,别克E5,别克E5,1547,13.0,https://www.autohome.com.cn/7043,16.99-21.19万,/autohome_images/080_别克E5.png,别克,别克
+81,狮铂拓界,狮铂拓界,1471,3.0,https://www.autohome.com.cn/6853,17.98-23.78万,/autohome_images/081_狮铂拓界.png,起亚,起亚
+82,ID.4 CROZZ,ID.4 CROZZ,1436,,https://www.autohome.com.cn/5785,14.99-24.36万,/autohome_images/082_ID_4_CROZZ.png,大众,フォルクスワーゲン
+83,丰田bZ3,丰田bZ3,1413,2.0,https://www.autohome.com.cn/6903,16.98-19.98万,/autohome_images/083_丰田bZ3.png,丰田,トヨタ
+84,探险者,探险者,1387,7.0,https://www.autohome.com.cn/5556,30.98-39.98万,/autohome_images/084_探险者.png,福特,福特
+85,揽境,揽境,1363,18.0,https://www.autohome.com.cn/5245,26.99-29.99万,/autohome_images/085_揽境.png,大众,フォルクスワーゲン
+86,凡尔赛C5 X,凡尔赛C5 X,1354,-10.0,https://www.autohome.com.cn/6120,13.77-18.67万,/autohome_images/086_凡尔赛C5_X.png,雪铁龙,雪铁龙
+87,一汽-大众CC,一汽-大众CC,1348,2.0,https://www.autohome.com.cn/905,22.49-27.49万,/autohome_images/087_一汽-大众CC.png,大众,フォルクスワーゲン
+88,库斯途,库斯途,1323,-1.0,https://www.autohome.com.cn/6118,16.98-22.08万,/autohome_images/088_库斯途.png,现代,现代
+89,捷达VS8,捷达VS8,1278,51.0,https://www.autohome.com.cn/8160,11.99-13.49万,/autohome_images/089_捷达VS8.png,捷达,捷达
+90,宝马iX1,宝马iX1,1247,6.0,https://www.autohome.com.cn/7223,29.99-33.99万,/autohome_images/090_宝马iX1.png,宝马,BMW
+91,航海家,航海家,1192,-38.0,https://www.autohome.com.cn/5757,30.58-46.88万,/autohome_images/091_航海家.png,林肯,林肯
+92,威朗,威朗,1190,-15.0,https://www.autohome.com.cn/3751,12.89-15.89万,/autohome_images/092_威朗.png,别克,别克
+93,型格,型格,1186,-3.0,https://www.autohome.com.cn/6386,12.99-18.69万,/autohome_images/093_型格.png,本田,ホンダ
+94,凯迪拉克XT4,凯迪拉克XT4,1150,-6.0,https://www.autohome.com.cn/4856,22.97-27.57万,/autohome_images/094_凯迪拉克XT4.png,凯迪拉克,凯迪拉克
+95,奥迪E5 Sportback,奥迪E5 Sportback,1150,75.0,https://www.autohome.com.cn/7925,23.59-31.99万,/autohome_images/095_奥迪E5_Sportback.png,奥迪AUDI,アウディ
+96,奔驰A级,奔驰A级,1143,-1.0,https://www.autohome.com.cn/4764,25.13-27.57万,/autohome_images/096_奔驰A级.png,奔驰,メルセデス・ベンツ
+97,捷豹XEL,捷豹XEL,1119,1.0,https://www.autohome.com.cn/4462,32.98-34.18万,/autohome_images/097_捷豹XEL.png,捷豹,捷豹
+98,ID.4 X,ID.4 X,1078,-6.0,https://www.autohome.com.cn/5511,15.99-21.19万,/autohome_images/098_ID_4_X.png,大众,フォルクスワーゲン
+99,捷达VS7,捷达VS7,1046,-32.0,https://www.autohome.com.cn/5193,10.79-14.19万,/autohome_images/099_捷达VS7.png,捷达,捷达
+100,福瑞迪,福瑞迪,1039,28.0,https://www.autohome.com.cn/813,7.88-13.98万,/autohome_images/100_福瑞迪.png,起亚,起亚
