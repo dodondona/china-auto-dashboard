@@ -114,18 +114,18 @@ jobs:
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
           set -e
-          python tools/koubei_storywriter.py "${{ inputs.series_id }}" "story"
-          test -s "output/koubei/${{ inputs.series_id }}/story.txt"
-          test -s "output/koubei/${{ inputs.series_id }}/story.md"
-          mkdir -p "cache/koubei/${{ inputs.series_id }}"
-          cp "output/koubei/${{ inputs.series_id }}/story.txt" "cache/koubei/${{ inputs.series_id }}/story.txt"
+          python tools/koubei_storywriter.py "${{ env.SERIES_ID }}" "story"
+          test -s "output/koubei/${{ env.SERIES_ID }}/story.txt"
+          test -s "output/koubei/${{ env.SERIES_ID }}/story.md"
+          mkdir -p "cache/koubei/${{ env.SERIES_ID }}"
+          cp "output/koubei/${{ env.SERIES_ID }}/story.txt" "cache/koubei/${{ env.SERIES_ID }}/story.txt"
 
       # ⑤ LLM実行時のみJSON群をcacheに反映
       - name: Persist raw review JSONs (only when LLM re-generated)
         if: ${{ steps.diffguard.outputs.do_story == 'true' }}
         run: |
           set -e
-          ID="${{ inputs.series_id }}"
+          ID="${{ env.SERIES_ID }}"
           SRC_DIR="cache/${ID}"
           DST_DIR="cache/koubei/${ID}"
           mkdir -p "${DST_DIR}"
@@ -138,7 +138,7 @@ jobs:
         if: ${{ steps.diffguard.outputs.do_story == 'false' }}
         run: |
           set -e
-          ID="${{ inputs.series_id }}"
+          ID="${{ env.SERIES_ID }}"
           OUT_DIR="output/koubei/${ID}"
           OUT_TXT="${OUT_DIR}/story.txt"
           OUT_MD="${OUT_DIR}/story.md"
@@ -166,7 +166,7 @@ jobs:
       - name: Sanity check outputs
         run: |
           set -e
-          ID="${{ inputs.series_id }}"
+          ID="${{ env.SERIES_ID }}"
           ls -lh autohome_reviews_${ID}.zip autohome_reviews_${ID}.csv || true
           ls -lh output/koubei/${ID}/story.txt output/koubei/${ID}/story.md || true
           wc -l autohome_reviews_${ID}.csv || true
@@ -176,13 +176,13 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: autohome-reviews-${{ inputs.series_id }}
+          name: autohome-reviews-${{ env.SERIES_ID }}
           path: |
-            autohome_reviews_${{ inputs.series_id }}.zip
-            autohome_reviews_${{ inputs.series_id }}.csv
-            output/koubei/${{ inputs.series_id }}/story.txt
-            output/koubei/${{ inputs.series_id }}/story.md
-            cache/koubei/${{ inputs.series_id }}/*.json
+            autohome_reviews_${{ env.SERIES_ID }}.zip
+            autohome_reviews_${{ env.SERIES_ID }}.csv
+            output/koubei/${{ env.SERIES_ID }}/story.txt
+            output/koubei/${{ env.SERIES_ID }}/story.md
+            cache/koubei/${{ env.SERIES_ID }}/*.json
 
       # ✅ pushロジック（config_to_csv.yml と同一）
       - name: Commit repo cache and outputs
@@ -190,7 +190,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          ID="${{ inputs.series_id }}"
+          ID="${{ env.SERIES_ID }}"
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
