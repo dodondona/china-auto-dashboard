@@ -4,237 +4,98 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>China Auto Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0;
-      background: #f8f9fb;
-      color: #222;
-    }
-    header {
-      background: #004aad;
-      color: #fff;
-      padding: 0.8em 1.2em;
-      text-align: center;
-      font-size: 1.2em;
-      font-weight: 600;
-    }
-    #tabs {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 6px;
-      padding: 0.6em;
-      background: #fff;
-      border-bottom: 1px solid #ddd;
-    }
-    .tab-btn {
-      padding: 6px 10px;
-      background: #e8eefc;
-      color: #004aad;
-      border-radius: 4px;
-      border: 1px solid #c2d3f0;
-      cursor: pointer;
-      font-size: 0.9em;
-    }
-    .tab-btn.active {
-      background: #004aad;
-      color: #fff;
-      font-weight: 700;
-    }
-    main {
-      padding: 1em;
-      overflow-x: auto;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      border-radius: 6px;
-      overflow: hidden;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    }
-    th, td {
-      padding: 8px 10px;
-      border-bottom: 1px solid #eee;
-      text-align: left;
-      white-space: nowrap;
-    }
-    th {
-      background: #f0f2f5;
-      font-weight: 600;
-    }
-    tr:hover {
-      background: #fafafa;
-    }
-    a.model-link {
-      color: #004aad;
-      text-decoration: none;
-      font-weight: 500;
-    }
-    a.model-link:hover {
-      text-decoration: underline;
-    }
-    .change-up { color: #00a000; font-weight: 700; }
-    .change-down { color: #d00000; font-weight: 700; }
-    .change-same { color: #888; }
-    .toast {
-      margin: 1em;
-      padding: 0.6em 1em;
-      border-radius: 5px;
-      display: inline-block;
-      font-size: 0.9em;
-    }
-    .good {
-      background: #e6f4ea;
-      color: #1e6823;
-      border: 1px solid #b8dfb9;
-    }
-    .err {
-      background: #fde4e4;
-      color: #a22;
-      border: 1px solid #f3b8b8;
-    }
-    @media (max-width: 768px) {
-      table { font-size: 14px; }
-      th, td { padding: 6px 8px; }
-      .tab-btn { font-size: 0.8em; padding: 5px 8px; }
-    }
+    body { background: #f5f6fa; font-family: "Noto Sans JP", sans-serif; }
+    header { background: #0052cc; color: white; padding: 10px 16px; font-size: 1.3rem; font-weight: bold; }
+    table { background: white; }
+    th { background: #f0f3f7; white-space: nowrap; }
+    .rank-up { color: red; font-weight: bold; }
+    .rank-down { color: blue; font-weight: bold; }
+    .maker-tab { margin: 4px; }
+    img.thumb { height: 40px; border-radius: 4px; }
   </style>
-  <!-- ✅ PapaParse（CSV解析用）を最初に読み込む（defer禁止） -->
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
-
 <body>
   <header>🚗 China Auto Dashboard</header>
-  <div id="ah-status" class="toast">Autohome データ読み込み中...</div>
-  <div id="tabs"></div>
 
-  <main>
-    <table id="ah-table">
-      <thead>
-        <tr>
-          <th>順位</th>
-          <th>変動</th>
-          <th>車名</th>
-          <th>メーカー</th>
-          <th>台数</th>
-          <th>価格</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td colspan="6">読み込み中...</td></tr>
-      </tbody>
-    </table>
-  </main>
+  <div class="container mt-3">
+    <div id="status" class="alert alert-info small">読み込み中...</div>
+    <div id="makerTabs" class="mb-3 text-center"></div>
+    <div class="table-responsive">
+      <table class="table table-striped table-hover align-middle" id="carTable">
+        <thead>
+          <tr>
+            <th>順位</th><th>変動</th><th>車名</th><th>メーカー</th><th>台数</th><th>価格</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script>
-  const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
-  let ALL = [];
+    const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
 
-  // ---- ユーティリティ ----
-  function normKey(k){ return (k||"").replace(/^\uFEFF/,"").trim().toLowerCase(); }
-  function pick(row, keys){
-    for(const k of keys){
-      const v = row[k] ?? row[normKey(k)];
-      if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
+    async function main() {
+      try {
+        const response = await fetch(CSV_PATH);
+        if (!response.ok) throw new Error("CSVファイルを取得できませんでした");
+        const csvText = await response.text();
+
+        const data = Papa.parse(csvText, { header: true }).data;
+        if (!data.length) throw new Error("CSVデータが空です");
+
+        document.getElementById("status").className = "alert alert-success";
+        document.getElementById("status").textContent = "Autohome CSV 読み込み成功 ✔";
+
+        renderTable(data);
+        renderMakerTabs(data);
+      } catch (err) {
+        document.getElementById("status").className = "alert alert-danger";
+        document.getElementById("status").textContent = "Autohome CSV 読み込み失敗 ❌ (" + err.message + ")";
+      }
     }
-    return "";
-  }
 
-  function rankDiff(now, last){
-    const rn = parseInt(now||"0",10), rl = parseInt(last||"0",10);
-    if(!rl) return {txt:"", cls:"change-same"};
-    const d = rl - rn;
-    if (d > 0) return {txt:"▲"+d, cls:"change-up"};
-    if (d < 0) return {txt:"▼"+(-d), cls:"change-down"};
-    return {txt:"–", cls:"change-same"};
-  }
+    function renderTable(data, maker = null) {
+      const tbody = document.querySelector("#carTable tbody");
+      tbody.innerHTML = "";
 
-  // ---- メーカータブ ----
-  function renderTabs(makers){
-    const tabs = document.getElementById("tabs");
-    tabs.innerHTML = "";
-    const mkBtn = (label, onClick, active=false)=>{
-      const b = document.createElement("button");
-      b.className = "tab-btn" + (active ? " active" : "");
-      b.textContent = label;
-      b.onclick = ()=>{
-        document.querySelectorAll(".tab-btn").forEach(x=>x.classList.remove("active"));
-        b.classList.add("active");
-        onClick();
-      };
-      tabs.appendChild(b);
-    };
-    mkBtn("全メーカー", ()=>renderTable(ALL), true);
-    makers.forEach(m => mkBtn(m, ()=>renderTable(ALL.filter(r => (pick(r,["manufacturer_ja","manufacturer"])===m)))));
-  }
+      data
+        .filter(row => !maker || row.manufacturer_ja === maker)
+        .forEach(row => {
+          const diff = parseInt(row.rank_diff || "0");
+          const diffText = diff > 0 ? `<span class='rank-up'>↑${diff}</span>` :
+                           diff < 0 ? `<span class='rank-down'>↓${Math.abs(diff)}</span>` : "–";
+          const html = `
+            <tr>
+              <td>${row.rank}</td>
+              <td>${diffText}</td>
+              <td><a href="${row.series_url}" target="_blank">${row.model_name}</a></td>
+              <td>${row.manufacturer_ja}</td>
+              <td>${row.sales}</td>
+              <td>${row.price}</td>
+            </tr>`;
+          tbody.insertAdjacentHTML("beforeend", html);
+        });
+    }
 
-  // ---- テーブル描画 ----
-  function renderTable(data){
-    const tbody = document.querySelector("#ah-table tbody");
-    tbody.innerHTML = "";
-    data.forEach(row=>{
-      const rank = pick(row, ["rank"]);
-      const last = pick(row, ["rank_last","last_rank","rank_prev"]);
-      const diff = rankDiff(rank, last);
-
-      const model = pick(row, ["model","series","車名"]);
-      const mfr   = pick(row, ["manufacturer_ja","manufacturer","brand","ブランド"]);
-      const sales = pick(row, ["sales","台数","sales_cnt"]);
-      const price = pick(row, ["price","価格"]);
-      const link  = pick(row, ["series_url","url","link"]);
-
-      const modelHtml = link
-        ? `<a href="${link}" class="model-link" target="_blank" rel="noopener">${model}</a>`
-        : model;
-
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${rank}</td>
-        <td class="${diff.cls}">${diff.txt}</td>
-        <td>${modelHtml}</td>
-        <td>${mfr}</td>
-        <td>${sales}</td>
-        <td>${price}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-  }
-
-  // ---- メイン処理 ----
-  async function main(){
-    const status = document.getElementById("ah-status");
-    try{
-      const res = await fetch(CSV_PATH, { cache: "no-store" });
-      if(!res.ok) throw new Error("HTTP "+res.status);
-      const text = await res.text();
-
-      const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
-      ALL = parsed.data.map(row=>{
-        const o={};
-        Object.keys(row).forEach(k=>{ o[normKey(k)] = row[k]; });
-        return o;
+    function renderMakerTabs(data) {
+      const makers = [...new Set(data.map(d => d.manufacturer_ja).filter(Boolean))];
+      const container = document.getElementById("makerTabs");
+      container.innerHTML = `<button class='btn btn-primary maker-tab' onclick='renderTable(window._data)'>全メーカー</button>`;
+      makers.forEach(m => {
+        const btn = document.createElement("button");
+        btn.textContent = m;
+        btn.className = "btn btn-outline-primary maker-tab";
+        btn.onclick = () => renderTable(window._data, m);
+        container.appendChild(btn);
       });
-
-      const makers = [...new Set(ALL.map(r => pick(r,["manufacturer_ja","manufacturer"])))]
-        .filter(Boolean)
-        .sort((a,b)=>a.localeCompare(b,'ja'));
-      renderTabs(makers);
-      renderTable(ALL);
-
-      status.className = "toast good";
-      status.textContent = "Autohome CSV 読み込み成功 ✔";
-    }catch(e){
-      console.error(e);
-      status.className = "toast err";
-      status.textContent = "Autohome CSV 読み込み失敗 ("+e.message+")";
-      document.querySelector("#ah-table tbody").innerHTML = `<tr><td colspan="6">データ取得エラー</td></tr>`;
+      window._data = data;
     }
-  }
 
-  // ---- 実行 ----
-  main();
+    main();
   </script>
 </body>
 </html>
