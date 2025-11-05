@@ -20,22 +20,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # public/ に output/ を取り込む（/output/... で参照できるよう public/output に配置）
-          mkdir -p public
+          mkdir -p public/output
           if [ -d "output" ]; then
-            mkdir -p public/output
             cp -r output/* public/output/ || true
           fi
 
-          # Cloudflare Pages のキャッシュを抑止（CSV/画像の取り違い防止）
-          mkdir -p public
-          : > public/_headers
-          echo "/output/*" >> public/_headers
+          echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
 
-          echo "== public tree =="
-          find public -maxdepth 3 -type f | sort || true
           echo "✅ Copied output → public/ and wrote _headers"
 
       - name: Publish to Cloudflare Pages
