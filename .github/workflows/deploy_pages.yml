@@ -10,7 +10,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,16 +19,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p public/output
+          # outputが存在すればpublic/outputにコピー
+          mkdir -p public
           if [ -d "output" ]; then
-            cp -r output/* public/output/ || true
+            cp -r output public/output
           fi
 
-          echo "/output/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers
+          # キャッシュ無効化ヘッダ
+          {
+            echo "/output/*"
+            echo "  Cache-Control: no-store, no-cache, must-revalidate"
+            echo "  Access-Control-Allow-Origin: *"
+          } > public/_headers
 
-          echo "✅ Copied output → public/ and wrote _headers"
+          echo "✅ Copied output → public/output/"
 
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
