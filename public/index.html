@@ -84,15 +84,21 @@
       document.querySelector("#carTable tbody").innerHTML = "";
     }
 
-    // ---- 画像タグ生成 ----
-    function imgTag(rankStr, model, fallbackUrl) {
-      const local = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
-      const f = fallbackUrl ? fallbackUrl : "";
+    // ---- 画像タグ生成（ここだけ修正）----
+    function imgTag(rankStr, model, imageUrl) {
+      let fullPath = "";
+      if (imageUrl && imageUrl.startsWith("/autohome_images/")) {
+        fullPath = "/output/pipeline/autohome-ranking-images" + imageUrl;
+      } else if (imageUrl) {
+        fullPath = imageUrl;
+      } else {
+        fullPath = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
+      }
       return `
         <img class="car-thumb"
-             src="${local}"
+             src="${fullPath}"
              alt="${model}"
-             onerror="if (this.dataset.tried!='1' && '${f}') { this.dataset.tried='1'; this.src='${f}'; } else { this.style.visibility='hidden'; }" />
+             onerror="this.style.visibility='hidden';" />
       `;
     }
 
@@ -113,15 +119,13 @@
         const units = r.units || "";
         const price = r.price || "";
         const link = r.link || "";
-        const imgPath = (r.image_url || "").startsWith("/")
-          ? r.image_url
-          : "/" + r.image_url;
+        const imageUrl = r.image_url || "";
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${curRank}</td>
           <td>${diffHtml}</td>
-          <td>${imgTag(rankStr, name, imgPath)}</td>
+          <td>${imgTag(rankStr, name, imageUrl)}</td>
           <td>${link ? `<a href="${link}" target="_blank" rel="noopener">${name}</a>` : name}</td>
           <td>${maker}</td>
           <td>${units}</td>
