@@ -18,11 +18,32 @@
       text-align: center;
       font-size: 1.2em;
       font-weight: 600;
-      letter-spacing: 0.03em;
+    }
+    #tabs {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      padding: 0.4em;
+      background: #fff;
+      border-bottom: 1px solid #ddd;
+    }
+    .tab-btn {
+      margin: 4px;
+      padding: 6px 10px;
+      background: #e8eefc;
+      color: #004aad;
+      border-radius: 4px;
+      border: 1px solid #c2d3f0;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    .tab-btn.active {
+      background: #004aad;
+      color: #fff;
+      font-weight: bold;
     }
     main {
       padding: 1em;
-      max-width: 100%;
       overflow-x: auto;
     }
     table {
@@ -77,13 +98,15 @@
     @media (max-width: 768px) {
       table { font-size: 14px; }
       th, td { padding: 6px 8px; }
+      .tab-btn { font-size: 0.8em; padding: 5px 8px; }
     }
   </style>
 </head>
 <body>
 
-  <header>China Auto Dashboard 🚗</header>
+  <header>🚗 China Auto Dashboard</header>
   <div id="ah-status" class="toast">Autohome データ読み込み中...</div>
+  <div id="tabs"></div>
 
   <main>
     <table id="ah-table">
@@ -104,11 +127,12 @@
   </main>
 
   <script>
-  (async()=>{
+  const csvPath = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
+  let allData = [];
+
+  async function fetchAndRender() {
     const status = document.getElementById('ah-status');
     const tbody  = document.querySelector("#ah-table tbody");
-    const csvPath = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
-
     try {
       const res = await fetch(csvPath, { cache: "no-store" });
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -116,41 +140,16 @@
 
       const lines = text.trim().split(/\r?\n/);
       const head  = lines.shift().split(",");
-      tbody.innerHTML = "";
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
+      allData = lines.map(line => {
         const cols = line.split(",");
-        const row  = {};
+        const row = {};
         head.forEach((h, i) => row[h.trim()] = cols[i]?.trim() ?? "");
+        return row;
+      });
 
-        const rankNow = parseInt(row.rank || "0");
-        const rankLast = parseInt(row.rank_last || "0");
-        let diffTxt = "";
-        let diffClass = "change-same";
-        if (rankLast > 0) {
-          const diff = rankLast - rankNow;
-          if (diff > 0) { diffTxt = `▲${diff}`; diffClass = "change-up"; }
-          else if (diff < 0) { diffTxt = `▼${-diff}`; diffClass = "change-down"; }
-          else diffTxt = "–";
-        }
-
-        const modelLink = row.series_url || row.url || "";
-        const modelName = modelLink
-          ? `<a href="${modelLink}" class="model-link" target="_blank" rel="noopener">${row.model}</a>`
-          : row.model || "";
-
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${row.rank || ""}</td>
-          <td class="${diffClass}">${diffTxt}</td>
-          <td>${modelName}</td>
-          <td>${row.manufacturer_ja || row.manufacturer || ""}</td>
-          <td>${row.sales || ""}</td>
-          <td>${row.price || ""}</td>
-        `;
-        tbody.appendChild(tr);
-      }
+      const makers = [...new Set(allData.map(r => r.manufacturer_ja || r.manufacturer))].sort();
+      renderTabs(makers);
+      renderTable(allData);
 
       status.className = "toast good";
       status.textContent = "Autohome CSV 読み込み成功 ✔";
@@ -160,7 +159,64 @@
       status.textContent = "Autohome CSV 読み込み失敗 (" + e.message + ")";
       tbody.innerHTML = `<tr><td colspan="6">データ取得エラー</td></tr>`;
     }
-  })();
+  }
+
+  function renderTabs(makers) {
+    const tabsDiv = document.getElementById('tabs');
+    tabsDiv.innerHTML = "";
+    const allBtn = document.createElement('button');
+    allBtn.textContent = "全メーカー";
+    allBtn.className = "tab-btn active";
+    allBtn.onclick = () => { setActive(allBtn); renderTable(allData); };
+    tabsDiv.appendChild(allBtn);
+
+    makers.forEach(m => {
+      const btn = document.createElement('button');
+      btn.textContent = m;
+      btn.className = "tab-btn";
+      btn.onclick = () => { setActive(btn); renderTable(allData.filter(r => (r.manufacturer_ja || r.manufacturer) === m)); };
+      tabsDiv.appendChild(btn);
+    });
+  }
+
+  function setActive(btn) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+
+  function renderTable(data) {
+    const tbody = document.querySelector("#ah-table tbody");
+    tbody.innerHTML = "";
+    data.forEach(row => {
+      const rankNow = parseInt(row.rank || "0");
+      const rankLast = parseInt(row.rank_last || "0");
+      let diffTxt = "";
+      let diffClass = "change-same";
+      if (rankLast > 0) {
+        const diff = rankLast - rankNow;
+        if (diff > 0) { diffTxt = `▲${diff}`; diffClass = "change-up"; }
+        else if (diff < 0) { diffTxt = `▼${-diff}`; diffClass = "change-down"; }
+        else diffTxt = "–";
+      }
+      const modelLink = row.series_url || "";
+      const modelName = modelLink
+        ? `<a href="${modelLink}" class="model-link" target="_blank" rel="noopener">${row.model}</a>`
+        : row.model || "";
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${row.rank || ""}</td>
+        <td class="${diffClass}">${diffTxt}</td>
+        <td>${modelName}</td>
+        <td>${row.manufacturer_ja || row.manufacturer || ""}</td>
+        <td>${row.sales || ""}</td>
+        <td>${row.price || ""}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  fetchAndRender();
   </script>
 
 </body>
