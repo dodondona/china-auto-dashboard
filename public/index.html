@@ -1,28 +1,28 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>China Auto Dashboard</title>
-  <link rel="icon" href="https://img.icons8.com/emoji/48/automobile.png" />
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="icon" href="https://img.icons8.com/emoji/48/automobile.png">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <style>
-    body { background: #f8f9fa; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    header { background: #0d6efd; color: white; padding: 12px; text-align: center; font-weight: bold; font-size: 1.3rem; }
-    table { font-size: 14px; background: white; }
-    th { background: #f1f3f5; white-space: nowrap; }
-    td { vertical-align: middle; }
-    img.thumb { width: 80px; border-radius: 6px; }
+    body { background-color: #f8f9fa; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif; }
+    header { background: #0d6efd; color: white; padding: 12px; text-align: center; font-size: 1.3rem; font-weight: bold; }
+    th { background-color: #f1f3f5; }
     .rank-up { color: #dc3545; font-weight: bold; }
     .rank-down { color: #0d6efd; font-weight: bold; }
+    .maker-tab { margin: 3px; }
+    img.car-thumb { width: 80px; border-radius: 6px; }
   </style>
 </head>
 <body>
   <header>🚗 China Auto Dashboard</header>
 
   <div class="container mt-3">
-    <div id="status" class="alert alert-info py-2">CSV 読み込み中...</div>
+    <div id="status" class="alert alert-info py-2">Autohome CSV 読み込み中...</div>
+    <div id="makerTabs" class="mb-3 text-center"></div>
 
     <div class="table-responsive">
       <table class="table table-striped table-hover align-middle" id="carTable">
@@ -31,7 +31,7 @@
             <th>順位</th>
             <th>変動</th>
             <th>画像</th>
-            <th>車種名</th>
+            <th>車名</th>
             <th>メーカー</th>
             <th>台数</th>
             <th>価格</th>
@@ -43,65 +43,75 @@
   </div>
 
   <script>
-    const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
-    const IMAGE_BASE = "china-auto-dashboard/output/pipeline/autohome-ranking-images/autohome_images/";
+    const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
+    const IMG_BASE = "output/pipeline/autohome-ranking-images/autohome_images/";
+    let allData = [];
 
     Papa.parse(CSV_PATH, {
       download: true,
       header: true,
-      complete: function (results) {
-        const data = results.data.filter(r => r.rank);
-        if (!data.length) {
-          document.getElementById("status").className = "alert alert-warning py-2";
-          document.getElementById("status").innerText = "CSVが空、または解析できませんでした。";
-          return;
-        }
-
+      complete: function(results) {
+        allData = results.data.filter(r => r.rank);
         document.getElementById("status").className = "alert alert-success py-2";
         document.getElementById("status").innerText = "Autohome CSV 読み込み成功 ✔";
-
-        renderTable(data);
+        renderMakerTabs();
+        renderTable();
       },
-      error: function (err) {
+      error: function(err) {
         document.getElementById("status").className = "alert alert-danger py-2";
-        document.getElementById("status").innerText = "CSV 読み込みエラー: " + err.message;
-      },
+        document.getElementById("status").innerText = "CSV読み込みエラー: " + err.message;
+      }
     });
 
-    function renderTable(data) {
+    function renderMakerTabs() {
+      const makers = [...new Set(allData.map(r => r.manufacturer_ja || r.manufacturer))].filter(Boolean);
+      const div = document.getElementById("makerTabs");
+      div.innerHTML = "";
+      const allBtn = document.createElement("button");
+      allBtn.className = "btn btn-primary btn-sm maker-tab";
+      allBtn.innerText = "全メーカー";
+      allBtn.onclick = () => renderTable();
+      div.appendChild(allBtn);
+      makers.forEach(m => {
+        const btn = document.createElement("button");
+        btn.className = "btn btn-outline-primary btn-sm maker-tab";
+        btn.innerText = m;
+        btn.onclick = () => renderTable(m);
+        div.appendChild(btn);
+      });
+    }
+
+    function sanitizeFileName(str) {
+      return str.replace(/[\\/:*?"<>| ]/g, "_");
+    }
+
+    function renderTable(filterMaker = null) {
       const tbody = document.querySelector("#carTable tbody");
       tbody.innerHTML = "";
+      const filtered = filterMaker
+        ? allData.filter(r => (r.manufacturer_ja || r.manufacturer) === filterMaker)
+        : allData;
 
-      data.forEach((r) => {
-        const rank = r.rank;
+      filtered.forEach(r => {
+        const rank = r.rank.padStart(3, "0");
         const last = r.rank_last;
         const diff = last && !isNaN(last) ? last - rank : 0;
-        const diffTxt =
-          diff > 0
-            ? `<span class='rank-up'>▲${diff}</span>`
-            : diff < 0
-            ? `<span class='rank-down'>▼${-diff}</span>`
-            : "–";
+        const diffTxt = diff > 0 ? `<span class='rank-up'>▲${diff}</span>`
+                        : diff < 0 ? `<span class='rank-down'>▼${-diff}</span>` : "–";
 
-        const imageName = r.image_url?.replace(/^\/?autohome_images\//, "") || "";
-        const imagePath = IMAGE_BASE + imageName;
-
-        const img = imageName ? `<img src="${imagePath}" class="thumb">` : "";
-        const link = r.link || "#";
-
-        const modelHtml = `<a href="${link}" target="_blank">${r.global_name || ""}</a>`;
-        const makerHtml = `<a href="${link}" target="_blank">${r.manufacturer_ja || ""}</a>`;
-        const unitsHtml = `<a href="${link}" target="_blank">${r.units || "-"}</a>`;
+        const localImgPath = `${IMG_BASE}${rank}_${sanitizeFileName(r.model)}.png`;
+        const img = `<img src="${localImgPath}" class="car-thumb" alt="${r.model}">`;
+        const link = r.series_url ? `<a href="${r.series_url}" target="_blank">${r.model}</a>` : r.model;
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${rank}</td>
+          <td>${r.rank}</td>
           <td>${diffTxt}</td>
           <td>${img}</td>
-          <td>${modelHtml}</td>
-          <td>${makerHtml}</td>
-          <td>${unitsHtml}</td>
-          <td>${r.price || ""}</td>
+          <td>${link}</td>
+          <td>${r.manufacturer_ja || r.manufacturer}</td>
+          <td>${r.sales}</td>
+          <td>${r.price}</td>
         `;
         tbody.appendChild(tr);
       });
