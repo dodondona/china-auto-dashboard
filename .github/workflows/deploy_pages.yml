@@ -15,12 +15,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ここで public に成果物をコピー
+      # Cloudflare に出す静的ディレクトリを用意
       - name: Prepare public directory
         run: |
+          set -euo pipefail
           mkdir -p public
-          cp -r output public/  # ← フォルダ構造を保持したままコピー
-          echo "✅ Copied output → public/"
+          # output/ を public/output/ として丸ごと取り込む
+          if [ -d "output" ]; then
+            mkdir -p public/output
+            cp -r output/* public/output/ || true
+          fi
+
+          # キャッシュ無効化ヘッダ（CSV/画像が古く見える事故を防ぐ）
+          mkdir -p public
+          cat > public/_headers << 'EOF'
+/output/*
+  Cache-Control: no-store, no-cache, must-revalidate
+  Access-Control-Allow-Origin: *
+EOF
+
+          echo "== public tree =="
+          find public -maxdepth 3 -type f | sort || true
+          echo "✅ Copied output → public/ and wrote _headers"
 
       # Cloudflare Pages にデプロイ
       - name: Publish to Cloudflare Pages
