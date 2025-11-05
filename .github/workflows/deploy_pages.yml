@@ -12,17 +12,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout private repo
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
+      # ここで public に成果物をコピー
       - name: Prepare public directory
         run: |
-          mkdir -p public/api
-          cp -r output/autohome/*.csv public/ || true
-          cp -r output/koubei_summary/**/*.json public/api/ || true
+          mkdir -p public
+          cp -r output public/  # ← フォルダ構造を保持したままコピー
+          echo "✅ Copied output → public/"
 
+      # Cloudflare Pages にデプロイ
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
