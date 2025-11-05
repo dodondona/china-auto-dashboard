@@ -1,8 +1,6 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  push:
-    branches: [main]
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -19,20 +17,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          # outputが存在すればpublic/outputにコピー
-          mkdir -p public
+          mkdir -p public/output
           if [ -d "output" ]; then
-            cp -r output public/output
+            echo "✅ output directory found, copying to public/output..."
+            cp -r output/* public/output/
+          else
+            echo "⚠️ output directory NOT found!"
+            ls -R
           fi
 
-          # キャッシュ無効化ヘッダ
+          # 確認用ツリー出力
+          echo "==== public directory tree ===="
+          find public -type f | sort
+
+          # Cache制御ヘッダ
           {
             echo "/output/*"
             echo "  Cache-Control: no-store, no-cache, must-revalidate"
             echo "  Access-Control-Allow-Origin: *"
           } > public/_headers
-
-          echo "✅ Copied output → public/output/"
 
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
