@@ -13,10 +13,7 @@
     th { background-color: #f1f3f5; }
     .rank-up { color: #dc3545; font-weight: bold; }
     .rank-down { color: #0d6efd; font-weight: bold; }
-    .maker-tab { margin: 3px; }
     img.car-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 6px; background:#eee; }
-    .badge-ok { background:#d1e7dd; color:#0f5132; }
-    .badge-ng { background:#f8d7da; color:#842029; }
   </style>
 </head>
 <body>
@@ -24,7 +21,6 @@
 
   <div class="container mt-3">
     <div id="status" class="alert alert-info py-2">Autohome CSV 読み込み中...</div>
-    <div id="makerTabs" class="mb-3 text-center"></div>
 
     <div class="table-responsive">
       <table class="table table-striped table-hover align-middle" id="carTable">
@@ -45,12 +41,10 @@
   </div>
 
   <script>
-    // Cloudflare Pages では / がサイトルートなので、相対でOK
-    const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
-    const IMG_BASE = "output/pipeline/autohome-ranking-images/autohome_images/";
-    let allData = [];
+    // ✅ Cloudflare Pages 用のルート基準パス
+    const CSV_PATH = "/output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
+    const IMG_BASE = "/output/pipeline/autohome-ranking-images/autohome_images/";
 
-    // ユーティリティ
     const z = (n) => String(n ?? "").padStart(3, "0");
     const toNum = (x) => {
       const n = Number(x);
@@ -58,24 +52,20 @@
     };
     const sanitize = (s) => String(s ?? "").replace(/[\\/:*?"<>| ]/g, "_");
 
-    // CSV を読む
     Papa.parse(CSV_PATH, {
       download: true,
       header: true,
       skipEmptyLines: true,
       complete: (res) => {
-        // HTMLが返ってきてしまった場合、ヘッダに rank が無い → 早期警告
         const hasRank = res.meta.fields && res.meta.fields.includes("rank");
         if (!hasRank) {
           fail("CSV 読み込み失敗（rank 列が見つかりません）: Cloudflare 側に CSV が未デプロイ、またはキャッシュ問題の可能性があります。");
           return;
         }
 
-        allData = (res.data || []).filter(r => r && r.rank != null && r.rank !== "");
-        ok(`Autohome CSV 読み込み成功 ✔  (${allData.length} 件)`);
-
-        renderMakerTabs();
-        renderTable();
+        const data = (res.data || []).filter(r => r && r.rank);
+        ok(`Autohome CSV 読み込み成功 ✔ (${data.length} 件)`);
+        renderTable(data);
       },
       error: (err) => fail("CSV 読み込みエラー: " + err.message)
     });
@@ -89,33 +79,11 @@
       const s = document.getElementById("status");
       s.className = "alert alert-danger py-2";
       s.textContent = msg;
-      // エラーでもテーブルの枠は残す
       document.querySelector("#carTable tbody").innerHTML = "";
     }
 
-    function renderMakerTabs() {
-      const makers = [...new Set(allData.map(r => r.manufacturer_ja || r.manufacturer))].filter(Boolean).sort();
-      const div = document.getElementById("makerTabs");
-      div.innerHTML = "";
-      const allBtn = document.createElement("button");
-      allBtn.className = "btn btn-primary btn-sm maker-tab";
-      allBtn.textContent = "全メーカー";
-      allBtn.onclick = () => renderTable();
-      div.appendChild(allBtn);
-
-      makers.forEach(m => {
-        const btn = document.createElement("button");
-        btn.className = "btn btn-outline-primary btn-sm maker-tab";
-        btn.textContent = m;
-        btn.onclick = () => renderTable(m);
-        div.appendChild(btn);
-      });
-    }
-
     function imgTag(rankStr, model, fallbackUrl) {
-      const local = `${IMG_BASE}${rankStr}_${sanitize(model)}.png`;
-      // 404時は CSV の image_url (あれば) をフォールバック
-      // onerror= で src を差し替え、二度目も失敗したら透明に
+      const local = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
       const f = fallbackUrl ? fallbackUrl : "";
       return `
         <img class="car-thumb"
@@ -125,40 +93,15 @@
       `;
     }
 
-    function renderTable(filterMaker = null) {
+    function renderTable(data) {
       const tbody = document.querySelector("#carTable tbody");
       tbody.innerHTML = "";
 
-      const rows = filterMaker
-        ? allData.filter(r => (r.manufacturer_ja || r.manufacturer) === filterMaker)
-        : allData;
-
-      rows.forEach(r => {
+      data.forEach(r => {
         const curRank = toNum(r.rank);
         const lastRank = toNum(r.rank_last);
         const diff = Number.isFinite(lastRank) && Number.isFinite(curRank) ? (lastRank - curRank) : 0;
         const diffHtml = diff > 0 ? `<span class="rank-up">▲${diff}</span>`
                         : diff < 0 ? `<span class="rank-down">▼${-diff}</span>` : "–";
 
-        const rankStr = z(curRank);
-        const linkHtml = r.series_url ? `<a href="${r.series_url}" target="_blank" rel="noopener">${r.model}</a>` : (r.model || "");
-        const maker = r.manufacturer_ja || r.manufacturer || "";
-        const sales = r.sales ?? ""; // CSVにより "sales" or "台数" など命名差がある場合はここを合わせる
-        const price = r.price ?? "";
-
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${curRank}</td>
-          <td>${diffHtml}</td>
-          <td>${imgTag(rankStr, r.model, r.image_url || "")}</td>
-          <td>${linkHtml}</td>
-          <td>${maker}</td>
-          <td>${sales}</td>
-          <td>${price}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-  </script>
-</body>
-</html>
+        const rankSt
