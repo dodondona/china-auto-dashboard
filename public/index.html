@@ -1,108 +1,42 @@
-<!doctype html>
-<html lang="ja">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>中国自動車ダッシュボード</title>
-<style>
-body{font-family:-apple-system,Segoe UI,Roboto,"Hiragino Sans","Noto Sans JP",sans-serif;margin:0;padding:20px;background:#fafafa;color:#111}
-.container{max-width:1100px;margin:0 auto}
-.tabs{display:flex;gap:10px;margin:16px 0}
-.tab{padding:6px 12px;border:1px solid #ddd;border-radius:999px;background:#fff;cursor:pointer}
-.tab.active{background:#e8f1ff;border-color:#98c3ff}
-.table-wrap{overflow-x:auto;border:1px solid #eee;border-radius:12px;background:#fff;margin-top:12px}
-table{width:100%;border-collapse:collapse;min-width:640px}
-th,td{padding:8px 12px;border-bottom:1px solid #eee;text-align:left}
-th{background:#f7f7f7}
-.toast{margin:10px 0;padding:10px;border-radius:8px;border:1px solid #ffd39b;background:#fff7e6}
-.toast.good{background:#f1fff3;border-color:#b7e4c7}
-.toast.err{background:#fff2f2;border-color:#ffb3b3}
-</style>
-
-<div class="container">
-  <h1>中国自動車ダッシュボード <span class="badge">Workers版</span></h1>
-
-  <div class="tabs">
-    <div class="tab active" data-tab="autohome">Autohome系 TOP20</div>
-    <div class="tab" data-tab="financials">各社 決算一覧</div>
-  </div>
-
-  <!-- Autohome -->
-  <div id="autohome" class="section">
-    <div id="ah-status" class="toast">Autohome 読み込み中…</div>
-    <div class="table-wrap">
-      <table id="ah-table">
-        <thead><tr><th>順位</th><th>モデル</th><th>ブランド</th><th>販売台数</th><th>月</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Financials -->
-  <div id="financials" class="section" style="display:none">
-    <div id="fin-status" class="toast">決算 読み込み中…</div>
-    <div class="table-wrap">
-      <table id="fin-table">
-        <thead><tr>
-          <th>メーカー</th><th>期</th><th>売上高</th><th>純利益</th>
-          <th>販売計</th><th>中国</th><th>海外</th><th>出典</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
 <script>
-const BASE="https://chinaautodata.kirioka1013.workers.dev";
-
-// タブ切替
-document.querySelectorAll(".tab").forEach(tab=>{
-  tab.onclick=()=>{
-    document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
-    tab.classList.add("active");
-    document.getElementById("autohome").style.display=(tab.dataset.tab==="autohome"?"block":"none");
-    document.getElementById("financials").style.display=(tab.dataset.tab==="financials"?"block":"none");
-  };
-});
-
-// Autohome
+// Autohome CSV 表示（フォルダ構造そのまま）
 (async()=>{
-  const status=document.getElementById('ah-status');
-  try{
-    const r=await fetch(BASE+"/autohome.json",{cache:"no-store"});
-    if(!r.ok)throw new Error("HTTP "+r.status);
-    const j=await r.json();
-    const tbody=document.querySelector("#ah-table tbody");tbody.innerHTML="";
-    (j.items||[]).forEach(row=>{
-      const tr=document.createElement("tr");
-      tr.innerHTML=`<td>${row.rank}</td><td>${row.model}</td><td>${row.brand}</td><td>${Number(row.sales).toLocaleString()}台</td><td>${j.month}</td>`;
-      tbody.appendChild(tr);
-    });
-    status.className="toast good";status.textContent="Autohome: 取得成功";
-  }catch(e){
-    status.className="toast err";status.textContent="Autohome: 取得失敗";
-  }
-})();
+  const status = document.getElementById('ah-status');
+  try {
+    const r = await fetch(
+      "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv",
+      { cache: "no-store" }
+    );
+    if (!r.ok) throw new Error("HTTP " + r.status);
 
-// Financials
-(async()=>{
-  const status=document.getElementById("fin-status");
-  try{
-    const r=await fetch(BASE+"/financials.csv");if(!r.ok)throw new Error("HTTP "+r.status);
-    const txt=await r.text();const lines=txt.split(/\r?\n/);const head=lines.shift().split(",");
-    const tbody=document.querySelector("#fin-table tbody");tbody.innerHTML="";
-    lines.forEach(line=>{
-      if(!line.trim())return;const cols=line.split(",");const row={};head.forEach((h,i)=>row[h]=cols[i]);
-      const tr=document.createElement("tr");
-      tr.innerHTML=`<td>${row.maker}</td><td>${row.period}</td><td>${row.revenue_cny_b}</td><td>${row.net_profit_cny_b}</td>
-        <td>${Number(row.units_total).toLocaleString()}</td><td>${Number(row.units_cn).toLocaleString()}</td><td>${Number(row.units_overseas).toLocaleString()}</td>
-        <td><a href="${row.source_url}" target="_blank">IR</a></td>`;
+    const text = await r.text();
+    const lines = text.trim().split(/\r?\n/);
+    const head = lines.shift().split(",");
+    const tbody = document.querySelector("#ah-table tbody");
+    tbody.innerHTML = "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const cols = line.split(",");
+      const row = {};
+      head.forEach((h, i) => (row[h] = cols[i]));
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${row.rank || ""}</td>
+        <td>${row.model || ""}</td>
+        <td>${row.manufacturer_ja || row.manufacturer || ""}</td>
+        <td>${row.price || ""}</td>
+        <td>${row.date || ""}</td>
+      `;
       tbody.appendChild(tr);
-    });
-    status.className="toast good";status.textContent="決算CSV: 取得成功";
-  }catch(e){
-    status.className="toast err";status.textContent="決算CSV: 取得失敗";
+    }
+
+    status.className = "toast good";
+    status.textContent = "Autohome CSV 読み込み成功";
+  } catch (e) {
+    status.className = "toast err";
+    status.textContent = "Autohome CSV 読み込み失敗 (" + e.message + ")";
   }
 })();
 </script>
-</html>
