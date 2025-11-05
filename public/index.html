@@ -5,105 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>China Auto Dashboard</title>
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0;
-      background: #f8f9fb;
-      color: #222;
-    }
-    header {
-      background: #004aad;
-      color: #fff;
-      padding: 0.8em 1.2em;
-      text-align: center;
-      font-size: 1.2em;
-      font-weight: 600;
-    }
-    #tabs {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      padding: 0.4em;
-      background: #fff;
-      border-bottom: 1px solid #ddd;
-    }
-    .tab-btn {
-      margin: 4px;
-      padding: 6px 10px;
-      background: #e8eefc;
-      color: #004aad;
-      border-radius: 4px;
-      border: 1px solid #c2d3f0;
-      cursor: pointer;
-      font-size: 0.9em;
-    }
-    .tab-btn.active {
-      background: #004aad;
-      color: #fff;
-      font-weight: bold;
-    }
-    main {
-      padding: 1em;
-      overflow-x: auto;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background: #fff;
-      border-radius: 6px;
-      overflow: hidden;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    }
-    th, td {
-      padding: 8px 10px;
-      border-bottom: 1px solid #eee;
-      text-align: left;
-      white-space: nowrap;
-    }
-    th {
-      background: #f0f2f5;
-      font-weight: 600;
-    }
-    tr:hover {
-      background: #fafafa;
-    }
-    a.model-link {
-      color: #004aad;
-      text-decoration: none;
-      font-weight: 500;
-    }
-    a.model-link:hover {
-      text-decoration: underline;
-    }
-    .change-up { color: #00a000; font-weight: bold; }
-    .change-down { color: #d00000; font-weight: bold; }
-    .change-same { color: #888; }
-    .toast {
-      margin: 1em;
-      padding: 0.6em 1em;
-      border-radius: 5px;
-      display: inline-block;
-      font-size: 0.9em;
-    }
-    .toast.good {
-      background: #e6f4ea;
-      color: #1e6823;
-      border: 1px solid #b8dfb9;
-    }
-    .toast.err {
-      background: #fde4e4;
-      color: #a22;
-      border: 1px solid #f3b8b8;
-    }
-    @media (max-width: 768px) {
-      table { font-size: 14px; }
-      th, td { padding: 6px 8px; }
-      .tab-btn { font-size: 0.8em; padding: 5px 8px; }
-    }
+    body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin:0; background:#f8f9fb; color:#222; }
+    header { background:#004aad; color:#fff; padding:.8em 1.2em; text-align:center; font-size:1.2em; font-weight:600; }
+    #tabs { display:flex; flex-wrap:wrap; justify-content:center; gap:6px; padding:.6em; background:#fff; border-bottom:1px solid #ddd; }
+    .tab-btn { padding:6px 10px; background:#e8eefc; color:#004aad; border-radius:4px; border:1px solid #c2d3f0; cursor:pointer; font-size:.9em; }
+    .tab-btn.active { background:#004aad; color:#fff; font-weight:700; }
+    main { padding:1em; overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+    th,td { padding:8px 10px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }
+    th { background:#f0f2f5; font-weight:600; }
+    tr:hover { background:#fafafa; }
+    a.model-link { color:#004aad; text-decoration:none; font-weight:500; }
+    a.model-link:hover { text-decoration:underline; }
+    .change-up { color:#00a000; font-weight:700; }
+    .change-down { color:#d00000; font-weight:700; }
+    .change-same { color:#888; }
+    .toast { margin:1em; padding:.6em 1em; border-radius:5px; display:inline-block; font-size:.9em; }
+    .good { background:#e6f4ea; color:#1e6823; border:1px solid #b8dfb9; }
+    .err { background:#fde4e4; color:#a22; border:1px solid #f3b8b8; }
+    @media (max-width:768px){ table{font-size:14px} th,td{padding:6px 8px} .tab-btn{font-size:.8em;padding:5px 8px}}
   </style>
+  <!-- PapaParse（正しいCSVパース用） -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" defer></script>
 </head>
 <body>
-
   <header>🚗 China Auto Dashboard</header>
   <div id="ah-status" class="toast">Autohome データ読み込み中...</div>
   <div id="tabs"></div>
@@ -127,97 +52,105 @@
   </main>
 
   <script>
-  const csvPath = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
-  let allData = [];
+  // 公開されたCSVへの相対パス（構造は維持）
+  const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
+  let ALL = [];
 
-  async function fetchAndRender() {
-    const status = document.getElementById('ah-status');
-    const tbody  = document.querySelector("#ah-table tbody");
-    try {
-      const res = await fetch(csvPath, { cache: "no-store" });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const text = await res.text();
-
-      const lines = text.trim().split(/\r?\n/);
-      const head  = lines.shift().split(",");
-      allData = lines.map(line => {
-        const cols = line.split(",");
-        const row = {};
-        head.forEach((h, i) => row[h.trim()] = cols[i]?.trim() ?? "");
-        return row;
-      });
-
-      const makers = [...new Set(allData.map(r => r.manufacturer_ja || r.manufacturer))].sort();
-      renderTabs(makers);
-      renderTable(allData);
-
-      status.className = "toast good";
-      status.textContent = "Autohome CSV 読み込み成功 ✔";
-    } catch (e) {
-      console.error(e);
-      status.className = "toast err";
-      status.textContent = "Autohome CSV 読み込み失敗 (" + e.message + ")";
-      tbody.innerHTML = `<tr><td colspan="6">データ取得エラー</td></tr>`;
+  // 列名ゆらぎ吸収（BOMや表記違いを吸収）
+  function normKey(k){ return (k||"").replace(/^\uFEFF/,"").trim().toLowerCase(); }
+  function pick(row, keys){
+    for(const k of keys){
+      const v = row[k] ?? row[normKey(k)];
+      if (v !== undefined && v !== null && String(v).trim() !== "") return String(v).trim();
     }
+    return "";
   }
 
-  function renderTabs(makers) {
-    const tabsDiv = document.getElementById('tabs');
-    tabsDiv.innerHTML = "";
-    const allBtn = document.createElement('button');
-    allBtn.textContent = "全メーカー";
-    allBtn.className = "tab-btn active";
-    allBtn.onclick = () => { setActive(allBtn); renderTable(allData); };
-    tabsDiv.appendChild(allBtn);
-
-    makers.forEach(m => {
-      const btn = document.createElement('button');
-      btn.textContent = m;
-      btn.className = "tab-btn";
-      btn.onclick = () => { setActive(btn); renderTable(allData.filter(r => (r.manufacturer_ja || r.manufacturer) === m)); };
-      tabsDiv.appendChild(btn);
-    });
+  function rankDiff(now, last){
+    const rn = parseInt(now||"0",10), rl = parseInt(last||"0",10);
+    if(!rl) return {txt:"", cls:"change-same"};
+    const d = rl - rn;
+    if (d > 0) return {txt:"▲"+d, cls:"change-up"};
+    if (d < 0) return {txt:"▼"+(-d), cls:"change-down"};
+    return {txt:"–", cls:"change-same"};
   }
 
-  function setActive(btn) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
+  function renderTabs(makers){
+    const tabs = document.getElementById("tabs");
+    tabs.innerHTML = "";
+    const mkBtn = (label, onClick, active=false)=>{
+      const b = document.createElement("button");
+      b.className = "tab-btn" + (active ? " active" : "");
+      b.textContent = label;
+      b.onclick = ()=>{ document.querySelectorAll(".tab-btn").forEach(x=>x.classList.remove("active")); b.classList.add("active"); onClick();};
+      tabs.appendChild(b);
+    };
+    mkBtn("全メーカー", ()=>renderTable(ALL), true);
+    makers.forEach(m => mkBtn(m, ()=>renderTable(ALL.filter(r => (pick(r,["manufacturer_ja","manufacturer"])===m)))));
   }
 
-  function renderTable(data) {
+  function renderTable(data){
     const tbody = document.querySelector("#ah-table tbody");
     tbody.innerHTML = "";
-    data.forEach(row => {
-      const rankNow = parseInt(row.rank || "0");
-      const rankLast = parseInt(row.rank_last || "0");
-      let diffTxt = "";
-      let diffClass = "change-same";
-      if (rankLast > 0) {
-        const diff = rankLast - rankNow;
-        if (diff > 0) { diffTxt = `▲${diff}`; diffClass = "change-up"; }
-        else if (diff < 0) { diffTxt = `▼${-diff}`; diffClass = "change-down"; }
-        else diffTxt = "–";
-      }
-      const modelLink = row.series_url || "";
-      const modelName = modelLink
-        ? `<a href="${modelLink}" class="model-link" target="_blank" rel="noopener">${row.model}</a>`
-        : row.model || "";
+    data.forEach(row=>{
+      const rank = pick(row, ["rank"]);
+      const last = pick(row, ["rank_last","last_rank","rank_prev"]);
+      const diff = rankDiff(rank, last);
+
+      const model = pick(row, ["model","series","車名"]);
+      const mfr   = pick(row, ["manufacturer_ja","manufacturer","brand","ブランド"]);
+      const sales = pick(row, ["sales","台数","sales_cnt"]);
+      const price = pick(row, ["price","価格"]);
+      const link  = pick(row, ["series_url","url","link"]);
+
+      const modelHtml = link ? `<a href="${link}" class="model-link" target="_blank" rel="noopener">${model}</a>` : model;
 
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${row.rank || ""}</td>
-        <td class="${diffClass}">${diffTxt}</td>
-        <td>${modelName}</td>
-        <td>${row.manufacturer_ja || row.manufacturer || ""}</td>
-        <td>${row.sales || ""}</td>
-        <td>${row.price || ""}</td>
+        <td>${rank}</td>
+        <td class="${diff.cls}">${diff.txt}</td>
+        <td>${modelHtml}</td>
+        <td>${mfr}</td>
+        <td>${sales}</td>
+        <td>${price}</td>
       `;
       tbody.appendChild(tr);
     });
   }
 
-  fetchAndRender();
-  </script>
+  async function main(){
+    const status = document.getElementById("ah-status");
+    try{
+      const res = await fetch(CSV_PATH, { cache: "no-store" });
+      if(!res.ok) throw new Error("HTTP "+res.status);
+      const text = await res.text();
 
+      const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
+      // キーを正規化したオブジェクトに変換（BOM/大文字小文字差異を吸収）
+      ALL = parsed.data.map(row=>{
+        const o={};
+        Object.keys(row).forEach(k=>{ o[normKey(k)] = row[k]; });
+        return o;
+      });
+
+      // メーカー一覧を作成
+      const makers = [...new Set(ALL.map(r => pick(r,["manufacturer_ja","manufacturer"]))).values()]
+        .filter(Boolean).sort((a,b)=>a.localeCompare(b,'ja'));
+      renderTabs(makers);
+      renderTable(ALL);
+
+      status.className = "toast good";
+      status.textContent = "Autohome CSV 読み込み成功 ✔";
+    }catch(e){
+      console.error(e);
+      status.className = "toast err";
+      status.textContent = "Autohome CSV 読み込み失敗 ("+e.message+")";
+      document.querySelector("#ah-table tbody").innerHTML = `<tr><td colspan="6">データ取得エラー</td></tr>`;
+    }
+  }
+
+  // PapaParseロード後に実行
+  if (window.Papa) main(); else window.addEventListener("load", main);
+  </script>
 </body>
 </html>
