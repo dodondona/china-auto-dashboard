@@ -15,30 +15,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cloudflare に出す静的ディレクトリを用意
       - name: Prepare public directory
+        shell: bash
         run: |
           set -euo pipefail
+
+          # public/ に output/ を取り込む（/output/... で参照できるよう public/output に配置）
           mkdir -p public
-          # output/ を public/output/ として丸ごと取り込む
           if [ -d "output" ]; then
             mkdir -p public/output
             cp -r output/* public/output/ || true
           fi
 
-          # キャッシュ無効化ヘッダ（CSV/画像が古く見える事故を防ぐ）
+          # Cloudflare Pages のキャッシュを抑止（CSV/画像の取り違い防止）
           mkdir -p public
-          cat > public/_headers << 'EOF'
-/output/*
-  Cache-Control: no-store, no-cache, must-revalidate
-  Access-Control-Allow-Origin: *
-EOF
+          : > public/_headers
+          echo "/output/*" >> public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers
 
           echo "== public tree =="
           find public -maxdepth 3 -type f | sort || true
           echo "✅ Copied output → public/ and wrote _headers"
 
-      # Cloudflare Pages にデプロイ
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
