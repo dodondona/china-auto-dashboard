@@ -1,6 +1,7 @@
 name: Deploy to Cloudflare Pages
 
 on:
+  workflow_dispatch:    # ← ✅ 手動実行できるように追加
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -8,6 +9,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,20 +24,23 @@ jobs:
             echo "✅ output directory found, copying to public/output..."
             cp -r output/* public/output/
           else
-            echo "⚠️ output directory NOT found!"
+            echo "⚠️ output directory NOT found! 現在の作業ディレクトリ:"
+            pwd
             ls -R
           fi
 
-          # 確認用ツリー出力
+          # 出力構造を確認（これがデプロイ対象になります）
           echo "==== public directory tree ===="
-          find public -type f | sort
+          find public -type f | sort || true
 
-          # Cache制御ヘッダ
+          # キャッシュ無効化ヘッダを追加
           {
             echo "/output/*"
             echo "  Cache-Control: no-store, no-cache, must-revalidate"
             echo "  Access-Control-Allow-Origin: *"
           } > public/_headers
+
+          echo "✅ public/_headers を作成しました"
 
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
