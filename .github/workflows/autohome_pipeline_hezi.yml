@@ -2,8 +2,9 @@ name: autohome_pipeline_hezi
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "25 1 * * *"
+  workflow_run:
+    workflows: ["autohome_pipeline"]
+    types: [completed]
 
 permissions:
   contents: write
