@@ -14,6 +14,7 @@
     .rank-up { color: #dc3545; font-weight: bold; }
     .rank-down { color: #0d6efd; font-weight: bold; }
     img.car-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 6px; background:#eee; }
+    .price-jpy { font-size: 0.85rem; color: #6c757d; }
   </style>
 </head>
 <body>
@@ -41,11 +42,23 @@
   </div>
 
   <script>
-    // ✅ Cloudflare Pages 用の絶対パス
     const CSV_PATH = "/output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
     const IMG_BASE = "/output/pipeline/autohome-ranking-images/autohome_images/";
+    let cnyToJpy = 20; // fallback
 
-    // ---- Utility ----
+    // 💱 最新レートをAPIで取得（ExchangeRate.host 無料API）
+    async function fetchRate() {
+      try {
+        const res = await fetch("https://api.exchangerate.host/latest?base=CNY&symbols=JPY");
+        const data = await res.json();
+        if (data?.rates?.JPY) cnyToJpy = data.rates.JPY;
+        console.log("為替レート取得成功:", cnyToJpy);
+      } catch {
+        console.warn("為替APIエラー。固定値20を使用");
+        cnyToJpy = 20;
+      }
+    }
+
     const z = (n) => String(n ?? "").padStart(3, "0");
     const toNum = (x) => {
       const n = Number(x);
@@ -53,24 +66,59 @@
     };
     const sanitize = (s) => String(s ?? "").replace(/[\\/:*?"<>| ]/g, "_");
 
-    // ---- CSV 読み込み ----
-    Papa.parse(CSV_PATH, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (res) => {
-        const hasRank = res.meta.fields && res.meta.fields.includes("rank");
-        if (!hasRank) {
-          fail("CSV 読み込み失敗（rank 列が見つかりません）");
-          return;
-        }
+    // 💴 CNY→JPY換算
+    function convertToJPY(priceStr) {
+      if (!priceStr) return "";
+      const match = priceStr.match(/([\d.]+)-([\d.]+)万/);
+      if (!match) return "";
+      const low = parseFloat(match[1]) * cnyToJpy * 10000;  // 元→円
+      const high = parseFloat(match[2]) * cnyToJpy * 10000;
+      const fmt = (x) => (x / 10000).toFixed(1); // 万円単位
+      return `（約${fmt(low)}〜${fmt(high)}万円）`;
+    }
 
-        const data = (res.data || []).filter(r => r && r.rank);
-        ok(`Autohome CSV 読み込み成功 ✔ (${data.length} 件)`);
-        renderTable(data);
-      },
-      error: (err) => fail("CSV 読み込みエラー: " + err.message)
-    });
+    function imgTag(rankStr, model, imageUrl) {
+      let fullPath = "";
+      if (imageUrl && imageUrl.startsWith("/autohome_images/")) {
+        fullPath = "/output/pipeline/autohome-ranking-images" + imageUrl;
+      } else if (imageUrl) {
+        fullPath = imageUrl;
+      } else {
+        fullPath = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
+      }
+      return `<img class="car-thumb" src="${fullPath}" alt="${model}" onerror="this.style.visibility='hidden';" />`;
+    }
+
+    function renderTable(data) {
+      const tbody = document.querySelector("#carTable tbody");
+      tbody.innerHTML = "";
+      data.forEach(r => {
+        const curRank = toNum(r.rank);
+        const diffVal = toNum(r.delta_vs_last_month);
+        const diffHtml = diffVal > 0 ? `<span class="rank-up">▲${diffVal}</span>`
+                        : diffVal < 0 ? `<span class="rank-down">▼${-diffVal}</span>` : "–";
+        const rankStr = z(curRank);
+        const name = r.global_name || r.name || "";
+        const maker = r.manufacturer_ja || r.manufacturer || "";
+        const units = r.units || "";
+        const price = r.price || "";
+        const link = r.link || "";
+        const imageUrl = r.image_url || "";
+        const priceJPY = convertToJPY(price);
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${curRank}</td>
+          <td>${diffHtml}</td>
+          <td>${imgTag(rankStr, name, imageUrl)}</td>
+          <td>${link ? `<a href="${link}" target="_blank" rel="noopener">${name}</a>` : name}</td>
+          <td>${maker}</td>
+          <td>${units}</td>
+          <td>${price}<br><span class="price-jpy">${priceJPY}</span></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
 
     function ok(msg) {
       const s = document.getElementById("status");
@@ -84,56 +132,24 @@
       document.querySelector("#carTable tbody").innerHTML = "";
     }
 
-    // ---- 画像タグ生成（ここだけ修正）----
-    function imgTag(rankStr, model, imageUrl) {
-      let fullPath = "";
-      if (imageUrl && imageUrl.startsWith("/autohome_images/")) {
-        fullPath = "/output/pipeline/autohome-ranking-images" + imageUrl;
-      } else if (imageUrl) {
-        fullPath = imageUrl;
-      } else {
-        fullPath = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
-      }
-      return `
-        <img class="car-thumb"
-             src="${fullPath}"
-             alt="${model}"
-             onerror="this.style.visibility='hidden';" />
-      `;
-    }
-
-    // ---- テーブル描画 ----
-    function renderTable(data) {
-      const tbody = document.querySelector("#carTable tbody");
-      tbody.innerHTML = "";
-
-      data.forEach(r => {
-        const curRank = toNum(r.rank);
-        const diffVal = toNum(r.delta_vs_last_month);
-        const diffHtml = diffVal > 0 ? `<span class="rank-up">▲${diffVal}</span>`
-                        : diffVal < 0 ? `<span class="rank-down">▼${-diffVal}</span>` : "–";
-
-        const rankStr = z(curRank);
-        const name = r.global_name || r.name || "";
-        const maker = r.manufacturer_ja || r.manufacturer || "";
-        const units = r.units || "";
-        const price = r.price || "";
-        const link = r.link || "";
-        const imageUrl = r.image_url || "";
-
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${curRank}</td>
-          <td>${diffHtml}</td>
-          <td>${imgTag(rankStr, name, imageUrl)}</td>
-          <td>${link ? `<a href="${link}" target="_blank" rel="noopener">${name}</a>` : name}</td>
-          <td>${maker}</td>
-          <td>${units}</td>
-          <td>${price}</td>
-        `;
-        tbody.appendChild(tr);
+    async function main() {
+      await fetchRate(); // 為替レートを取得
+      Papa.parse(CSV_PATH, {
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: (res) => {
+          const hasRank = res.meta.fields && res.meta.fields.includes("rank");
+          if (!hasRank) return fail("CSV 読み込み失敗（rank 列が見つかりません）");
+          const data = (res.data || []).filter(r => r && r.rank);
+          ok(`Autohome CSV 読み込み成功 ✔ (${data.length} 件)`);
+          renderTable(data);
+        },
+        error: (err) => fail("CSV 読み込みエラー: " + err.message)
       });
     }
+
+    main();
   </script>
 </body>
 </html>
