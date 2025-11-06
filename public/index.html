@@ -49,12 +49,8 @@
       background: light-dark(#f2f2f2, #2a2a2a);
       padding: 4px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.15);
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
-    img.car-thumb:hover {
-      transform: scale(1.05);
-      box-shadow: 0 3px 8px rgba(0,0,0,0.3);
-    }
+
     .rank-up { color: #dc3545; font-weight: 600; }
     .rank-down { color: #0d6efd; font-weight: 600; }
     .price-jpy {
@@ -65,6 +61,12 @@
     }
     a { color: #0d6efd; text-decoration: none; }
     a:hover { text-decoration: underline; }
+
+    .btn-spec {
+      font-size: 0.8rem;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
   </style>
 </head>
 <body>
@@ -84,6 +86,7 @@
             <th>メーカー</th>
             <th style="width:90px">台数</th>
             <th style="width:150px">価格</th>
+            <th style="width:100px">仕様</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -91,7 +94,7 @@
     </div>
   </div>
 
-  <!-- 📊 CSVモーダル表示領域 -->
+  <!-- 📊 CSVモーダル -->
   <div class="modal fade" id="csvModal" tabindex="-1" aria-labelledby="csvModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
@@ -110,10 +113,10 @@
 
   <script>
     const CSV_PATH = "output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
+    const IMG_BASE = "output/pipeline/autohome-ranking-images/autohome_images/";
     let allData = [];
     let cnyToJpy = null;
 
-    // 🌏 為替レート取得（人民元→円）
     async function fetchExchangeRate() {
       try {
         const res = await fetch("https://api.exchangerate.host/latest?base=CNY&symbols=JPY");
@@ -124,7 +127,6 @@
       }
     }
 
-    // CSV読込
     Papa.parse(CSV_PATH, {
       download: true,
       header: true,
@@ -137,7 +139,6 @@
         }
         allData = res.data.filter(r => r && r.rank);
         ok(`Autohome CSV 読み込み成功 ✔ (${allData.length} 件)`);
-
         await fetchExchangeRate();
         renderTable();
       },
@@ -155,7 +156,6 @@
       s.textContent = msg;
     }
 
-    // 💡 テーブル描画
     function renderTable() {
       const tbody = document.querySelector("#carTable tbody");
       tbody.innerHTML = "";
@@ -168,15 +168,15 @@
 
         const match = r.link?.match(/(\d+)/);
         const carId = match ? match[1] : null;
-        const linkHtml = carId
-          ? `<a href="#" onclick="showConfigCsv('${carId}','${r.global_name}');return false;">${r.global_name}</a>`
+
+        const autohomeLink = r.link
+          ? `<a href="${r.link}" target="_blank" rel="noopener">${r.global_name}</a>`
           : (r.global_name || "");
 
         const maker = r.manufacturer_ja || r.manufacturer || "";
         const price = r.price || "";
         const units = r.units || "";
 
-        // 💴 日本円換算（CNY→JPY）
         let priceJpy = "";
         if (cnyToJpy && /\d+(\.\d+)?-?\d*(\.\d+)?万/.test(price)) {
           const nums = price.match(/\d+(\.\d+)?/g);
@@ -189,25 +189,34 @@
           }
         }
 
+        const rankStr = String(curRank).padStart(3, "0");
+        const imgSrc = r.image_url?.startsWith("/autohome_images/")
+          ? `/output/pipeline/autohome-ranking-images${r.image_url}`
+          : `${IMG_BASE}${rankStr}_${r.global_name}.png`;
+
+        const specBtn = carId
+          ? `<button class="btn btn-outline-primary btn-sm btn-spec" onclick="showConfigCsv('${carId}','${r.global_name}');">仕様を見る</button>`
+          : "";
+
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${curRank}</td>
           <td>${diffHtml}</td>
-          <td><img class="car-thumb" src="${r.image_url}" alt="${r.global_name}" /></td>
-          <td>${linkHtml}</td>
+          <td><img class="car-thumb" src="${imgSrc}" alt="${r.global_name}" onerror="this.style.visibility='hidden';"></td>
+          <td>${autohomeLink}</td>
           <td>${maker}</td>
           <td>${units}</td>
           <td>${price}<span class="price-jpy">${priceJpy}</span></td>
+          <td>${specBtn}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    // 🚗 モーダルで車両CSV表示
     function showConfigCsv(carId, title) {
       const path = `/output/autohome/${carId}/config_${carId}.ja.csv`;
       const target = document.getElementById("csvContent");
-      document.getElementById("csvModalLabel").textContent = `車両仕様（ID: ${carId}）`;
+      document.getElementById("csvModalLabel").textContent = `車両仕様（${title} | ID: ${carId}）`;
       target.innerHTML = `<div class='text-muted'>読込中… (${path})</div>`;
 
       Papa.parse(path, {
@@ -218,12 +227,10 @@
             target.innerHTML = `<div class='text-danger'>CSVが空、または存在しません。</div>`;
             return;
           }
-
           const fields = res.meta.fields || [];
           let html = `<table class="table table-bordered table-sm table-hover align-middle"><thead><tr>`;
           fields.forEach(f => { html += `<th>${f}</th>`; });
           html += `</tr></thead><tbody>`;
-
           res.data.forEach(row => {
             html += "<tr>";
             fields.forEach(f => { html += `<td>${row[f] ?? ""}</td>`; });
