@@ -62,10 +62,24 @@
     a { color: #0d6efd; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
-    .btn-spec {
+    .btn-spec, .btn-story {
       font-size: 0.8rem;
       padding: 2px 6px;
       border-radius: 6px;
+      width: 90px;
+      display: block;
+      margin: 2px auto;
+    }
+
+    /* 🧾 口コミモーダル内のテキスト */
+    #storyContent {
+      font-size: 1rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      background: light-dark(#f8f9fa, #1b1b1b);
+      padding: 1rem;
+      border-radius: 8px;
+      box-shadow: inset 0 0 4px rgba(0,0,0,0.1);
     }
   </style>
 </head>
@@ -86,7 +100,7 @@
             <th>メーカー</th>
             <th style="width:90px">台数</th>
             <th style="width:150px">価格</th>
-            <th style="width:100px">仕様</th>
+            <th style="width:100px">情報</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -94,7 +108,7 @@
     </div>
   </div>
 
-  <!-- 📊 CSVモーダル -->
+  <!-- 📊 仕様モーダル -->
   <div class="modal fade" id="csvModal" tabindex="-1" aria-labelledby="csvModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
@@ -104,6 +118,21 @@
         </div>
         <div class="modal-body">
           <div id="csvContent" class="table-responsive"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🧾 口コミモーダル -->
+  <div class="modal fade" id="storyModal" tabindex="-1" aria-labelledby="storyModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="storyModalLabel">口コミ概要</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <div id="storyContent">読込中...</div>
         </div>
       </div>
     </div>
@@ -195,7 +224,10 @@
           : `${IMG_BASE}${rankStr}_${r.global_name}.png`;
 
         const specBtn = carId
-          ? `<button class="btn btn-outline-primary btn-sm btn-spec" onclick="showConfigCsv('${carId}','${r.global_name}');">仕様を見る</button>`
+          ? `<button class="btn btn-outline-primary btn-sm btn-spec" onclick="showConfigCsv('${carId}','${r.global_name}');">仕様</button>`
+          : "";
+        const storyBtn = carId
+          ? `<button class="btn btn-outline-secondary btn-sm btn-story" onclick="showStory('${carId}','${r.global_name}');">口コミ</button>`
           : "";
 
         const tr = document.createElement("tr");
@@ -207,7 +239,7 @@
           <td>${maker}</td>
           <td>${units}</td>
           <td>${price}<span class="price-jpy">${priceJpy}</span></td>
-          <td>${specBtn}</td>
+          <td>${specBtn}${storyBtn}</td>
         `;
         tbody.appendChild(tr);
       });
@@ -244,8 +276,22 @@
         }
       });
 
-      const modal = new bootstrap.Modal(document.getElementById("csvModal"));
-      modal.show();
+      new bootstrap.Modal(document.getElementById("csvModal")).show();
+    }
+
+    // 🧾 口コミモーダル表示
+    function showStory(carId, title) {
+      const path = `/output/koubei/${carId}/story.txt`;
+      const target = document.getElementById("storyContent");
+      document.getElementById("storyModalLabel").textContent = `口コミ概要（${title} | ID: ${carId}）`;
+      target.textContent = "読込中…";
+
+      fetch(path)
+        .then(res => res.ok ? res.text() : Promise.reject("Not Found"))
+        .then(text => target.textContent = text)
+        .catch(() => target.innerHTML = "<div class='text-danger'>口コミデータが見つかりません。</div>");
+
+      new bootstrap.Modal(document.getElementById("storyModal")).show();
     }
   </script>
 </body>
