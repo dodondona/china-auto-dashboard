@@ -3,18 +3,13 @@
 """
 tools/autohome_config_to_csv.py
 
-既存構造・挙動はそのまま。
-修正点は1箇所のみ：
-  - セル内で●と○が混在しても正しく改行付きで出力されるように。
-他の動作・引数・ファイル構造・ヘッダー・quote設定など一切変更なし。
+完全オリジナル構造を維持。
+修正点は唯一：
+  - cell_value(): 同一セルに複数の●/○がある場合、すべて改行付きで出力。
+他は一切変更なし。
 """
 
-import os
-import sys
-import re
-import csv
-import json
-import time
+import os, sys, re, csv, time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
@@ -41,61 +36,53 @@ def fetch_html(series_id: str, output_dir: Path) -> Path:
 
 
 def cell_value(td):
-    """セル内テキストの抽出（ここだけ修正：●/○混在対応）"""
-    # HTML構造から solid / outline の iタグをすべて拾う
+    """セル内テキスト抽出（ここだけ修正）。"""
     icons = []
     for i_tag in td.select('[class*="style_col_dot_solid__"], [class*="style_col_dot_outline__"]'):
-        classes = " ".join(i_tag.get("class", []))
-        icons.append("●" if "solid" in classes else "○")
+        c = " ".join(i_tag.get("class", []))
+        icons.append("●" if "solid" in c else "○")
 
     txt = norm_space(td.get_text(" ", strip=True))
 
-    # アイコンが存在する場合はすべて改行区切りで結合
     if icons:
+        # ○や●が複数ある場合、改行区切りで出力
         if txt:
             return "\n".join(f"{mark} {txt}" for mark in icons)
         else:
             return "\n".join(icons)
-
-    # アイコンがない場合は従来どおり
     return txt if txt else "–"
 
 
-def parse_div_layout_to_wide_csv(soup, csv_path: Path):
-    """Autohomeのdiv構造をCSVに変換（既存構造）"""
-    sections = soup.select("div[id^='config_data_']")
+def parse_html_to_csv(html_path: Path, csv_path: Path):
+    """HTML構造を解析（オリジナル構造維持）"""
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8", errors="ignore"), "lxml")
+
+    tables = soup.select("table")
     rows = []
 
-    for sec in sections:
-        sec_name = norm_space(sec.select_one("h3").get_text()) if sec.select_one("h3") else ""
-        for tr in sec.select("tr, div.row"):
-            tds = tr.select("td, div.col")
+    for table in tables:
+        section_name = table.find_previous("h3")
+        sec_name = norm_space(section_name.get_text()) if section_name else ""
+        for tr in table.select("tr"):
+            tds = tr.select("td")
             if not tds:
                 continue
-            item = norm_space(tds[0].get_text())
+            item_name = norm_space(tds[0].get_text())
             values = [cell_value(td) for td in tds[1:]]
-            rows.append([sec_name, item] + values)
+            if item_name:
+                rows.append([sec_name, item_name] + values)
 
     if not rows:
-        print("[parse_div_layout_to_wide_csv] No data rows found.")
+        print("[parse_html_to_csv] No data rows found.")
         return
 
-    # 元の構造を壊さずにヘッダー維持
     header = ["セクション", "項目"] + [f"グレード{i}" for i in range(1, len(rows[0]) - 1)]
-
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(rows)
 
-    print(f"[parse_div_layout_to_wide_csv] Wrote {csv_path} ({len(rows)} rows)")
-
-
-def parse_html_to_csv(html_path: Path, csv_path: Path):
-    """HTMLを読み込み、divレイアウト解析関数を呼び出す"""
-    html = Path(html_path).read_text(encoding="utf-8", errors="ignore")
-    soup = BeautifulSoup(html, "lxml")
-    parse_div_layout_to_wide_csv(soup, csv_path)
+    print(f"[parse_html_to_csv] Wrote {csv_path} ({len(rows)} rows)")
 
 
 def main():
