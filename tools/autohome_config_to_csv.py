@@ -1,292 +1,199 @@
-# tools/autohome_config_to_csv.py
-import argparse
-import csv
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Autohome config HTML → CSV 抽出（●/○をサブ項目ごとに維持、改行区切り）
+- 外観つきクラス名はバージョンで変わるため、「style_col_dot_」の接頭辞で判定
+- solid ⇒ ● , outline ⇒ ○
+- サブ項目の直後に（xxxx元）等の価格があれば同じ行に付与
+- 日本語CSVでは『セクション』『項目』列を削る（_ja 列のみ残す）
+
+使い方:
+  python .github/scripts/autohome_config_html_to_csv.py \
+      --html /path/to/series_18.html \
+      --csv-ja out/config_18.ja.csv
+
+備考:
+- 抽出の基本単位は「行（項目）」→「各グレード列のセル」。
+- サブ項目は <i class="style_col_dot__... ..._solid__.../ ..._outline__..."> の直近テキストを拾う。
+"""
 import re
+import sys
+import csv
+import argparse
 from pathlib import Path
-from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup  # requires: beautifulsoup4
+from bs4 import BeautifulSoup
 
-# --------------------------------
-# 共通設定
-# --------------------------------
-PC_URL = "https://www.autohome.com.cn/config/series/{series}.html#pvareaid=3454437"
-MOBILE_URL = "https://m.autohome.com.cn/config/series/{series}.html"
+DOT_BASE = "style_col_dot_"
+DOT_SOLID = "solid"
+DOT_OUTLINE = "outline"
 
-def norm_space(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+def is_dot_icon(tag):
+    if tag.name != "i":
+        return False
+    cls = " ".join(tag.get("class", []))
+    return DOT_BASE in cls
 
-# --------------------------------
-# 旧テーブル(<table>)用：行列展開
-# --------------------------------
-ICON_MAP_LEGACY = {
-    "icon-point-on": "●",
-    "icon-point-off": "○",
-    "icon-point-none": "-",
-}
+def dot_kind_from_classes(classes):
+    s = " ".join(classes)
+    # 固定プレフィックス + 末尾の種別で判定（ハッシュは都度変化するため無視）
+    if f"{DOT_BASE}{DOT_SOLID}" in s:
+        return "●"
+    if f"{DOT_BASE}{DOT_OUTLINE}" in s:
+        return "○"
+    # ハッシュの途中に "solid__" / "outline__" が入るケースも拾う
+    if re.search(r"solid__", s):
+        return "●"
+    if re.search(r"outline__", s):
+        return "○"
+    return ""  # 不明（基本ここには来ない）
 
-def _cell_text_enriched(cell):
-    base = (cell.inner_text() or "").replace("\u00a0", " ").strip()
-    mark = ""
-    try:
-        for k in cell.query_selector_all("i, span, em"):
-            cls = (k.get_attribute("class") or "")
-            for key, sym in ICON_MAP_LEGACY.items():
-                if key in cls:
-                    mark = sym
-                    break
-            if mark:
+def extract_label_with_price(icon_tag):
+    """
+    アイコン直後のテキストをラベルとして取得し、可能なら直後の（xxxx元）等の括弧表記も連結。
+    HTML構造は多様なので、兄弟ノード・親内の次要素などを幅広く探索。
+    """
+    # 候補: 直後のテキスト or span/div のテキスト
+    txt_parts = []
+
+    # 兄弟のテキスト・要素を少しだけ先読み
+    cur = icon_tag.next_sibling
+    steps = 0
+    while cur and steps < 6:
+        steps += 1
+        if isinstance(cur, str):
+            t = cur.strip()
+            if t:
+                txt_parts.append(t)
                 break
-    except Exception:
-        pass
-
-    unit = ""
-    for sel in (".unit", "[data-unit]", "[class*='unit']"):
-        try:
-            u = cell.query_selector(sel)
-            if u:
-                t = (u.inner_text() or "").strip()
-                if t and t not in ("-", "—"):
-                    unit = t
-                    break
-        except Exception:
-            continue
-
-    if not base:
-        try:
-            base = (cell.evaluate("el => el.textContent") or "").replace("\u00a0", " ").strip()
-        except Exception:
-            pass
-
-    parts = []
-    if mark:
-        parts.append(mark)
-    if base:
-        parts.append(base)
-    if unit and not base.endswith(unit):
-        parts.append(unit)
-    return " ".join(parts).strip().replace("－", "-")
-
-def extract_matrix_from_table(table):
-    rows = table.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-    grid, max_cols = [], 0
-
-    def next_free(ridx):
-        c = 0
-        while True:
-            if c >= len(grid[ridx]):
-                grid[ridx].extend([""] * (c - len(grid[ridx]) + 1))
-            if grid[ridx][c] == "":
-                return c
-            c += 1
-
-    for ri, r in enumerate(rows):
-        grid.append([])
-        for cell in r.query_selector_all("th,td"):
-            txt = _cell_text_enriched(cell)
-            rs = int(cell.get_attribute("rowspan") or "1")
-            cs = int(cell.get_attribute("colspan") or "1")
-            col = next_free(ri)
-            need = col + cs
-            if need > len(grid[ri]):
-                grid[ri].extend([""] * (need - len(grid[ri])))
-            grid[ri][col] = txt
-            if rs > 1:
-                for k in range(1, rs):
-                    rr = ri + k
-                    while rr >= len(grid):
-                        grid.append([])
-                    if len(grid[rr]) < need:
-                        grid[rr].extend([""] * (need - len(grid[rr])))
-            max_cols = max(max_cols, need)
-
-    for i in range(len(grid)):
-        if len(grid[i]) < max_cols:
-            grid[i].extend([""] * (max_cols - len(grid[i])))
-    return grid
-
-def save_csv_matrix(matrix, outpath: Path):
-    outpath.parent.mkdir(parents=True, exist_ok=True)
-    with open(outpath, "w", newline="", encoding="utf-8-sig") as f:
-        csv.writer(f).writerows(matrix)
-    print(f"✅ Saved: {outpath} ({len(matrix)} rows)")
-
-# --------------------------------
-# 新レイアウト(divベース)用
-# --------------------------------
-def parse_div_layout_to_wide_csv(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    head = soup.select_one('[class*="style_table_head__"]')
-    if not head:
-        return None
-
-    head_cells = [c for c in head.find_all(recursive=False) if getattr(c, "name", None)]
-    def clean_model_name(t):
-        t = norm_space(t)
-        t = re.sub(r"^\s*钉在左侧\s*", "", t)
-        t = re.sub(r"\s*对比\s*$", "", t)
-        return norm_space(t)
-
-    model_names = [clean_model_name(c.get_text(" ", strip=True)) for c in head_cells[1:]]
-    n_models = len(model_names)
-
-    def find_container_with(head_node):
-        p = head_node
-        for _ in range(12):
-            p = p.parent
-            if not p:
+        elif hasattr(cur, "get_text"):
+            t = cur.get_text(" ", strip=True)
+            if t:
+                txt_parts.append(t)
                 break
-            if p.find(class_=re.compile(r"style_table_title__")) and p.find(class_=re.compile(r"style_row__")):
-                return p
-        return head_node.parent
+        cur = cur.next_sibling
 
-    container = find_container_with(head)
-    if not container:
-        return None
+    # 取れなかったら親側も少し見る
+    if not txt_parts:
+        parent = icon_tag.parent
+        if parent:
+            t = parent.get_text(" ", strip=True)
+            # 親の先頭側に別要素が多い場合、アイコン以降っぽい部分を素直に採れないことがある。
+            # 応急的に、全体文から前方の余計な空白を削って使う。
+            if t:
+                # アイコンのすぐ右に出る語を優先したいので、スペースで分割して先頭～2語程度にする
+                txt_parts.append(t.split(" ")[0])
 
-    def is_section_title(node):
-        cls = " ".join(node.get("class", []))
-        return "style_table_title__" in cls
+    label = txt_parts[0] if txt_parts else ""
 
-    def get_section_from_title(node):
-        sticky = node.find(class_=re.compile(r"table_title_col"))
-        sec = norm_space(sticky.get_text(" ", strip=True) if sticky else node.get_text(" ", strip=True))
-        sec = re.sub(r"\s*标配.*$", "", sec)
-        sec = re.sub(r"\s*选配.*$", "", sec)
-        sec = re.sub(r"\s*- 无.*$", "", sec)
-        return norm_space(sec)
+    # 直後の価格（（））を拾う
+    price = ""
+    # 価格はラベルに一緒に含まれているケースもある
+    m = re.search(r"（[^）]*元[^）]*）|\([^)]*元[^)]*\)", label)
+    if m:
+        # 既にラベルに含まれていればそのまま
+        return label
+    # 含まれていなければ、アイコン以降にある括弧表記を少し探索
+    cur = icon_tag.next_sibling
+    steps = 0
+    while cur and steps < 8:
+        steps += 1
+        s = ""
+        if isinstance(cur, str):
+            s = cur.strip()
+        elif hasattr(cur, "get_text"):
+            s = cur.get_text(" ", strip=True)
+        if s:
+            mp = re.search(r"(（[^）]*元[^）]*）|\([^)]*元[^)]*\))", s)
+            if mp:
+                price = mp.group(1)
+                break
+        cur = cur.next_sibling
 
-    def is_data_row(node):
-        cls = " ".join(node.get("class", []))
-        return "style_row__" in cls
+    return (label + (price if price else "")).strip()
 
-    def cell_value(td):
-        is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
-        is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
-        txt = norm_space(td.get_text(" ", strip=True))
-        if is_solid and not is_outline:
-            return "●" if txt in ("", "●", "○") else f"● {txt}"
-        if is_outline and not is_solid:
-            return "○" if txt in ("", "●", "○") else f"○ {txt}"
-        return txt if txt else "–"
+def parse_rows(soup):
+    """
+    行（セクション/項目）を見つけ、各グレード列のセルを抽出する。
+    Autohomeの構造は頻繁にclass名が変わるため、semanticな手掛かりで広めに探す。
+    - 左側に「項目名」的なセル（タイトル）があり、右に複数列の値セルが並ぶ構造。
+    """
+    rows = []
 
-    records = []
-    current_section = ""
-    children = [c for c in container.find_all(recursive=False) if getattr(c, "name", None)]
-    for ch in children:
-        if ch is head:
+    # 代表的な行コンテナ（例: style_row__***）に近いものを広めに
+    for row in soup.find_all(lambda t: t.name in ("div","li","tr") and t.find(string=re.compile(r".+")) and t.find(is_dot_icon) or t.find("i")):
+        # セクション名/項目名候補（左側タイトル）を拾う
+        # タイトルは左側に strong/span などで置かれることが多い
+        title_text = ""
+        title_node = None
+
+        # “参数”、“配置”テーブルの一般的なラベル領域を推測（太字/タイトルらしさ）
+        for cand in row.find_all(["strong","h3","h4","h5","span","div"], limit=6):
+            t = cand.get_text(" ", strip=True)
+            if t and len(t) <= 30:
+                title_text = t
+                title_node = cand
+                break
+
+        # セル群を推測（i.dot を含む要素をセルと見なして集める）
+        cell_candidates = []
+        for c in row.find_all(lambda t: t.name in ("div","td","li") and t.find(is_dot_icon)):
+            cell_candidates.append(c)
+
+        if not cell_candidates:
             continue
-        if is_section_title(ch):
-            current_section = get_section_from_title(ch)
-            continue
-        if is_data_row(ch):
-            kids = [k for k in ch.find_all(recursive=False) if getattr(k, "name", None)]
-            if not kids:
-                continue
-            left = norm_space(kids[0].get_text(" ", strip=True))
-            cells = kids[1:1 + n_models]
-            if len(cells) < n_models:
-                cells = cells + [soup.new_tag("div")] * (n_models - len(cells))
-            elif len(cells) > n_models:
-                cells = cells[:n_models]
-            vals = [cell_value(td) for td in cells]
-            records.append([current_section, left] + vals)
 
-    if not records:
-        return None
-    header = ["セクション", "項目"] + model_names
-    return [header] + records
+        # セクション/項目の二段構造に対応できるよう，暫定的にタイトルを分割
+        section_ja = title_text  # 日本語化は後段（既存の翻訳処理）に委譲
+        item_ja = title_text
 
-# --------------------------------
-# メイン
-# --------------------------------
+        # 各セル内で「サブ項目ごとに ●/○＋ラベル(+価格)」を改行で連結
+        parsed_cells = []
+        for cell in cell_candidates:
+            lines = []
+            for ico in cell.find_all(is_dot_icon):
+                mark = dot_kind_from_classes(ico.get("class", []))
+                if not mark:
+                    continue
+                label = extract_label_with_price(ico)
+                if not label:
+                    continue
+                lines.append(f"{mark} {label}")
+            if lines:
+                parsed_cells.append("\n".join(lines))
+            else:
+                # アイコンが取れないセルは素のテキストを置き換えで救済
+                t = cell.get_text(" ", strip=True)
+                parsed_cells.append(t)
+
+        if parsed_cells:
+            rows.append((section_ja, item_ja, parsed_cells))
+
+    return rows
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--series", type=str, required=True, help="Autohome series id (e.g., 6814)")
-    ap.add_argument("--outdir", type=str, default="output/autohome", help="Output base dir")
-    ap.add_argument("--mobile", action="store_true", help="Use mobile site")
+    ap.add_argument("--html", required=True)
+    ap.add_argument("--csv-ja", required=True, help="出力: 日本語列のみ（セクション/項目の原語は出さない）")
     args = ap.parse_args()
 
-    series = args.series.strip()
-    outdir = Path(args.outdir) / series
-    outdir.mkdir(parents=True, exist_ok=True)
-    url = (MOBILE_URL if args.mobile else PC_URL).format(series=series)
+    html_path = Path(args.html)
+    soup = BeautifulSoup(html_path.read_text(encoding="utf-8", errors="ignore"), "lxml")
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1366, "height": 900},
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36")
-        )
-        context.route("**/*", lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_())
-        page = context.new_page()
+    rows = parse_rows(soup)
 
-        print("Loading:", url)
-        nav_targets = [
-            (url, "networkidle", 120000),
-            (url, "load", 150000),
-            (MOBILE_URL.format(series=series), "load", 150000),
-        ]
+    # 出力列は「セクション_ja」「項目_ja」に加え、右側のトリム列（可変本数）
+    # トリム列名は HTML から厳密に取るのが安全だが、既存パイプラインに合わせ「col1,col2,...」で仮置き。
+    max_cols = max((len(cells) for _,_,cells in rows), default=0)
+    fieldnames = ["セクション_ja", "項目_ja"] + [f"col{i+1}" for i in range(max_cols)]
 
-        last_err = None
-        for idx, (u, wait_state, to) in enumerate(nav_targets, 1):
-            try:
-                if idx > 1:
-                    print(f"↻ retry {idx-1}: goto {u} (wait_until={wait_state}, timeout={to}ms)")
-                page.goto(u, wait_until=wait_state, timeout=to)
-                try:
-                    page.wait_for_selector("[class*='style_table_head__'], table", timeout=30000)
-                except Exception:
-                    page.mouse.wheel(0, 1200)
-                    page.wait_for_timeout(1200)
-                    page.wait_for_selector("[class*='style_table_head__'], table", timeout=15000)
-                last_err = None
-                break
-            except Exception as e:
-                print(f"⚠️ page.goto failed once ({e}), retrying...")
-                last_err = e
-                continue
-
-        if last_err:
-            print(f"⚠️ navigation failed after retries: {last_err}")
-
-        html = page.content()
-        wide_matrix = parse_div_layout_to_wide_csv(html)
-        if wide_matrix:
-            out_csv = outdir / f"config_{series}.csv"
-            with open(out_csv, "w", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerows(wide_matrix)
-            print(f"✅ Saved (div-layout wide): {out_csv} ({len(wide_matrix)-1} rows)")
-            browser.close()
-            return
-
-        tables = [t for t in page.query_selector_all("table") if t.is_visible()]
-        print(f"Found {len(tables)} table(s)")
-        if not tables:
-            print("❌ No tables found.")
-            browser.close()
-            return
-
-        biggest = (None, 0, -1)
-        for idx, t in enumerate(tables, start=1):
-            rows = t.query_selector_all(":scope>thead>tr, :scope>tbody>tr, :scope>tr")
-            rcount = len(rows)
-            ccount = max((len(r.query_selector_all("th,td")) for r in rows), default=0)
-            score = rcount * ccount
-            mat = extract_matrix_from_table(t)
-            out_csv = outdir / f"table_{idx:02d}.csv"
-            save_csv_matrix(mat, out_csv)
-            if score > biggest[1]:
-                biggest = (mat, score, idx)
-
-        if biggest[0] is not None:
-            out_csv_std = outdir / f"config_{series}.csv"
-            save_csv_matrix(biggest[0], out_csv_std)
-
-        browser.close()
+    with open(args.csv_ja, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for sec_ja, item_ja, cells in rows:
+            row = {"セクション_ja": sec_ja, "項目_ja": item_ja}
+            for i, v in enumerate(cells):
+                row[f"col{i+1}"] = v
+            w.writerow(row)
 
 if __name__ == "__main__":
     main()
