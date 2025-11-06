@@ -109,6 +109,9 @@
         const imageUrl = r.image_url || "";
         const priceJPY = convertToJPY(price);
 
+        // ✅ 価格の末尾に「元」を追加（すでに書かれていない場合のみ）
+        const priceDisplay = price.endsWith("元") ? price : (price ? price + "元" : "");
+
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${curRank}</td>
@@ -117,7 +120,7 @@
           <td>${link ? `<a href="${link}" target="_blank" rel="noopener">${name}</a>` : name}</td>
           <td>${maker}</td>
           <td>${units}</td>
-          <td>${price}<br><span class="price-jpy">${priceJPY}</span></td>
+          <td>${priceDisplay}<br><span class="price-jpy">${priceJPY}</span></td>
         `;
         tbody.appendChild(tr);
       });
