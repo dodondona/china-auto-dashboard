@@ -53,12 +53,14 @@
 
     .rank-up { color: #dc3545; font-weight: 600; }
     .rank-down { color: #0d6efd; font-weight: 600; }
+
     .price-jpy {
-      font-size: 0.85rem;
-      color: light-dark(#6c757d, #bbbbbb);
       display: block;
-      margin-top: 3px;
+      font-size: 0.85rem;
+      color: light-dark(#198754, #9be2a0); /* 緑で軽く強調 */
+      margin-top: 2px;
     }
+
     a { color: #0d6efd; text-decoration: none; }
     a:hover { text-decoration: underline; }
 
@@ -71,7 +73,6 @@
       margin: 2px auto;
     }
 
-    /* 🧾 口コミモーダル内のテキスト */
     #storyContent {
       font-size: 1rem;
       line-height: 1.6;
@@ -108,7 +109,7 @@
     </div>
   </div>
 
-  <!-- 📊 仕様モーダル -->
+  <!-- 仕様モーダル -->
   <div class="modal fade" id="csvModal" tabindex="-1" aria-labelledby="csvModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
@@ -123,7 +124,7 @@
     </div>
   </div>
 
-  <!-- 🧾 口コミモーダル -->
+  <!-- 口コミモーダル -->
   <div class="modal fade" id="storyModal" tabindex="-1" aria-labelledby="storyModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
@@ -206,15 +207,16 @@
         const price = r.price || "";
         const units = r.units || "";
 
+        // ✅ 日本円換算（復活）
         let priceJpy = "";
-        if (cnyToJpy && /\d+(\.\d+)?-?\d*(\.\d+)?万/.test(price)) {
+        if (cnyToJpy && /\d+(\.\d+)?/.test(price)) {
           const nums = price.match(/\d+(\.\d+)?/g);
           if (nums) {
             const yenRange = nums.map(n => Math.round(parseFloat(n) * 10000 * cnyToJpy));
             if (yenRange.length === 2)
-              priceJpy = `（約 ${yenRange[0].toLocaleString()}〜${yenRange[1].toLocaleString()} 円）`;
+              priceJpy = `約 ${yenRange[0].toLocaleString()}〜${yenRange[1].toLocaleString()} 円`;
             else if (yenRange.length === 1)
-              priceJpy = `（約 ${yenRange[0].toLocaleString()} 円）`;
+              priceJpy = `約 ${yenRange[0].toLocaleString()} 円`;
           }
         }
 
@@ -230,22 +232,18 @@
           ? `<button class="btn btn-outline-secondary btn-sm btn-story" onclick="showStory('${carId}','${r.global_name}');">口コミ</button>`
           : "";
 
- const tr = document.createElement("tr");
-tr.innerHTML = `
-  <td>${curRank}</td>
-  <td>${diffHtml}</td>
-  <td><img class="car-thumb" src="${imgSrc}" alt="${r.global_name}" onerror="this.style.visibility='hidden';"></td>
-  <td>${autohomeLink}</td>
-  <td>${maker}</td>
-  <td>${units}</td>
-  <td>
-    ${price}
-    ${priceJpy ? `<span class="price-jpy">${priceJpy}</span>` : ""}
-  </td>
-  <td>${specBtn}${storyBtn}</td>
-`;
-tbody.appendChild(tr);
-
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${curRank}</td>
+          <td>${diffHtml}</td>
+          <td><img class="car-thumb" src="${imgSrc}" alt="${r.global_name}" onerror="this.style.visibility='hidden';"></td>
+          <td>${autohomeLink}</td>
+          <td>${maker}</td>
+          <td>${units}</td>
+          <td>${price}${priceJpy ? `<span class="price-jpy">（${priceJpy}）</span>` : ""}</td>
+          <td>${specBtn}${storyBtn}</td>
+        `;
+        tbody.appendChild(tr);
       });
     }
 
@@ -283,7 +281,6 @@ tbody.appendChild(tr);
       new bootstrap.Modal(document.getElementById("csvModal")).show();
     }
 
-    // 🧾 口コミモーダル表示
     function showStory(carId, title) {
       const path = `/output/koubei/${carId}/story.txt`;
       const target = document.getElementById("storyContent");
