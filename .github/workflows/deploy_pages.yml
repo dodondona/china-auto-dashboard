@@ -19,7 +19,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gh jq unzip
 
-      # output/ が空なら、直近成功の autohome_pipeline から artifact を復元
+      # ✅ output/ が空なら、直近成功の autohome_pipeline から artifact を復元
       - name: Restore output/ from latest successful autohome_pipeline artifacts (when needed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,6 +71,7 @@ jobs:
 
           echo "✅ Restored output/ from artifacts."
 
+      # ✅ Cloudflare Pages 用 public 構成準備
       - name: Prepare public directory
         shell: bash
         run: |
@@ -85,18 +86,7 @@ jobs:
             exit 1
           fi
 
-          # キャッシュ無効化ヘッダ（ヒア構文NG対応）
-          echo "/output/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers
-
-          echo "==== public directory tree ===="
-          find public -type f | sort || true
-
-      - name: Publish to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: "china-auto-dashboard"
-          directory: "public"
+          # ✅ Cloudflare Pages 全体に no-cache 適用
+          # Cloudflare Pages は public/_headers のみを認識する
+          echo "/*" > public/_headers
+          echo "  Cache-Control
