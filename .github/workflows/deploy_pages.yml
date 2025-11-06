@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  workflow_dispatch:    # ← 手動実行OK
+  workflow_dispatch:
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -16,45 +16,34 @@ jobs:
 
       - name: Install deps (gh, jq, unzip)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
-      # ✅ output/ が空なら、直近成功の autohome_pipeline から artifact を復元
       - name: Restore output/ from latest successful autohome_pipeline artifacts (when needed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
           set -euo pipefail
-
-          # 既に output/ に中身があればスキップ
           if [ -d "output" ] && [ -n "$(ls -A output || true)" ]; then
             echo "✅ output/ already present. Skipping artifact restore."
             exit 0
           fi
 
-          echo "ℹ️ output/ not found or empty. Restoring from latest successful autohome_pipeline artifacts..."
-
-          # autohome_pipeline の workflow_id を取得
-          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows \
-            | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
-
+          echo "ℹ️ Restoring output/ from latest successful autohome_pipeline artifacts..."
+          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
           if [ -z "${WF_ID:-}" ]; then
             echo "❌ Could not find workflow 'autohome_pipeline'."
             exit 1
           fi
 
-          # 直近成功 run を取得
           RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?status=success&per_page=1)
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
-
           if [ -z "${RUN_ID:-}" ] || [ "${RUN_ID}" = "null" ]; then
             echo "❌ No successful runs found for autohome_pipeline."
             exit 1
           fi
           echo "Found successful run_id=$RUN_ID"
 
-          # アーティファクト一覧 → すべて取得
           ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
           COUNT=$(echo "$ART_JSON" | jq '.artifacts | length')
           if [ "$COUNT" -eq 0 ]; then
@@ -68,16 +57,13 @@ jobs:
             gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$NAME.zip"
             unzip -o "$NAME.zip" -d output/
           done
-
           echo "✅ Restored output/ from artifacts."
 
-      # ✅ Cloudflare Pages 用 public 構成準備
       - name: Prepare public directory
-        shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p public/output
+
           if [ -d "output" ]; then
             echo "✅ Copying output/* → public/output/ ..."
             cp -r output/* public/output/ || true
@@ -86,7 +72,18 @@ jobs:
             exit 1
           fi
 
-          # ✅ Cloudflare Pages 全体に no-cache 適用
-          # Cloudflare Pages は public/_headers のみを認識する
+          # ✅ 1行ずつechoしてヘッダ作成（ヒア構文禁止対応）
           echo "/*" > public/_headers
-          echo "  Cache-Control
+          echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers
+
+          echo "==== public directory tree ===="
+          find public -type f | sort || true
+
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          projectName: "china-auto-dashboard"
+          directory: "public"
