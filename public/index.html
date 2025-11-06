@@ -57,7 +57,7 @@
     .price-jpy {
       display: block;
       font-size: 0.85rem;
-      color: light-dark(#198754, #9be2a0); /* 緑で軽く強調 */
+      color: light-dark(#198754, #9be2a0);
       margin-top: 2px;
     }
 
@@ -207,11 +207,12 @@
         const price = r.price || "";
         const units = r.units || "";
 
-        // ✅ 日本円換算（復活）
+        // ✅ 日本円換算（改良版: 万元・~・万元起 すべて対応）
         let priceJpy = "";
-        if (cnyToJpy && /\d+(\.\d+)?/.test(price)) {
-          const nums = price.match(/\d+(\.\d+)?/g);
-          if (nums) {
+        if (cnyToJpy) {
+          const cleaned = price.replace(/[^\d\.\-~～]/g, ""); // 数値と記号だけ残す
+          const nums = cleaned.match(/\d+(\.\d+)?/g);
+          if (nums && nums.length > 0) {
             const yenRange = nums.map(n => Math.round(parseFloat(n) * 10000 * cnyToJpy));
             if (yenRange.length === 2)
               priceJpy = `約 ${yenRange[0].toLocaleString()}〜${yenRange[1].toLocaleString()} 円`;
