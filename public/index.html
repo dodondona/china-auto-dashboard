@@ -15,6 +15,7 @@
     .rank-down { color: #0d6efd; font-weight: bold; }
     img.car-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 6px; background:#eee; }
     .price-jpy { font-size: 0.85rem; color: #6c757d; }
+    .btn-spec, .btn-story { font-size: 0.8rem; padding: 2px 6px; margin: 2px; }
   </style>
 </head>
 <body>
@@ -34,6 +35,7 @@
             <th>メーカー</th>
             <th style="width:110px">台数</th>
             <th style="width:160px">価格</th>
+            <th style="width:100px">情報</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -41,118 +43,142 @@
     </div>
   </div>
 
+  <!-- モーダル -->
+  <div class="modal fade" id="csvModal" tabindex="-1" aria-labelledby="csvModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="csvModalLabel">車両仕様</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <div id="csvContent" class="table-responsive"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="storyModal" tabindex="-1" aria-labelledby="storyModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="storyModalLabel">口コミ概要</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <div id="storyContent">読込中...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
   <script>
     const CSV_PATH = "/output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
     const IMG_BASE = "/output/pipeline/autohome-ranking-images/autohome_images/";
-    let cnyToJpy = 20; // fallback（API失敗時）
+    let cnyToJpy = 20;
 
-    // 💱 最新為替レートをAPIから取得
     async function fetchRate() {
       try {
         const res = await fetch("https://api.exchangerate.host/latest?base=CNY&symbols=JPY");
         const data = await res.json();
         if (data?.rates?.JPY) cnyToJpy = data.rates.JPY;
-        console.log("為替レート取得成功:", cnyToJpy);
-      } catch {
-        console.warn("為替APIエラー。固定値20を使用");
-        cnyToJpy = 20;
-      }
+      } catch { cnyToJpy = 20; }
     }
 
-    const z = (n) => String(n ?? "").padStart(3, "0");
-    const toNum = (x) => {
-      const n = Number(x);
-      return Number.isFinite(n) ? n : NaN;
-    };
-    const sanitize = (s) => String(s ?? "").replace(/[\\/:*?"<>| ]/g, "_");
-
-    // 💴 汎用対応版 CNY→JPY換算
     function convertToJPY(priceStr) {
       if (!priceStr) return "";
-      // 例: "7.38-10.58万", "8.99万元起", "10.5万", "9.88"
-      const nums = priceStr.match(/\d+(\.\d+)?/g);
-      if (!nums || nums.length === 0) return "";
-      const yenVals = nums.map(n => parseFloat(n) * cnyToJpy * 10000); // 万元→元→円
-      const fmt = (x) => (x / 10000).toFixed(1); // 万円単位
-      if (yenVals.length === 2)
-        return `（約${fmt(yenVals[0])}〜${fmt(yenVals[1])}万円）`;
-      else
-        return `（約${fmt(yenVals[0])}万円）`;
+      const match = priceStr.match(/([\d.]+)-([\d.]+)万/);
+      if (!match) return "";
+      const low = parseFloat(match[1]) * cnyToJpy * 10000;
+      const high = parseFloat(match[2]) * cnyToJpy * 10000;
+      const fmt = (x) => (x / 10000).toFixed(1);
+      return `（約${fmt(low)}〜${fmt(high)}万円）`;
     }
 
     function imgTag(rankStr, model, imageUrl) {
-      let fullPath = "";
-      if (imageUrl && imageUrl.startsWith("/autohome_images/")) {
-        fullPath = "/output/pipeline/autohome-ranking-images" + imageUrl;
-      } else if (imageUrl) {
-        fullPath = imageUrl;
-      } else {
-        fullPath = (`${IMG_BASE}${rankStr}_${sanitize(model)}.png`).replace(/^\/+/, "/");
-      }
+      let fullPath = imageUrl && imageUrl.startsWith("/autohome_images/")
+        ? "/output/pipeline/autohome-ranking-images" + imageUrl
+        : (imageUrl || `${IMG_BASE}${rankStr}_${model}.png`);
       return `<img class="car-thumb" src="${fullPath}" alt="${model}" onerror="this.style.visibility='hidden';" />`;
+    }
+
+    async function main() {
+      await fetchRate();
+      Papa.parse(CSV_PATH, {
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: (res) => {
+          if (!res.meta.fields?.includes("rank")) return fail("CSV 読み込み失敗（rank 列が見つかりません）");
+          renderTable(res.data.filter(r => r && r.rank));
+          ok(`Autohome CSV 読み込み成功 ✔ (${res.data.length} 件)`);
+        },
+        error: (err) => fail("CSV 読み込みエラー: " + err.message)
+      });
     }
 
     function renderTable(data) {
       const tbody = document.querySelector("#carTable tbody");
       tbody.innerHTML = "";
       data.forEach(r => {
-        const curRank = toNum(r.rank);
-        const diffVal = toNum(r.delta_vs_last_month);
-        const diffHtml = diffVal > 0 ? `<span class="rank-up">▲${diffVal}</span>`
-                        : diffVal < 0 ? `<span class="rank-down">▼${-diffVal}</span>` : "–";
-        const rankStr = z(curRank);
+        const rankStr = String(r.rank).padStart(3, "0");
+        const diff = Number(r.delta_vs_last_month || 0);
+        const diffHtml = diff > 0 ? `<span class="rank-up">▲${diff}</span>` : diff < 0 ? `<span class="rank-down">▼${-diff}</span>` : "–";
+        const link = r.link || "";
+        const carId = link.match(/(\d+)/)?.[1] || "";
         const name = r.global_name || r.name || "";
+        const price = (r.price || "") + " 元";
+        const priceJPY = convertToJPY(r.price || "");
         const maker = r.manufacturer_ja || r.manufacturer || "";
         const units = r.units || "";
-        const price = r.price || "";
-        const link = r.link || "";
-        const imageUrl = r.image_url || "";
-        const priceJPY = convertToJPY(price);
 
-        // ✅ 価格の末尾に「元」を追加（すでに書かれていない場合のみ）
-        const priceDisplay = price.endsWith("元") ? price : (price ? price + "元" : "");
+        const specBtn = carId ? `<button class="btn btn-outline-primary btn-sm btn-spec" onclick="showConfigCsv('${carId}','${name}');">仕様</button>` : "";
+        const storyBtn = carId ? `<button class="btn btn-outline-secondary btn-sm btn-story" onclick="showStory('${carId}','${name}');">口コミ</button>` : "";
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${curRank}</td>
+          <td>${r.rank}</td>
           <td>${diffHtml}</td>
-          <td>${imgTag(rankStr, name, imageUrl)}</td>
-          <td>${link ? `<a href="${link}" target="_blank" rel="noopener">${name}</a>` : name}</td>
+          <td>${imgTag(rankStr, name, r.image_url)}</td>
+          <td><a href="${link}" target="_blank" rel="noopener">${name}</a></td>
           <td>${maker}</td>
           <td>${units}</td>
-          <td>${priceDisplay}<br><span class="price-jpy">${priceJPY}</span></td>
+          <td>${price}<br><span class="price-jpy">${priceJPY}</span></td>
+          <td>${specBtn}${storyBtn}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    function ok(msg) {
-      const s = document.getElementById("status");
-      s.className = "alert alert-success py-2";
-      s.textContent = msg;
-    }
-    function fail(msg) {
-      const s = document.getElementById("status");
-      s.className = "alert alert-danger py-2";
-      s.textContent = msg;
-      document.querySelector("#carTable tbody").innerHTML = "";
+    function ok(msg){const s=document.getElementById("status");s.className="alert alert-success py-2";s.textContent=msg;}
+    function fail(msg){const s=document.getElementById("status");s.className="alert alert-danger py-2";s.textContent=msg;}
+
+    function showConfigCsv(carId, title){
+      const path=`/output/autohome/${carId}/config_${carId}.ja.csv`;
+      const target=document.getElementById("csvContent");
+      document.getElementById("csvModalLabel").textContent=`車両仕様（${title} | ID:${carId}）`;
+      target.innerHTML="読込中...";
+      Papa.parse(path,{download:true,header:true,complete:(res)=>{
+        if(!res.data?.length){target.innerHTML="<div class='text-danger'>CSVが空、または存在しません。</div>";return;}
+        let html="<table class='table table-bordered table-sm'><thead><tr>";
+        res.meta.fields.forEach(f=>html+=`<th>${f}</th>`);html+="</tr></thead><tbody>";
+        res.data.forEach(row=>{html+="<tr>";res.meta.fields.forEach(f=>html+=`<td>${row[f]??""}</td>`);html+="</tr>";});
+        target.innerHTML=html+"</tbody></table>";
+      },error:(err)=>target.innerHTML=`<div class='text-danger'>読み込み失敗: ${err.message}</div>`});
+      new bootstrap.Modal(document.getElementById("csvModal")).show();
     }
 
-    async function main() {
-      await fetchRate(); // 為替レートを取得
-      Papa.parse(CSV_PATH, {
-        download: true,
-        header: true,
-        skipEmptyLines: true,
-        complete: (res) => {
-          const hasRank = res.meta.fields && res.meta.fields.includes("rank");
-          if (!hasRank) return fail("CSV 読み込み失敗（rank 列が見つかりません）");
-          const data = (res.data || []).filter(r => r && r.rank);
-          ok(`Autohome CSV 読み込み成功 ✔ (${data.length} 件)`);
-          renderTable(data);
-        },
-        error: (err) => fail("CSV 読み込みエラー: " + err.message)
-      });
+    function showStory(carId, title){
+      const path=`/output/koubei/${carId}/story.txt`;
+      const target=document.getElementById("storyContent");
+      document.getElementById("storyModalLabel").textContent=`口コミ概要（${title} | ID:${carId}）`;
+      target.textContent="読込中...";
+      fetch(path).then(res=>res.ok?res.text():Promise.reject("Not Found"))
+      .then(text=>target.textContent=text)
+      .catch(()=>target.innerHTML="<div class='text-danger'>口コミデータが見つかりません。</div>");
+      new bootstrap.Modal(document.getElementById("storyModal")).show();
     }
 
     main();
