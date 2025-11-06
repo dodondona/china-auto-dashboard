@@ -159,19 +159,33 @@ def parse_div_layout_to_wide_csv(html: str):
         cls = " ".join(node.get("class", []))
         return "style_row__" in cls
 
-    # ✅ 唯一の修正箇所（ここだけ！）
+    # ✅ 唯一の修正箇所：cell_value のみ
     def cell_value(td):
-        icons = []
-        for i_tag in td.select('[class*="style_col_dot_solid__"], [class*="style_col_dot_outline__"]'):
-            cls = " ".join(i_tag.get("class", []))
-            icons.append("●" if "solid" in cls else "○")
+        """
+        サブ行(div.style_col_sub__)ごとに ●/○＋ラベルを抽出。
+        繰り返し出力せず、改行区切りで出力。
+        """
+        subs = td.select('div[class*="style_col_sub__"]')
+        if subs:
+            lines = []
+            for sub in subs:
+                i_tag = sub.select_one('[class*="style_col_dot_solid__"], [class*="style_col_dot_outline__"]')
+                mark = "○"
+                if i_tag:
+                    cls = " ".join(i_tag.get("class", []))
+                    mark = "●" if "solid" in cls else "○"
+                label = sub.get_text(" ", strip=True).replace("●", "").replace("○", "").strip()
+                lines.append(f"{mark} {label}" if label else mark)
+            return "\n".join(lines) if lines else "–"
 
+        # フォールバック（旧ロジック）
+        is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
+        is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
         txt = norm_space(td.get_text(" ", strip=True))
-        if icons:
-            if txt:
-                return "\n".join(f"{mark} {txt}" for mark in icons)
-            else:
-                return "\n".join(icons)
+        if is_solid and not is_outline:
+            return "●" if txt in ("", "●", "○") else f"● {txt}"
+        if is_outline and not is_solid:
+            return "○" if txt in ("", "●", "○") else f"○ {txt}"
         return txt if txt else "–"
 
     records = []
@@ -251,7 +265,7 @@ def main():
                 last_err = None
                 break
             except Exception as e:
-                print(f"⚠️ page.goto failed once ({e}), retrying.")
+                print(f"⚠️ page.goto failed once ({e}), retrying...")
                 last_err = e
                 continue
 
