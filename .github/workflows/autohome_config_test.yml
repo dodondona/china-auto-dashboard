@@ -38,15 +38,18 @@ jobs:
           pip install playwright beautifulsoup4 lxml requests || true
           python -m playwright install chromium || true
 
-      # 1) 先にホームページからCSV生成
-      - name: Run config crawler
+      # 1) HTMLファイルを直接読み込んでCSV生成（●/○保持版）
+      - name: Run config parser (HTML→CSV, ●/○保持)
         run: |
           set -euo pipefail
           mkdir -p "output/autohome/${{ inputs.series_id }}"
-          python tools/autohome_config_to_csv.py --series "${{ inputs.series_id }}" || echo "No config generated"
+          python tools/autohome_config_to_csv.py \
+            --html "./c8f50295-b31b-40eb-bf47-a5c85f630d3d.htm" \
+            --csv-ja "output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}.ja.csv" \
+            || echo "No config generated"
           ls -R output || true
 
-      # 2) 生成済みCSVがある時だけ翻訳（CSV_INを明示）
+      # 2) 生成済みCSVがある時だけ翻訳（既存仕様）
       - name: Translate columns (guarded)
         env:
           SERIES_ID: ${{ inputs.series_id }}
