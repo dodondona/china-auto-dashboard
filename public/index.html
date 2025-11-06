@@ -230,18 +230,22 @@
           ? `<button class="btn btn-outline-secondary btn-sm btn-story" onclick="showStory('${carId}','${r.global_name}');">口コミ</button>`
           : "";
 
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${curRank}</td>
-          <td>${diffHtml}</td>
-          <td><img class="car-thumb" src="${imgSrc}" alt="${r.global_name}" onerror="this.style.visibility='hidden';"></td>
-          <td>${autohomeLink}</td>
-          <td>${maker}</td>
-          <td>${units}</td>
-          <td>${price}<span class="price-jpy">${priceJpy}</span></td>
-          <td>${specBtn}${storyBtn}</td>
-        `;
-        tbody.appendChild(tr);
+ const tr = document.createElement("tr");
+tr.innerHTML = `
+  <td>${curRank}</td>
+  <td>${diffHtml}</td>
+  <td><img class="car-thumb" src="${imgSrc}" alt="${r.global_name}" onerror="this.style.visibility='hidden';"></td>
+  <td>${autohomeLink}</td>
+  <td>${maker}</td>
+  <td>${units}</td>
+  <td>
+    ${price}
+    ${priceJpy ? `<span class="price-jpy">${priceJpy}</span>` : ""}
+  </td>
+  <td>${specBtn}${storyBtn}</td>
+`;
+tbody.appendChild(tr);
+
       });
     }
 
