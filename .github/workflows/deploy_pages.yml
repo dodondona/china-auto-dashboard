@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:    # 手動実行OK
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -19,18 +19,23 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
+      # ✅ output/ が空なら直近の autohome_pipeline 成功runからartifactを復元
       - name: Restore output/ from latest successful autohome_pipeline artifacts (when needed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
           if [ -d "output" ] && [ -n "$(ls -A output || true)" ]; then
             echo "✅ output/ already present. Skipping artifact restore."
             exit 0
           fi
 
           echo "ℹ️ Restoring output/ from latest successful autohome_pipeline artifacts..."
-          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
+
+          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows \
+            | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
+
           if [ -z "${WF_ID:-}" ]; then
             echo "❌ Could not find workflow 'autohome_pipeline'."
             exit 1
@@ -38,6 +43,7 @@ jobs:
 
           RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?status=success&per_page=1)
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
+
           if [ -z "${RUN_ID:-}" ] || [ "${RUN_ID}" = "null" ]; then
             echo "❌ No successful runs found for autohome_pipeline."
             exit 1
@@ -59,11 +65,12 @@ jobs:
           done
           echo "✅ Restored output/ from artifacts."
 
+      # ✅ publicディレクトリ構築＋キャッシュ無効化ヘッダ追加
       - name: Prepare public directory
         run: |
           set -euo pipefail
-          mkdir -p public/output
 
+          mkdir -p public/output
           if [ -d "output" ]; then
             echo "✅ Copying output/* → public/output/ ..."
             cp -r output/* public/output/ || true
@@ -72,14 +79,23 @@ jobs:
             exit 1
           fi
 
-          # ✅ 1行ずつechoしてヘッダ作成（ヒア構文禁止対応）
-          echo "/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate" >> public/_headers
+          # ✅ キャッシュ無効化＋CORS許可＋MIME明示
+          echo "/output/*" > public/_headers
+          echo "  Content-Type: text/plain; charset=utf-8" >> public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
+          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
+
+          # ✅ HTMLもキャッシュ無効化
+          echo "/*" >> public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
           echo "==== public directory tree ===="
           find public -type f | sort || true
+          echo "==== _headers content ===="
+          cat public/_headers
 
+      # ✅ Cloudflare Pages へデプロイ
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
