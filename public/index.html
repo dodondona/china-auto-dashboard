@@ -161,7 +161,7 @@
       download: true,
       header: true,
       skipEmptyLines: true,
-      complete: async (res) => {
+      complete: (res) => {
         const hasRank = res.meta.fields && res.meta.fields.includes("rank");
         if (!hasRank) {
           fail("CSV 読み込み失敗（rank 列が見つかりません）");
@@ -169,8 +169,11 @@
         }
         allData = res.data.filter(r => r && r.rank);
         ok(`Autohome CSV 読み込み成功 ✔ (${allData.length} 件)`);
-        await fetchExchangeRate();
-        renderTable();
+
+        // ✅ 非同期順序を保証
+        fetchExchangeRate().then(() => {
+          renderTable();
+        });
       },
       error: (err) => fail("CSV 読み込みエラー: " + err.message)
     });
@@ -207,10 +210,10 @@
         const price = r.price || "";
         const units = r.units || "";
 
-        // ✅ 日本円換算（改良版: 万元・~・万元起 すべて対応）
+        // ✅ 改良版 日本円換算
         let priceJpy = "";
         if (cnyToJpy) {
-          const cleaned = price.replace(/[^\d\.\-~～]/g, ""); // 数値と記号だけ残す
+          const cleaned = price.replace(/[^\d\.\-~～]/g, ""); // 数値＋記号のみ残す
           const nums = cleaned.match(/\d+(\.\d+)?/g);
           if (nums && nums.length > 0) {
             const yenRange = nums.map(n => Math.round(parseFloat(n) * 10000 * cnyToJpy));
