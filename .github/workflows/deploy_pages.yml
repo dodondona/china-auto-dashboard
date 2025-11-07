@@ -72,3 +72,19 @@ jobs:
             echo "⚠️ CF_ZONE_ID not set, skipping purge"
           fi
           echo "✅ Cache purge complete"
+
+      - name: Add dummy hash to force reupload
+        run: |
+          echo "Forcing content hash change..."
+          for f in $(find public -type f -name "*.csv"); do
+            echo "# FORCE_HASH=$(date +%s%N)" >> "$f"
+          done
+
+      - name: Force Deploy to Cloudflare Pages (always overwrite)
+        run: |
+          echo "🚀 Starting forced deployment to Cloudflare Pages (main branch)..."
+          npx wrangler pages deploy public \
+            --project-name=china-auto-dashboard \
+            --branch=main \
+            --commit-dirty=true
+
