@@ -163,71 +163,46 @@ def parse_div_layout_to_wide_csv(html: str):
     # 修正版 cell_value(): 改行保持 + ●/○位置そのまま
     # =========================================================
     def cell_value(td):
-        subs = td.select('div[class*="style_col_sub__"]')
-        if subs:
-            lines = []
-            for sub in subs:
-                icons = []
-                for i_tag in sub.select("i"):
-                    cls = " ".join(i_tag.get("class", []))
-                    if "solid" in cls:
-                        icons.append("●")
-                    elif "outline" in cls:
-                        icons.append("○")
-                text = sub.get_text(" ", strip=True)
-                if icons or text:
-                    line = " ".join(icons + ([text] if text else []))
-                    lines.append(line.strip())
-            return "\n".join(lines) if lines else "–"
+    subs = td.select('div[class*="style_col_sub__"]')
+    if subs:
+        lines = []
+        for sub in subs:
+            mark = "–"
+            if sub.select_one('[class*="style_col_dot_solid__"]'):
+                mark = "●"
+            elif sub.select_one('[class*="style_col_dot_outline__"]'):
+                mark = "○"
+            # ✅ div直下テキストを取得（spanではなくsub全体から）
+            label = sub.get_text(" ", strip=True)
+            label = re.sub(r"[●○]", "", label).strip()
+            lines.append(f"{mark} {label}" if label else mark)
+        return "\n".join(lines) if lines else "–"
 
-        span = td.select_one("span")
-        if span:
-            icons = []
-            for i_tag in span.select("i"):
-                cls = " ".join(i_tag.get("class", []))
-                if "solid" in cls:
-                    icons.append("●")
-                elif "outline" in cls:
-                    icons.append("○")
-            text = span.get_text(" ", strip=True)
-            if icons or text:
-                return " ".join(icons + ([text] if text else [])).strip()
-        # fallback
-        is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
-        is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
-        txt = norm_space(td.get_text(" ", strip=True))
-        if is_solid and not is_outline:
-            return "●" if txt in ("", "●", "○") else f"● {txt}"
-        if is_outline and not is_solid:
-            return "○" if txt in ("", "●", "○") else f"○ {txt}"
-        return txt if txt else "–"
+    # 以下はフォールバック（変更なし）
+    span = td.select_one("span")
+    if span:
+        parts = []
+        for node in span.children:
+            if getattr(node, "name", None) == "i":
+                cls = " ".join(node.get("class", []))
+                parts.append("●" if "solid" in cls else "○")
+            else:
+                t = str(node).strip()
+                if t:
+                    parts.append(t)
+        combined = " ".join(parts)
+        combined = re.sub(r"\s+", " ", combined)
+        return combined.strip() if combined else "–"
 
-    records = []
-    current_section = ""
-    children = [c for c in container.find_all(recursive=False) if getattr(c, "name", None)]
-    for ch in children:
-        if ch is head:
-            continue
-        if is_section_title(ch):
-            current_section = get_section_from_title(ch)
-            continue
-        if is_data_row(ch):
-            kids = [k for k in ch.find_all(recursive=False) if getattr(k, "name", None)]
-            if not kids:
-                continue
-            left = norm_space(kids[0].get_text(" ", strip=True))
-            cells = kids[1:1 + n_models]
-            if len(cells) < n_models:
-                cells = cells + [soup.new_tag("div")] * (n_models - len(cells))
-            elif len(cells) > n_models:
-                cells = cells[:n_models]
-            vals = [cell_value(td) for td in cells]
-            records.append([current_section, left] + vals)
+    is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
+    is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
+    txt = norm_space(td.get_text(" ", strip=True))
+    if is_solid and not is_outline:
+        return "●" if txt in ("", "●", "○") else f"● {txt}"
+    if is_outline and not is_solid:
+        return "○" if txt in ("", "●", "○") else f"○ {txt}"
+    return txt if txt else "–"
 
-    if not records:
-        return None
-    header = ["セクション", "項目"] + model_names
-    return [header] + records
 
 # --------------------------------
 # メイン
