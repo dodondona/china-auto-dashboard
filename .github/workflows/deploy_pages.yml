@@ -3,7 +3,12 @@ name: Deploy to Cloudflare Pages
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["autohome_pipeline"]
+    workflows:
+      - "autohome_pipeline"
+      - "autohome_config_to_csv"
+      - "autohome_pipeline_hezi"
+      - "autohome_pipeline_to_koubei"
+      - "koubei_summary"
     types: [completed]
 
 jobs:
