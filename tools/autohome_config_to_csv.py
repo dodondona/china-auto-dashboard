@@ -160,29 +160,31 @@ def parse_div_layout_to_wide_csv(html: str):
         return "style_row__" in cls
 
     # =========================================================
-    # 改良版 cell_value(): 改行を保持 + ●○の位置そのまま
+    # ここだけ修正：cell_value(td)
+    #   1) サブ行(div.style_col_sub__)がある場合は各行を「記号+ラベル」で改行連結
+    #   2) サブ行が無い場合は <span> の子ノード順に <i> とテキストを逐次結合
+    #   3) それ以外は従来ロジックにフォールバック
     # =========================================================
     def cell_value(td):
+        """
+        改修点のみ：サブ行(div.style_col_sub__)優先、なければ<span>内の子ノード順で<i>とテキストを逐次結合。
+        それ以外は元ロジックにフォールバック。余計な変更なし。
+        """
+        # サブ行がある場合は各行を「記号＋ラベル」で改行連結
         subs = td.select('div[class*="style_col_sub__"]')
         if subs:
             lines = []
             for sub in subs:
-                span = sub.select_one("span")
-                parts = []
-                if span:
-                    for node in span.children:
-                        if getattr(node, "name", None) == "i":
-                            cls = " ".join(node.get("class", []))
-                            parts.append("●" if "solid" in cls else "○")
-                        else:
-                            t = node.get_text(strip=True) if hasattr(node, "get_text") else str(node).strip()
-                            if t:
-                                parts.append(t)
-                label = " ".join(parts).strip()
-                if label:
-                    lines.append(label)
+                i_tag = sub.select_one('[class*="style_col_dot_solid__"], [class*="style_col_dot_outline__"]')
+                mark = "○"
+                if i_tag:
+                    cls = " ".join(i_tag.get("class", []))
+                    mark = "●" if "solid" in cls else "○"
+                label = sub.get_text(" ", strip=True).replace("●","").replace("○","").strip()
+                lines.append(f"{mark} {label}" if label else mark)
             return "\n".join(lines) if lines else "–"
 
+        # サブ行がない場合：<span>直下の子ノード順に<i>とテキストを並べる
         span = td.select_one("span")
         if span:
             parts = []
@@ -191,13 +193,14 @@ def parse_div_layout_to_wide_csv(html: str):
                     cls = " ".join(node.get("class", []))
                     parts.append("●" if "solid" in cls else "○")
                 else:
-                    t = node.get_text(strip=True) if hasattr(node, "get_text") else str(node).strip()
+                    t = str(node).strip()
                     if t:
                         parts.append(t)
             combined = " ".join(parts)
             combined = re.sub(r"\s+", " ", combined)
             return combined.strip() if combined else "–"
 
+        # フォールバック（旧ロジック）
         is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
         is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
         txt = norm_space(td.get_text(" ", strip=True))
