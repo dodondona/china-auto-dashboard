@@ -2,7 +2,8 @@ name: Deploy to Cloudflare Pages
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - "output/**"
   workflow_dispatch:
@@ -22,38 +23,19 @@ jobs:
       - name: Copy output to public
         run: cp -r output/* public/output/
 
-      - name: _headers: /output/*
-        run: echo "/output/*" > public/_headers
-
-      - name: _headers: cache
-        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-
-      - name: _headers: CORS origin
-        run: echo "  Access-Control-Allow-Origin: *" >> public/_headers
-
-      - name: _headers: CORS methods
-        run: echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-
-      - name: _headers: pipeline path
-        run: echo "/output/pipeline/*" >> public/_headers
-
-      - name: _headers: pipeline csv content-type
-        run: echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers
-
-      - name: _headers: pipeline cache
-        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-
-      - name: _headers: pipeline CORS origin
-        run: echo "  Access-Control-Allow-Origin: *" >> public/_headers
-
-      - name: _headers: pipeline CORS methods
-        run: echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-
-      - name: _headers: global no-cache
-        run: echo "/*" >> public/_headers
-
-      - name: _headers: global rule
-        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+      - name: Create headers file
+        run: |
+          echo "/output/*" > public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers
+          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
+          echo "/output/pipeline/*" >> public/_headers
+          echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers
+          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
+          echo "/*" >> public/_headers
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
@@ -63,5 +45,10 @@ jobs:
           projectName: "china-auto-dashboard"
           directory: "public"
 
-      - name: Purge Cloudflare Cache (skip if no zone id)
-        run: if [ -n "${{ secrets.CF_ZONE_ID }}" ]; then curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" -H "Content-Type: application/json" --data '{"purge_everything":true}'; else echo "CF_ZONE_ID not set; skipping purge"; fi
+      - name: Purge Cloudflare Cache
+        if: ${{ secrets.CF_ZONE_ID != '' }}
+        run: |
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'
