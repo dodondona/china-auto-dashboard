@@ -1,20 +1,21 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>China Auto Dashboard</title>
-  <link rel="icon" href="https://img.icons8.com/emoji/48/automobile.png">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="icon" href="https://img.icons8.com/emoji/48/automobile.png" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <style>
     body { background-color: #f8f9fa; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif; }
-    header { background: #0d6efd; color: white; padding: 12px; text-align: center; font-size: 1.3rem; font-weight: bold; }
+    header { background: #0d6efd; color: #fff; padding: 12px; text-align: center; font-size: 1.3rem; font-weight: 700; }
     th { background-color: #f1f3f5; }
     .rank-up { color: #dc3545; font-weight: bold; }
     .rank-down { color: #0d6efd; font-weight: bold; }
-    .maker-tab { margin: 3px; }
-    img.car-thumb { width: 80px; border-radius: 6px; }
+    img.car-thumb { width: 80px; height: 60px; object-fit: cover; border-radius: 6px; background:#eee; }
+    .price-jpy { font-size: 0.85rem; color: #6c757d; }
+    .btn-spec, .btn-story { font-size: 0.8rem; padding: 2px 6px; margin: 2px; }
   </style>
 </head>
 <body>
@@ -22,19 +23,19 @@
 
   <div class="container mt-3">
     <div id="status" class="alert alert-info py-2">Autohome CSV 読み込み中...</div>
-    <div id="makerTabs" class="mb-3 text-center"></div>
 
     <div class="table-responsive">
       <table class="table table-striped table-hover align-middle" id="carTable">
         <thead>
           <tr>
-            <th>順位</th>
-            <th>変動</th>
-            <th>画像</th>
+            <th style="width:80px">順位</th>
+            <th style="width:80px">変動</th>
+            <th style="width:100px">画像</th>
             <th>車名</th>
             <th>メーカー</th>
-            <th>台数</th>
-            <th>価格</th>
+            <th style="width:110px">台数</th>
+            <th style="width:160px">価格</th>
+            <th style="width:100px">情報</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -42,128 +43,145 @@
     </div>
   </div>
 
+  <!-- モーダル -->
+  <div class="modal fade" id="csvModal" tabindex="-1" aria-labelledby="csvModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="csvModalLabel">車両仕様</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <div id="csvContent" class="table-responsive"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="storyModal" tabindex="-1" aria-labelledby="storyModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="storyModalLabel">口コミ概要</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="閉じる"></button>
+        </div>
+        <div class="modal-body">
+          <div id="storyContent">読込中...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
   <script>
-    const CSV_FILE = "autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv";
+    const CSV_PATH = "/output/pipeline/autohome-ranking-csvs/autohome_ranking_with_image_urls_with_maker_with_maker_ja.csv?v=" + Date.now();
+    const IMG_BASE = "/output/pipeline/autohome-ranking-images/autohome_images/";
+    let cnyToJpy = 20;
 
-    // output配下の候補ディレクトリを順に試す
-    const CSV_CANDIDATES = [
-      "./output/pipeline/autohome-ranking-csvs/" + CSV_FILE,
-      "./output/autohome/18/" + CSV_FILE,
-      "./output/autohome/17/" + CSV_FILE,
-      "./output/autohome/" + CSV_FILE,
-      "./output/" + CSV_FILE
-    ];
-
-    async function testCsv(url) {
+    async function fetchRate() {
       try {
-        const res = await fetch(url + "?v=" + Date.now(), { cache: "no-store" });
-        if (!res.ok) return false;
-        const text = await res.text();
-        return text.includes("rank,") || text.startsWith("rank,");
-      } catch {
-        return false;
-      }
+        const res = await fetch("https://api.exchangerate.host/latest?base=CNY&symbols=JPY");
+        const data = await res.json();
+        if (data?.rates?.JPY) cnyToJpy = data.rates.JPY;
+      } catch { cnyToJpy = 20; }
     }
 
-    async function findValidCsv() {
-      for (const url of CSV_CANDIDATES) {
-        if (await testCsv(url)) return url;
-      }
-      return null;
+    function convertToJPY(priceStr) {
+      if (!priceStr) return "";
+      const match = priceStr.match(/([\d.]+)-([\d.]+)万/);
+      if (!match) return "";
+      const low = parseFloat(match[1]) * cnyToJpy * 10000;
+      const high = parseFloat(match[2]) * cnyToJpy * 10000;
+      const fmt = (x) => (x / 10000).toFixed(1);
+      return `（約${fmt(low)}〜${fmt(high)}万円）`;
     }
 
-    function sanitizeFileName(str) {
-      return String(str ?? "").replace(/[\\/:*?"<>| ]/g, "_");
+    function imgTag(rankStr, model, imageUrl) {
+      let fullPath = imageUrl && imageUrl.startsWith("/autohome_images/")
+        ? "/output/pipeline/autohome-ranking-images" + imageUrl
+        : (imageUrl || `${IMG_BASE}${rankStr}_${model}.png`);
+      return `<img class="car-thumb" src="${fullPath}" alt="${model}" onerror="this.style.visibility='hidden';" />`;
     }
 
-    function renderMakerTabs() {
-      const makers = [...new Set(allData.map(r => r.manufacturer_ja || r.manufacturer))].filter(Boolean);
-      const div = document.getElementById("makerTabs");
-      div.innerHTML = "";
-      const allBtn = document.createElement("button");
-      allBtn.className = "btn btn-primary btn-sm maker-tab";
-      allBtn.innerText = "全メーカー";
-      allBtn.onclick = () => renderTable();
-      div.appendChild(allBtn);
-      makers.forEach(m => {
-        const btn = document.createElement("button");
-        btn.className = "btn btn-outline-primary btn-sm maker-tab";
-        btn.innerText = m;
-        btn.onclick = () => renderTable(m);
-        div.appendChild(btn);
+    async function main() {
+      await fetchRate();
+      Papa.parse(CSV_PATH, {
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: (res) => {
+          if (!res.meta.fields?.includes("rank")) return fail("CSV 読み込み失敗（rank 列が見つかりません）");
+          renderTable(res.data.filter(r => r && r.rank));
+          ok(`Autohome CSV 読み込み成功 ✔ (${res.data.length} 件)`);
+        },
+        error: (err) => fail("CSV 読み込みエラー: " + err.message)
       });
     }
 
-    function renderTable(filterMaker = null) {
+    function renderTable(data) {
       const tbody = document.querySelector("#carTable tbody");
       tbody.innerHTML = "";
-      const filtered = filterMaker
-        ? allData.filter(r => (r.manufacturer_ja || r.manufacturer) === filterMaker)
-        : allData;
+      data.forEach(r => {
+        const rankStr = String(r.rank).padStart(3, "0");
+        const diff = Number(r.delta_vs_last_month || 0);
+        const diffHtml = diff > 0 ? `<span class="rank-up">▲${diff}</span>` : diff < 0 ? `<span class="rank-down">▼${-diff}</span>` : "–";
+        const link = r.link || "";
+        const carId = link.match(/(\d+)/)?.[1] || "";
+        const name = r.global_name || r.name || "";
+        const price = (r.price || "") + " 元";
+        const priceJPY = convertToJPY(r.price || "");
+        const maker = r.manufacturer_ja || r.manufacturer || "";
+        const units = r.units || "";
 
-      filtered.forEach(r => {
-        const rank = r.rank.padStart(3, "0");
-        const last = r.rank_last;
-        const diff = last && !isNaN(last) ? last - rank : 0;
-        const diffTxt = diff > 0 ? `<span class='rank-up'>▲${diff}</span>`
-                        : diff < 0 ? `<span class='rank-down'>▼${-diff}</span>` : "–";
-
-        const localImgPath = `${IMG_BASE}${rank}_${sanitizeFileName(r.model)}.png`;
-        const img = `<img src="${localImgPath}" class="car-thumb" alt="${r.model}" onerror="this.style.display='none'">`;
-        const link = r.series_url ? `<a href="${r.series_url}" target="_blank">${r.model}</a>` : r.model;
+        const specBtn = carId ? `<button class="btn btn-outline-primary btn-sm btn-spec" onclick="showConfigCsv('${carId}','${name}');">仕様</button>` : "";
+        const storyBtn = carId ? `<button class="btn btn-outline-secondary btn-sm btn-story" onclick="showStory('${carId}','${name}');">口コミ</button>` : "";
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${r.rank}</td>
-          <td>${diffTxt}</td>
-          <td>${img}</td>
-          <td>${link}</td>
-          <td>${r.manufacturer_ja || r.manufacturer}</td>
-          <td>${r.sales}</td>
-          <td>${r.price}</td>
+          <td>${diffHtml}</td>
+          <td>${imgTag(rankStr, name, r.image_url)}</td>
+          <td><a href="${link}" target="_blank" rel="noopener">${name}</a></td>
+          <td>${maker}</td>
+          <td>${units}</td>
+          <td>${price}<br><span class="price-jpy">${priceJPY}</span></td>
+          <td>${specBtn}${storyBtn}</td>
         `;
         tbody.appendChild(tr);
       });
     }
 
-    let allData = [];
-    let IMG_BASE = "./output/pipeline/autohome-ranking-images/autohome_images/";
+    function ok(msg){const s=document.getElementById("status");s.className="alert alert-success py-2";s.textContent=msg;}
+    function fail(msg){const s=document.getElementById("status");s.className="alert alert-danger py-2";s.textContent=msg;}
 
-    (async () => {
-      const csvPath = await findValidCsv();
-      if (!csvPath) {
-        document.getElementById("status").className = "alert alert-danger py-2";
-        document.getElementById("status").innerText = "CSVが見つかりません（output配下を探索しました）";
-        console.error("❌ CSV not found:", CSV_CANDIDATES);
-        return;
-      }
+    function showConfigCsv(carId, title){
+      const path=`/output/autohome/${carId}/config_${carId}.ja.csv`;
+      const target=document.getElementById("csvContent");
+      document.getElementById("csvModalLabel").textContent=`車両仕様（${title} | ID:${carId}）`;
+      target.innerHTML="読込中...";
+      Papa.parse(path,{download:true,header:true,complete:(res)=>{
+        if(!res.data?.length){target.innerHTML="<div class='text-danger'>CSVが空、または存在しません。</div>";return;}
+        let html="<table class='table table-bordered table-sm'><thead><tr>";
+        res.meta.fields.forEach(f=>html+=`<th>${f}</th>`);html+="</tr></thead><tbody>";
+        res.data.forEach(row=>{html+="<tr>";res.meta.fields.forEach(f=>html+=`<td>${row[f]??""}</td>`);html+="</tr>";});
+        target.innerHTML=html+"</tbody></table>";
+      },error:(err)=>target.innerHTML=`<div class='text-danger'>読み込み失敗: ${err.message}</div>`});
+      new bootstrap.Modal(document.getElementById("csvModal")).show();
+    }
 
-      // CSVの階層に応じて画像ベースを決定
-      if (csvPath.includes("/autohome/18/")) {
-        IMG_BASE = "./output/autohome/18/autohome_images/";
-      } else if (csvPath.includes("/autohome/17/")) {
-        IMG_BASE = "./output/autohome/17/autohome_images/";
-      }
+    function showStory(carId, title){
+      const path=`/output/koubei/${carId}/story.txt`;
+      const target=document.getElementById("storyContent");
+      document.getElementById("storyModalLabel").textContent=`口コミ概要（${title} | ID:${carId}）`;
+      target.textContent="読込中...";
+      fetch(path).then(res=>res.ok?res.text():Promise.reject("Not Found"))
+      .then(text=>target.textContent=text)
+      .catch(()=>target.innerHTML="<div class='text-danger'>口コミデータが見つかりません。</div>");
+      new bootstrap.Modal(document.getElementById("storyModal")).show();
+    }
 
-      console.log("✅ Using CSV:", csvPath);
-      console.log("✅ Using IMG_BASE:", IMG_BASE);
-
-      Papa.parse(csvPath + "?v=" + Date.now(), {
-        download: true,
-        header: true,
-        complete: function(results) {
-          allData = results.data.filter(r => r.rank);
-          document.getElementById("status").className = "alert alert-success py-2";
-          document.getElementById("status").innerText = "Autohome CSV 読み込み成功 ✔";
-          renderMakerTabs();
-          renderTable();
-        },
-        error: function(err) {
-          document.getElementById("status").className = "alert alert-danger py-2";
-          document.getElementById("status").innerText = "CSV読み込みエラー: " + err.message;
-        }
-      });
-    })();
+    main();
   </script>
 </body>
 </html>
