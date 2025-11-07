@@ -9,9 +9,9 @@ from tqdm import tqdm
 # -------------------------------
 # 設定
 # -------------------------------
-series_id = sys.argv[1] if len(sys.argv) > 1 else None
+series_id = os.environ.get("SERIES_ID")
 if not series_id:
-    raise SystemExit("Usage: translate_columns.py <series_id>")
+    raise SystemExit("環境変数 SERIES_ID が設定されていません。")
 
 SRC = Path(f"output/autohome/{series_id}/config_{series_id}.csv")
 DST_PRIMARY = SRC.with_name(f"config_{series_id}.ja.csv")
