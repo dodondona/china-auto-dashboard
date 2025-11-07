@@ -1,11 +1,11 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
       - "output/**"
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -16,19 +16,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare public directory
-        run: >
-          set -euo pipefail &&
-          mkdir -p public/output &&
-          cp -r output/* public/output/ &&
-          echo "/output/*" > public/_headers &&
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers &&
-          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers &&
-          echo "/output/pipeline/*" >> public/_headers &&
-          echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers
+      - name: Make public dir
+        run: mkdir -p public/output
 
-      # 🚨 wrangler のキャッシュを無効化して強制再アップロード
+      - name: Copy output to public
+        run: cp -r output/* public/output/
+
+      - name: Create _headers (base)
+        run: echo "/output/*" > public/_headers
+
+      - name: Add cache and CORS
+        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+
+      - name: Add CORS origin
+        run: echo "  Access-Control-Allow-Origin: *" >> public/_headers
+
+      - name: Add CORS methods
+        run: echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
+
+      - name: CSV under pipeline as text/csv
+        run: echo "/output/pipeline/*" >> public/_headers
+
+      - name: Force CSV content-type
+        run: echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers
+
+      - name: No-cache for pipeline too
+        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+
+      - name: CORS for pipeline
+        run: echo "  Access-Control-Allow-Origin: *" >> public/_headers
+
+      - name: CORS methods for pipeline
+        run: echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
+
+      - name: Global no-cache
+        run: echo "/*" >> public/_headers
+
+      - name: Global no-cache rule
+        run: echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+
       - name: Publish to Cloudflare Pages (force upload)
         uses: cloudflare/pages-action@v1
         with:
@@ -39,10 +65,6 @@ jobs:
           wranglerVersion: "3"
           args: "--commit-dirty=true --log-level=debug"
 
-      - name: Purge Cloudflare Cache
+      - name: Purge Cloudflare Cache (optional)
         if: ${{ secrets.CF_ZONE_ID != '' }}
-        run: >
-          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache"
-          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}"
-          -H "Content-Type: application/json"
-          --data '{"purge_everything":true}'
+        run: curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" -H "Content-Type: application/json" --data '{"purge_everything":true}'
