@@ -1,14 +1,6 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  # ✅ mainブランチの output/ 配下に変更があったら自動デプロイ
-  push:
-    branches:
-      - main
-    paths:
-      - "output/**"
-
-  # ✅ 手動でも実行可能
   workflow_dispatch:
 
 jobs:
@@ -21,27 +13,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Debug: show changed files
-        run: |
-          echo "Files changed in this commit:"
-          git diff --name-only HEAD^ HEAD | grep '^output/' || echo "No output changes detected"
-
       - name: Prepare public directory
-        run: |
-          set -euo pipefail
-          mkdir -p public
-          echo "✅ Copying output → public/output/"
-          cp -r output public/output
-
-          # ✅ キャッシュとCORS設定
-          echo "/output/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers
-          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-          echo "/*" >> public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-
-          echo "==== public directory tree ===="
+        run: >
+          set -euo pipefail &&
+          mkdir -p public &&
+          echo "✅ Copying output → public/output/" &&
+          cp -r output public/output &&
+          echo "/output/*" > public/_headers &&
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers &&
+          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers &&
+          echo "/*" >> public/_headers &&
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
+          echo "==== public directory tree ====" &&
           find public -type f | sort || true
 
       - name: Publish to Cloudflare Pages
@@ -53,8 +37,8 @@ jobs:
           directory: "public"
 
       - name: Purge Cloudflare Cache
-        run: |
-          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
-            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}'
+        run: >
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache"
+          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}"
+          -H "Content-Type: application/json"
+          --data '{"purge_everything":true}'
