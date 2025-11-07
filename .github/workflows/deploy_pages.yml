@@ -1,6 +1,14 @@
 name: Deploy to Cloudflare Pages
 
 on:
+  # outputフォルダに変更があったら自動で反映
+  push:
+    branches:
+      - main
+    paths:
+      - "output/**"
+
+  # 手動実行も可能
   workflow_dispatch:
 
 jobs:
@@ -8,15 +16,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout main branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Debug check output
+        run: >
+          echo "==== Latest commit affecting output/ ====" &&
+          git log -1 --oneline output || true &&
+          echo "==== output directory tree ====" &&
+          find output -type f | sort || echo "No files found"
 
       - name: Prepare public directory
         run: >
           set -euo pipefail &&
           mkdir -p public/output &&
+          echo "✅ Copying output → public/output" &&
           cp -r output/* public/output/ &&
           echo "/output/*" > public/_headers &&
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
@@ -42,7 +58,11 @@ jobs:
 
       - name: Purge Cloudflare Cache
         run: >
-          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache"
-          -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}"
-          -H "Content-Type: application/json"
-          --data '{"purge_everything":true}'
+          if [ -n "${{ secrets.CF_ZONE_ID }}" ]; then
+            curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache"
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}"
+            -H "Content-Type: application/json"
+            --data '{"purge_everything":true}';
+          else
+            echo "⚠️ CF_ZONE_ID not set; skipping purge";
+          fi
