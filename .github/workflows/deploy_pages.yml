@@ -1,15 +1,15 @@
 name: Deploy to Cloudflare Pages
 
 on:
+  # ✅ mainブランチの output/ 配下に変更があったら自動デプロイ
+  push:
+    branches:
+      - main
+    paths:
+      - "output/**"
+
+  # ✅ 手動でも実行可能
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - "autohome_pipeline"
-      - "autohome_config_to_csv"
-      - "autohome_pipeline_hezi"
-      - "autohome_pipeline_to_koubei"
-      - "koubei_summary"
-    types: [completed]
 
 jobs:
   deploy:
@@ -18,15 +18,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Debug: show changed files
+        run: |
+          echo "Files changed in this commit:"
+          git diff --name-only HEAD^ HEAD | grep '^output/' || echo "No output changes detected"
 
       - name: Prepare public directory
         run: |
           set -euo pipefail
           mkdir -p public
-          echo "✅ Copying output → public/"
+          echo "✅ Copying output → public/output/"
           cp -r output public/output
 
-          # ✅ キャッシュ無効化とCORS許可
+          # ✅ キャッシュとCORS設定
           echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
@@ -44,3 +51,10 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           projectName: "china-auto-dashboard"
           directory: "public"
+
+      - name: Purge Cloudflare Cache
+        run: |
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'
