@@ -120,7 +120,6 @@ def parse_div_layout_to_wide_csv(html: str):
         return None
 
     head_cells = [c for c in head.find_all(recursive=False) if getattr(c, "name", None)]
-
     def clean_model_name(t):
         t = norm_space(t)
         t = re.sub(r"^\s*钉在左侧\s*", "", t)
@@ -160,21 +159,17 @@ def parse_div_layout_to_wide_csv(html: str):
         cls = " ".join(node.get("class", []))
         return "style_row__" in cls
 
-    # =========================================================
-    # 唯一の修正点：cell_value() 内で改行を付与
-    # =========================================================
     def cell_value(td):
         subs = td.select('div[class*="style_col_sub__"]')
         if subs:
             lines = []
             for sub in subs:
-                mark = "–"
-                if sub.select_one('[class*="style_col_dot_solid__"]'):
-                    mark = "●"
-                elif sub.select_one('[class*="style_col_dot_outline__"]'):
-                    mark = "○"
-                label = sub.get_text(" ", strip=True)
-                label = re.sub(r"[●○]", "", label).strip()
+                i_tag = sub.select_one('[class*="style_col_dot_solid__"], [class*="style_col_dot_outline__"]')
+                mark = "○"
+                if i_tag:
+                    cls = " ".join(i_tag.get("class", []))
+                    mark = "●" if "solid" in cls else "○"
+                label = sub.get_text(" ", strip=True).replace("●","").replace("○","").strip()
                 lines.append(f"{mark} {label}" if label else mark)
             return "\n".join(lines) if lines else "–"
 
@@ -190,7 +185,8 @@ def parse_div_layout_to_wide_csv(html: str):
                     if t:
                         parts.append(t)
             combined = " ".join(parts)
-            return re.sub(r"\s+", " ", combined).strip() if combined else "–"
+            combined = re.sub(r"\s+", " ", combined)
+            return combined.strip() if combined else "–"
 
         is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
         is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
