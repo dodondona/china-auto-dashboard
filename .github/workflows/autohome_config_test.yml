@@ -92,3 +92,16 @@ jobs:
             output/autohome/${{ inputs.series_id }}/config_${{ inputs.series_id }}_ja.csv
             cache/${{ inputs.series_id }}/
           if-no-files-found: warn
+
+      - name: Commit and push latest output
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output
+          if git diff --cached --quiet; then
+            echo "No changes in output, skip commit."
+          else
+            git commit -m "Update output from autohome_config_test"
+            git push origin main
+          fi
