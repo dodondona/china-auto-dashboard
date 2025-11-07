@@ -1,7 +1,7 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  workflow_dispatch:    # 手動実行OK
+  workflow_dispatch:
   workflow_run:
     workflows: ["autohome_pipeline"]
     types: [completed]
@@ -19,7 +19,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
-      # ✅ output/ が空なら直近の autohome_pipeline 成功runからartifactを復元
+      # ✅ output/ が空なら最新の autohome_pipeline 成功runからartifactを復元
       - name: Restore output/ from latest successful autohome_pipeline artifacts (when needed)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -32,18 +32,14 @@ jobs:
           fi
 
           echo "ℹ️ Restoring output/ from latest successful autohome_pipeline artifacts..."
-
-          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows \
-            | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
-
+          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
           if [ -z "${WF_ID:-}" ]; then
             echo "❌ Could not find workflow 'autohome_pipeline'."
             exit 1
           fi
 
-          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?status=success&per_page=1)
+          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
           RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
-
           if [ -z "${RUN_ID:-}" ] || [ "${RUN_ID}" = "null" ]; then
             echo "❌ No successful runs found for autohome_pipeline."
             exit 1
@@ -70,14 +66,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p public/output
-          if [ -d "output" ]; then
-            echo "✅ Copying output/* → public/output/ ..."
-            cp -r output/* public/ || true
-          else
-            echo "❌ output/ directory not found even after restore."
-            exit 1
-          fi
+          mkdir -p public
+          echo "✅ Copying output/* → public/output/ ..."
+          cp -r output public/output/   # ← これがポイント！ outputを直下に入れる
 
           # ✅ キャッシュ無効化＋CORS許可＋MIME明示
           echo "/output/*" > public/_headers
