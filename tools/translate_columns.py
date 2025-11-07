@@ -9,9 +9,13 @@ from tqdm import tqdm
 # -------------------------------
 # 設定
 # -------------------------------
-SRC = Path(sys.argv[1])
-DST_PRIMARY = SRC.with_name(SRC.stem + ".ja.csv")
-DST_SECONDARY = SRC.with_name(SRC.stem + ".ja2.csv")
+series_id = sys.argv[1] if len(sys.argv) > 1 else None
+if not series_id:
+    raise SystemExit("Usage: translate_columns.py <series_id>")
+
+SRC = Path(f"output/autohome/{series_id}/config_{series_id}.csv")
+DST_PRIMARY = SRC.with_name(f"config_{series_id}.ja.csv")
+DST_SECONDARY = SRC.with_name(f"config_{series_id}.ja2.csv")
 
 DICT_PATH = Path(".github/translate_dict/columns_dict.json")
 PRICE_PATTERN = re.compile(r"([\d.]+)\s*[万千元]+")
