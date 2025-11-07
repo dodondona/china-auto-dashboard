@@ -19,33 +19,35 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
-      - name: Restore output from latest successful artifacts
+      - name: Restore latest output artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          echo "🔍 Searching for latest successful workflow run with output artifacts..."
+          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
+          if [ -z "$WF_ID" ]; then
+            echo "❌ autohome_pipeline not found"
+            exit 1
+          fi
+
+          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=10)
+          RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[].id' | head -n1)
+          if [ -z "$RUN_ID" ]; then
+            echo "❌ No successful runs found"
+            exit 1
+          fi
+          echo "✅ Using run_id=$RUN_ID"
+
           mkdir -p output
-          WORKFLOWS=("autohome_pipeline" "autohome_config_to_csv" "autohome_pipeline_to_koubei")
-          for WF in "${WORKFLOWS[@]}"; do
-            WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r ".workflows[] | select(.name==\"$WF\") | .id" | head -n1)
-            if [ -z "$WF_ID" ]; then
-              continue
-            fi
-            RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
-            RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
-            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-              continue
-            fi
-            ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
-            COUNT=$(echo "$ART_JSON" | jq '.artifacts | length')
-            if [ "$COUNT" -eq 0 ]; then
-              continue
-            fi
-            echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
-              gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$WF-$NAME.zip"
-              unzip -o "$WF-$NAME.zip" -d output/
-            done
+          ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
+          echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
+            echo "⬇️ Downloading artifact: $NAME (id=$ID)"
+            gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$NAME.zip"
+            unzip -o "$NAME.zip" -d output/
           done
+          echo "✅ Restored output/ successfully."
 
       - name: Prepare public directory
         run: |
