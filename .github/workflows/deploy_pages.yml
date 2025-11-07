@@ -19,53 +19,48 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
-      - name: Restore latest output artifacts
+      - name: Restore latest output
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
-          echo "🔍 Searching for latest successful workflow run with output artifacts..."
           WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
-          if [ -z "$WF_ID" ]; then
-            echo "❌ autohome_pipeline not found"
-            exit 1
-          fi
-
-          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=10)
-          RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[].id' | head -n1)
-          if [ -z "$RUN_ID" ]; then
-            echo "❌ No successful runs found"
-            exit 1
-          fi
-          echo "✅ Using run_id=$RUN_ID"
-
+          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
+          RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
           mkdir -p output
           ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
           echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
-            echo "⬇️ Downloading artifact: $NAME (id=$ID)"
             gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$NAME.zip"
             unzip -o "$NAME.zip" -d output/
           done
-          echo "✅ Restored output/ successfully."
 
-      - name: Prepare public directory
+      - name: Prepare public directory (force new hash)
         run: |
           set -euo pipefail
           mkdir -p public
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "🔁 Using hash: $COMMIT_HASH"
+
+          # output以下をそのままコピーしつつ、強制的に更新扱いにする
           cp -r output public/output/
+          find public/output -type f -exec touch {} \;
+
+          # 空ファイルにcommitハッシュを入れて、Cloudflareのデプロイ識別を更新
+          echo "$COMMIT_HASH" > public/_force_refresh_$COMMIT_HASH.txt
+
+          # cache無効ヘッダー
           echo "/output/*" > public/_headers
-          echo "  Content-Type: text/plain; charset=utf-8" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
           echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
-      - name: Publish to Cloudflare Pages
+      - name: Publish to Cloudflare Pages (force upload)
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           projectName: "china-auto-dashboard"
           directory: "public"
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
