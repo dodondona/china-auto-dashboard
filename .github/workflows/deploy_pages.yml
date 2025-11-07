@@ -40,15 +40,10 @@ jobs:
           mkdir -p public
           COMMIT_HASH=$(git rev-parse --short HEAD)
           echo "🔁 Using hash: $COMMIT_HASH"
-
-          # output以下をそのままコピーしつつ、強制的に更新扱いにする
           cp -r output public/output/
           find public/output -type f -exec touch {} \;
-
-          # 空ファイルにcommitハッシュを入れて、Cloudflareのデプロイ識別を更新
           echo "$COMMIT_HASH" > public/_force_refresh_$COMMIT_HASH.txt
 
-          # cache無効ヘッダー
           echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
@@ -56,11 +51,10 @@ jobs:
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
-      - name: Publish to Cloudflare Pages (force upload)
+      - name: Publish to Cloudflare Pages (no GitHub Deployment API)
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           projectName: "china-auto-dashboard"
           directory: "public"
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
