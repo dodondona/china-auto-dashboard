@@ -16,10 +16,14 @@ jobs:
       - name: Prepare public directory
         run: >
           set -euo pipefail &&
-          mkdir -p public &&
-          echo "✅ Copying output → public/output/" &&
-          cp -r output public/output &&
+          mkdir -p public/output &&
+          cp -r output/* public/output/ &&
           echo "/output/*" > public/_headers &&
+          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
+          echo "  Access-Control-Allow-Origin: *" >> public/_headers &&
+          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers &&
+          echo "/output/pipeline/*" >> public/_headers &&
+          echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers &&
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers &&
           echo "  Access-Control-Allow-Origin: *" >> public/_headers &&
           echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers &&
