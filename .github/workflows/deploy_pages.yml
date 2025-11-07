@@ -73,7 +73,7 @@ jobs:
           mkdir -p public/output
           if [ -d "output" ]; then
             echo "✅ Copying output/* → public/output/ ..."
-            cp -r output/* public/output/ || true
+            cp -r output/* public/ || true
           else
             echo "❌ output/ directory not found even after restore."
             exit 1
