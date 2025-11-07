@@ -24,10 +24,8 @@ jobs:
         run: |
           set -e
           mkdir -p public/output
-          echo "✅ Copying output → public/output/"
           cp -r output/* public/output/ || true
 
-          # no-store headers (disable caching)
           echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
@@ -45,8 +43,13 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           projectName: "china-auto-dashboard"
           directory: "public"
-          branch: "main"   # ← 本番URLに即反映
-          args: "--commit-dirty=true"
+          branch: "main"
+          wranglerVersion: "3"
+
+      - name: Force dirty commit warning silence
+        run: |
+          echo "Force reupload by touching files..."
+          find public -type f -exec touch {} +
 
       - name: Purge Cloudflare Cache
         if: always()
@@ -55,8 +58,12 @@ jobs:
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
         run: |
           echo "🧹 Purging Cloudflare cache..."
-          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-            -H "Authorization: Bearer ${CF_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}' || true
+          if [ -n "${CF_ZONE_ID}" ]; then
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data '{"purge_everything":true}'
+          else
+            echo "⚠️ CF_ZONE_ID not set, skipping purge"
+          fi
           echo "✅ Cache purge complete"
