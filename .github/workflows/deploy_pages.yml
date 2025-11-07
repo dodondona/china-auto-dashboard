@@ -1,41 +1,42 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "output/**"
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - autohome_pipeline
+      - autohome_config_test
+      - autohome_config_to_csv
+      - autohome_pipeline_hezi
+      - autohome_pipeline_to_koubei
+      - koubei_summary
+    types: [completed]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Make public dir
-        run: mkdir -p public/output
-
-      - name: Copy output to public
-        run: cp -r output/* public/output/
-
-      - name: Create headers file
+      - name: Prepare public directory
         run: |
+          set -e
+          mkdir -p public/output
+          echo "✅ Copying output → public/output/"
+          cp -r output/* public/output/ || true
+
+          # no-store headers (disable caching)
           echo "/output/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers
-          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-          echo "/output/pipeline/*" >> public/_headers
-          echo "  Content-Type: text/csv; charset=utf-8" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
           echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
+
+          echo "==== public directory tree ===="
+          find public -type f | sort || true
 
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
@@ -44,19 +45,18 @@ jobs:
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           projectName: "china-auto-dashboard"
           directory: "public"
+          branch: "main"   # ← 本番URLに即反映
+          args: "--commit-dirty=true"
 
-      # ✅ secretsをifで参照せず、bashで安全に判定
       - name: Purge Cloudflare Cache
-        run: |
-          if [ -n "${CF_ZONE_ID}" ]; then
-            echo "Purging Cloudflare cache..."
-            curl -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-              -H "Authorization: Bearer ${CF_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data '{"purge_everything":true}'
-          else
-            echo "CF_ZONE_ID not set; skipping purge."
-          fi
+        if: always()
         env:
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+        run: |
+          echo "🧹 Purging Cloudflare cache..."
+          curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' || true
+          echo "✅ Cache purge complete"
