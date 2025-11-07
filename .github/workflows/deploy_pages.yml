@@ -14,79 +14,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps (gh, jq, unzip)
+      - name: Install deps
         run: |
           sudo apt-get update -y
           sudo apt-get install -y gh jq unzip
 
-      # ✅ output/ が空なら最新の autohome_pipeline 成功runからartifactを復元
-      - name: Restore output/ from latest successful autohome_pipeline artifacts (when needed)
+      - name: Restore output from latest successful artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [ -d "output" ] && [ -n "$(ls -A output || true)" ]; then
-            echo "✅ output/ already present. Skipping artifact restore."
-            exit 0
-          fi
-
-          echo "ℹ️ Restoring output/ from latest successful autohome_pipeline artifacts..."
-          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
-          if [ -z "${WF_ID:-}" ]; then
-            echo "❌ Could not find workflow 'autohome_pipeline'."
-            exit 1
-          fi
-
-          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
-          RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
-          if [ -z "${RUN_ID:-}" ] || [ "${RUN_ID}" = "null" ]; then
-            echo "❌ No successful runs found for autohome_pipeline."
-            exit 1
-          fi
-          echo "Found successful run_id=$RUN_ID"
-
-          ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
-          COUNT=$(echo "$ART_JSON" | jq '.artifacts | length')
-          if [ "$COUNT" -eq 0 ]; then
-            echo "❌ No artifacts in that run."
-            exit 1
-          fi
-
           mkdir -p output
-          echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
-            echo "Downloading artifact: $NAME (id=$ID)"
-            gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$NAME.zip"
-            unzip -o "$NAME.zip" -d output/
+          WORKFLOWS=("autohome_pipeline" "autohome_config_to_csv" "autohome_pipeline_to_koubei")
+          for WF in "${WORKFLOWS[@]}"; do
+            WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r ".workflows[] | select(.name==\"$WF\") | .id" | head -n1)
+            if [ -z "$WF_ID" ]; then
+              continue
+            fi
+            RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
+            RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
+            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+              continue
+            fi
+            ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
+            COUNT=$(echo "$ART_JSON" | jq '.artifacts | length')
+            if [ "$COUNT" -eq 0 ]; then
+              continue
+            fi
+            echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
+              gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$WF-$NAME.zip"
+              unzip -o "$WF-$NAME.zip" -d output/
+            done
           done
-          echo "✅ Restored output/ from artifacts."
 
-      # ✅ publicディレクトリ構築＋キャッシュ無効化ヘッダ追加
       - name: Prepare public directory
         run: |
           set -euo pipefail
-
           mkdir -p public
-          echo "✅ Copying output/* → public/output/ ..."
-          cp -r output public/output/   # ← これがポイント！ outputを直下に入れる
-
-          # ✅ キャッシュ無効化＋CORS許可＋MIME明示
+          cp -r output public/output/
           echo "/output/*" > public/_headers
           echo "  Content-Type: text/plain; charset=utf-8" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
           echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-
-          # ✅ HTMLもキャッシュ無効化
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
-          echo "==== public directory tree ===="
-          find public -type f | sort || true
-          echo "==== _headers content ===="
-          cat public/_headers
-
-      # ✅ Cloudflare Pages へデプロイ
       - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
