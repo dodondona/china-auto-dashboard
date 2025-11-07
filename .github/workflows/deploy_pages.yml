@@ -14,36 +14,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install deps
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y gh jq unzip
-
-      - name: Restore latest output
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          WF_ID=$(gh api repos/${{ github.repository }}/actions/workflows | jq -r '.workflows[] | select(.name=="autohome_pipeline") | .id' | head -n1)
-          RUN_JSON=$(gh api repos/${{ github.repository }}/actions/workflows/$WF_ID/runs?branch=main&status=success&per_page=1)
-          RUN_ID=$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id')
-          mkdir -p output
-          ART_JSON=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts)
-          echo "$ART_JSON" | jq -r '.artifacts[] | "\(.id) \(.name)"' | while read -r ID NAME; do
-            gh api repos/${{ github.repository }}/actions/artifacts/$ID/zip > "$NAME.zip"
-            unzip -o "$NAME.zip" -d output/
-          done
-
-      - name: Prepare public directory (force new hash)
+      - name: Prepare public directory
         run: |
           set -euo pipefail
           mkdir -p public
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          echo "🔁 Using hash: $COMMIT_HASH"
-          cp -r output public/output/
-          find public/output -type f -exec touch {} \;
-          echo "$COMMIT_HASH" > public/_force_refresh_$COMMIT_HASH.txt
+          echo "✅ Copying output → public/"
+          cp -r output public/output
 
+          # ✅ キャッシュ無効化とCORS許可
           echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
@@ -51,7 +29,10 @@ jobs:
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
-      - name: Publish to Cloudflare Pages (no GitHub Deployment API)
+          echo "==== public directory tree ===="
+          find public -type f | sort || true
+
+      - name: Publish to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
