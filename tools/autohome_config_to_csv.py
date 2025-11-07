@@ -160,7 +160,7 @@ def parse_div_layout_to_wide_csv(html: str):
         return "style_row__" in cls
 
     # =========================================================
-    # 改良版 cell_value(): 改行を保持（前/后順序はそのまま）
+    # 改良版 cell_value(): 改行を保持 + ●○の位置そのまま
     # =========================================================
     def cell_value(td):
         subs = td.select('div[class*="style_col_sub__"]')
@@ -175,7 +175,7 @@ def parse_div_layout_to_wide_csv(html: str):
                             cls = " ".join(node.get("class", []))
                             parts.append("●" if "solid" in cls else "○")
                         else:
-                            t = str(node).strip()
+                            t = node.get_text(strip=True) if hasattr(node, "get_text") else str(node).strip()
                             if t:
                                 parts.append(t)
                 label = " ".join(parts).strip()
@@ -191,7 +191,7 @@ def parse_div_layout_to_wide_csv(html: str):
                     cls = " ".join(node.get("class", []))
                     parts.append("●" if "solid" in cls else "○")
                 else:
-                    t = str(node).strip()
+                    t = node.get_text(strip=True) if hasattr(node, "get_text") else str(node).strip()
                     if t:
                         parts.append(t)
             combined = " ".join(parts)
