@@ -17,15 +17,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Prepare public directory
+      - name: Clean and prepare public directory
         run: |
           set -e
+          echo "🧹 Cleaning and copying output → public/output/"
+          rm -rf public
           mkdir -p public/output
           cp -r output/* public/output/ || true
 
+          # Disable caching and enable CORS
           echo "/output/*" > public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
           echo "  Access-Control-Allow-Origin: *" >> public/_headers
@@ -33,25 +36,27 @@ jobs:
           echo "/*" >> public/_headers
           echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
 
+          echo "Touching all files to force hash changes..."
+          find public -type f -exec touch {} +
+
           echo "==== public directory tree ===="
           find public -type f | sort || true
 
-      - name: Publish to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          projectName: "china-auto-dashboard"
-          directory: "public"
-          branch: "main"
-          wranglerVersion: "3"
+      - name: Install Wrangler CLI
+        run: npm install -g wrangler@3
 
-      - name: Force dirty commit warning silence
+      - name: Force Deploy to Cloudflare Pages (always overwrite)
         run: |
-          echo "Force reupload by touching files..."
-          find public -type f -exec touch {} +
+          echo "🚀 Starting forced deployment to Cloudflare Pages (main branch)..."
+          npx wrangler pages deploy public \
+            --project-name=china-auto-dashboard \
+            --branch=main \
+            --commit-dirty=true
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
 
-      - name: Purge Cloudflare Cache
+      - name: Purge Cloudflare Cache (optional)
         if: always()
         env:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
