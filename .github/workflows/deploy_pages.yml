@@ -45,8 +45,9 @@ jobs:
           projectName: "china-auto-dashboard"
           directory: "public"
 
+      # ✅ 正しい条件構文（secrets の存在チェック）
       - name: Purge Cloudflare Cache
-        if: ${{ secrets.CF_ZONE_ID != '' }}
+        if: ${{ secrets.CF_ZONE_ID }}
         run: |
           curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
             -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
