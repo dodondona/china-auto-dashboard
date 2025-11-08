@@ -1,90 +1,51 @@
-name: Deploy to Cloudflare Pages
+name: Mirror to Public Repo (GitHub Pages)
 
 on:
-  workflow_dispatch:
   workflow_run:
     workflows:
       - autohome_pipeline
-      - autohome_config_test
-      - autohome_config_to_csv
       - autohome_pipeline_hezi
       - autohome_pipeline_to_koubei
+      - autohome_config_to_csv
       - koubei_summary
     types: [completed]
 
+permissions:
+  contents: read
+
+env:
+  PUBLIC_REPO: ${{ secrets.PUBLIC_REPO_NAME || 'a8f3x9data' }}
+  PUBLIC_OWNER: ${{ github.repository_owner }}
+
 jobs:
-  deploy:
+  sync:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout private repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Clean and prepare public directory
+      - name: Clone public repo
         run: |
-          set -e
-          echo "🧹 Cleaning and copying output → public/output/"
-          rm -rf public
-          mkdir -p public/output
-          cp -r output/* public/output/ || true
+          git clone --depth=1 https://github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git pub
 
-          # Disable caching and enable CORS
-          echo "/output/*" > public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-          echo "  Access-Control-Allow-Origin: *" >> public/_headers
-          echo "  Access-Control-Allow-Methods: GET, OPTIONS" >> public/_headers
-          echo "/*" >> public/_headers
-          echo "  Cache-Control: no-store, no-cache, must-revalidate, max-age=0" >> public/_headers
-
-          echo "Touching all files to force hash changes..."
-          find public -type f -exec touch {} +
-
-          echo "==== public directory tree ===="
-          find public -type f | sort || true
-
-      - name: Install Wrangler CLI
-        run: npm install -g wrangler@3
-
-      - name: Force Deploy to Cloudflare Pages (always overwrite)
+      - name: Copy artifacts
         run: |
-          echo "🚀 Starting forced deployment to Cloudflare Pages (main branch)..."
-          npx wrangler pages deploy public \
-            --project-name=china-auto-dashboard \
-            --branch=main \
-            --commit-dirty=true
+          rm -rf pub/output pub/public
+          mkdir -p pub
+          cp -r output pub/ || true
+          cp -r public pub/ || true
+          echo "✅ Copied output/ and public/ to mirror repo"
+
+      - name: Commit & push to public repo
+        working-directory: pub
         env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-
-      - name: Purge Cloudflare Cache (optional)
-        if: always()
-        env:
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         run: |
-          echo "🧹 Purging Cloudflare cache..."
-          if [ -n "${CF_ZONE_ID}" ]; then
-            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
-              -H "Authorization: Bearer ${CF_API_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data '{"purge_everything":true}'
-          else
-            echo "⚠️ CF_ZONE_ID not set, skipping purge"
-          fi
-          echo "✅ Cache purge complete"
-
-      - name: Add dummy hash to force reupload
-        run: |
-          echo "Forcing content hash change..."
-          for f in $(find public -type f -name "*.csv"); do
-            echo "# FORCE_HASH=$(date +%s%N)" >> "$f"
-          done
-
-      - name: Force Deploy to Cloudflare Pages (always overwrite)
-        run: |
-          echo "🚀 Starting forced deployment to Cloudflare Pages (main branch)..."
-          npx wrangler pages deploy public \
-            --project-name=china-auto-dashboard \
-            --branch=main \
-            --commit-dirty=true
-
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Sync from private repo at $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
+          git push https://x-access-token:${TOKEN}@github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git main
