@@ -34,11 +34,11 @@ jobs:
 
       - name: Copy artifacts
         run: |
-          rm -rf pub/output pub/public
+          rm -rf pub/*
           mkdir -p pub
-          cp -r output pub/ || true
-          cp -r public pub/ || true
-          echo "✅ Copied output/ and public/ to mirror repo"
+          cp -r output pub/output || true
+          cp -r public/* pub/ || true   # ← ★ public/ の中身をルートへコピー
+          echo "✅ Copied output/ and public/* to mirror repo"
 
       - name: Commit & push to public repo
         working-directory: pub
