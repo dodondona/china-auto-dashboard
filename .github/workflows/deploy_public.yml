@@ -32,23 +32,24 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git pub
 
-      - name: Copy artifacts
+      - name: Copy artifacts (output + public/index.html)
         run: |
           rm -rf pub/*
           mkdir -p pub/output
+          # ✅ output配下の全成果物をコピー
           cp -r output/* pub/output/ || true
-          cp -r public/* pub/ || true
-          echo "✅ Copied public/* to root for GitHub Pages"
-
-      - name: Rename updated config CSVs to force refresh
-        run: |
-          for f in $(find output/autohome -type f -name "config_*.ja.csv"); do
-            ts=$(date +%s)
-            dir=$(dirname "$f")
-            base=$(basename "$f" .csv)
-            cp "$f" "${dir}/${base}_${ts}.csv"
-          done
-          echo "✅ Added timestamped copies for cache-busting"
+          # ✅ public配下のHTMLや静的ファイルもコピー
+          if [ -d "public" ]; then
+            cp -r public/* pub/ || true
+            echo "✅ Copied public/* to pub/"
+          else
+            echo "⚠️ No public/ folder found"
+          fi
+          # 念のためindex.htmlを確実にrootへコピー
+          if [ -f "public/index.html" ]; then
+            cp public/index.html pub/index.html
+            echo "✅ index.html copied to pub root"
+          fi
 
       - name: Commit & push to public repo
         working-directory: pub
@@ -61,13 +62,17 @@ jobs:
           git commit -m "Sync from private repo at $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
           git push https://x-access-token:${TOKEN}@github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git main
 
-      - name: Force rebuild to invalidate Pages cache
+      - name: Force refresh commit (for cache purge)
         working-directory: pub
         env:
           TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
         run: |
-          echo "build=$(date +%s)" > .force_refresh.txt
+          echo "$(date)" > .force_refresh.txt
           git add .force_refresh.txt
-          git commit -m "Force rebuild $(date)" || echo "No force commit"
+          git commit -m "Force refresh $(date)" || echo "no diff"
           git push https://x-access-token:${TOKEN}@github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git main
 
+      - name: Confirm contents
+        run: |
+          echo "===== pub/ structure after sync ====="
+          find pub -maxdepth 2 -type f | sort
