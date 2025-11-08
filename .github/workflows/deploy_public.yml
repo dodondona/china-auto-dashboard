@@ -50,3 +50,14 @@ jobs:
           git add .
           git commit -m "Sync from private repo at $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes to commit"
           git push https://x-access-token:${TOKEN}@github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git main
+
+      - name: Force rebuild to invalidate Pages cache
+        working-directory: pub
+        env:
+          TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          echo "build=$(date +%s)" > .force_refresh.txt
+          git add .force_refresh.txt
+          git commit -m "Force rebuild $(date)" || echo "No force commit"
+          git push https://x-access-token:${TOKEN}@github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git main
+
