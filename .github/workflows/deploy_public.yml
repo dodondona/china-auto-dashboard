@@ -1,6 +1,7 @@
 name: Mirror to Public Repo (GitHub Pages)
 
 on:
+　workflow_dispatch:
   workflow_run:
     workflows:
       - autohome_pipeline
