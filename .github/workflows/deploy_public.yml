@@ -35,10 +35,10 @@ jobs:
       - name: Copy artifacts
         run: |
           rm -rf pub/*
-          mkdir -p pub
-          cp -r output pub/output || true
-          cp -r public/* pub/ || true   # ← ★ public/ の中身をルートへコピー
-          echo "✅ Copied output/ and public/* to mirror repo"
+          mkdir -p pub/output
+          cp -r output/* pub/output/ || true
+          cp -r public/* pub/ || true
+          echo "✅ Copied public/* to root for GitHub Pages"
 
       - name: Commit & push to public repo
         working-directory: pub
