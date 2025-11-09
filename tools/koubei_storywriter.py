@@ -85,6 +85,13 @@ def ask_model(client, system, user):
     return comp.choices[0].message.content.strip()
 
 
+def clean_report(text: str) -> str:
+    """タイトル行と末尾のまとめ文を削除"""
+    text = re.sub(r'^.*?モデルの評価レポート\s*\n', '', text)
+    text = re.sub(r'このように、.*?(?:。\s*)?$', '', text)
+    return text.strip()
+
+
 def make_payload(df: pd.DataFrame):
     """CSVから入力データを整形"""
     def safe(v):
@@ -118,6 +125,7 @@ def main(series_id: str, style: str = "formal"):
     )
 
     story = ask_model(client, system, prompt)
+    story = clean_report(story)  # ← この1行を追加
 
     # 出力先ディレクトリ
     outdir = Path(f"output/koubei/{series_id}")
