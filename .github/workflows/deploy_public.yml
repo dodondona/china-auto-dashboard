@@ -76,3 +76,20 @@ jobs:
         run: |
           echo "===== pub/ structure after sync ====="
           find pub -maxdepth 2 -type f | sort
+
+      - name: Purge Cloudflare cache (GitHub Pages)
+        if: always()
+        env:
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          if [ -z "$CF_ZONE_ID" ] || [ -z "$CF_API_TOKEN" ]; then
+            echo "⚠️ CF credentials not set; skipping purge"
+          else
+            echo "🧹 Purging Cloudflare cache for GitHub Pages..."
+            curl -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{"purge_everything":true}'
+            echo "✅ Cache purge complete"
+          fi
