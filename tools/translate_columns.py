@@ -121,6 +121,57 @@ def clean_any_noise(s: str) -> str:
     return s
     # ▲▲▲ ここだけ変更（他は一切変更なし）
 
+def fix_price_section_info(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    価格行のセクション情報を自動修正
+    
+    厂商指导价(元) と 经销商报价 の行について:
+    - セクション列が空欄/NaN → "基本参数" に設定
+    - セクション_ja列が "nan"/空欄 → "基本仕様" に設定
+    
+    この関数は既存のロジックに影響を与えず、価格行のみを修正します。
+    """
+    if "セクション" not in df.columns or "項目" not in df.columns:
+        return df
+    
+    fixed_count = 0
+    
+    for idx in df.index:
+        try:
+            item = str(df.at[idx, "項目"]).strip()
+        except Exception:
+            continue
+        
+        # 価格関連の項目を判定
+        is_price_row = "厂商指导价" in item or "经销商报价" in item
+        
+        if not is_price_row:
+            continue
+        
+        # セクション列の修正
+        try:
+            section = df.at[idx, "セクション"]
+            if pd.isna(section) or str(section).strip() == "":
+                df.at[idx, "セクション"] = "基本参数"
+                fixed_count += 1
+        except Exception:
+            pass
+        
+        # セクション_ja列の修正（存在する場合のみ）
+        if "セクション_ja" in df.columns:
+            try:
+                section_ja = df.at[idx, "セクション_ja"]
+                if pd.isna(section_ja) or str(section_ja).strip() in ["", "nan"]:
+                    df.at[idx, "セクション_ja"] = "基本仕様"
+                    fixed_count += 1
+            except Exception:
+                pass
+    
+    if fixed_count > 0:
+        print(f"🔧 Fixed {fixed_count} price section cells (厂商指导价/经销商报价)")
+    
+    return df
+
 def clean_price_cell(s: str) -> str:
     t = clean_any_noise(s)
     for w in NOISE_PRICE_TAIL:
@@ -739,6 +790,9 @@ def main():
 
     df = pd.read_csv(SRC, encoding="utf-8-sig")
     df.columns = [BRAND_MAP.get(c, c) for c in df.columns]
+    
+    # 価格行のセクション情報を修正（厂商指导价/经销商报价）
+    df = fix_price_section_info(df)
 
     tr = Translator(MODEL, API_KEY)
 
