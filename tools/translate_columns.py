@@ -117,7 +117,7 @@ def clean_any_noise(s: str) -> str:
         s = s.replace(w, "")
     # ▼▼▼ ここだけ変更：改行を保持し、空白類のみ畳む
     s = re.sub(r"[ \t\u3000\u00A0\u200b\ufeff]+", " ", s)
-    s = "\n".join(seg.strip(" 　-—–") for seg in s.splitlines())
+    s = "\n".join(seg.strip(" 　-—") for seg in s.splitlines())
     return s
     # ▲▲▲ ここだけ変更（他は一切変更なし）
 
