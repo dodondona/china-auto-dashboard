@@ -150,54 +150,65 @@ class Translator:
                 result[t] = t
         return result
 
-# ==== キャッシュ管理 ====
-CACHE_DIR = Path("cache/translations")
-
-def ensure_dir(p: Path):
-    p.mkdir(parents=True, exist_ok=True)
-
-CACHE_FILES = {
-    "manufacturer": CACHE_DIR / "manufacturer_ja.json",
-    "vehicle_name": CACHE_DIR / "vehicle_name_ja.json",
-}
-
-for cf in CACHE_FILES.values():
-    ensure_dir(cf.parent)
-
-def load_json(p: Path) -> dict[str, str]:
-    try:
-        if p.exists():
-            with p.open("r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"⚠️ cache load failed {p}: {e}")
-    return {}
-
-def dump_json_safe(p: Path, data: dict[str, str]):
-    try:
-        ensure_dir(p.parent)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        tmp.replace(p)
-    except Exception as e:
-        print(f"⚠️ cache save failed {p}: {e}")
-
-# メモリキャッシュ
-MEM_CACHE = {
-    "manufacturer": {},
-    "vehicle_name": {},
-}
-
-# JSONキャッシュ読み込み
-JSON_CACHE = {
-    "manufacturer": load_json(CACHE_FILES["manufacturer"]),
-    "vehicle_name": load_json(CACHE_FILES["vehicle_name"]),
-}
-
-def translate_with_caches(kind: str, terms: list[str], fixed_map: dict[str, str], tr: Translator) -> dict[str, str]:
+# ==== 辞書の自動更新 ====
+def update_dictionary_file(dict_name: str, new_entries: dict[str, str]):
     """
-    優先順: 固定辞書 > JSONキャッシュ > メモリキャッシュ > LLM
+    辞書に新しいエントリを追加してPythonファイルに書き戻す
+    """
+    if not new_entries:
+        return
+    
+    script_path = Path(__file__)
+    
+    try:
+        with script_path.open("r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # 辞書の開始・終了位置を検索
+        if dict_name == "DICT_ZH_TO_JA":
+            pattern = r"(DICT_ZH_TO_JA = \{[^}]*?)(\})"
+        elif dict_name == "DICT_GLOBAL_NAME":
+            pattern = r"(DICT_GLOBAL_NAME = \{[^}]*?)(\}\n\})"  # ネストした構造
+        else:
+            return
+        
+        match = re.search(pattern, content, re.DOTALL)
+        if not match:
+            print(f"⚠️ Could not find {dict_name} in script")
+            return
+        
+        # 新しいエントリを生成
+        new_lines = []
+        for key, value in sorted(new_entries.items()):
+            # エスケープ処理
+            key_escaped = key.replace('"', '\\"')
+            value_escaped = value.replace('"', '\\"')
+            new_lines.append(f'    "{key_escaped}": "{value_escaped}",')
+        
+        # 辞書に追加
+        dict_start = match.group(1)
+        dict_end = match.group(2)
+        
+        # 既存の最後のカンマを確認
+        if not dict_start.rstrip().endswith(","):
+            dict_start += ","
+        
+        new_dict = dict_start + "\n    # LLMで自動追加\n" + "\n".join(new_lines) + "\n" + dict_end
+        
+        # ファイルを更新
+        new_content = content[:match.start()] + new_dict + content[match.end():]
+        
+        with script_path.open("w", encoding="utf-8") as f:
+            f.write(new_content)
+        
+        print(f"✅ Added {len(new_entries)} entries to {dict_name}")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to update dictionary: {e}")
+
+def translate_with_dict_update(kind: str, terms: list[str], fixed_map: dict[str, str], tr: Translator) -> dict[str, str]:
+    """
+    固定辞書で翻訳 → なければLLM → 辞書ファイルに追加
     """
     out: dict[str, str] = {}
 
@@ -206,26 +217,16 @@ def translate_with_caches(kind: str, terms: list[str], fixed_map: dict[str, str]
         if t in fixed_map:
             out[t] = fixed_map[t]
 
-    # 2) JSONキャッシュ
-    for t in terms:
-        if t not in out and t in JSON_CACHE[kind]:
-            out[t] = JSON_CACHE[kind][t]
-
-    # 3) メモリキャッシュ
-    for t in terms:
-        if t not in out and t in MEM_CACHE[kind]:
-            out[t] = MEM_CACHE[kind][t]
-
-    # 4) LLM
+    # 2) LLM
     need = [t for t in terms if t not in out]
     if need:
         print(f"🤖 Translating {len(need)} {kind}(s) with LLM...")
         llm_map = tr.translate_unique(need)
         out.update(llm_map)
-        # メモリ・JSONキャッシュに反映
-        for k, v in llm_map.items():
-            MEM_CACHE[kind][k] = v
-            JSON_CACHE[kind][k] = v
+        
+        # 3) 辞書ファイルに追加
+        dict_name = "DICT_ZH_TO_JA" if kind == "manufacturer" else "DICT_GLOBAL_NAME"
+        update_dictionary_file(dict_name, llm_map)
 
     return out
 
@@ -397,7 +398,7 @@ def process_csv(csv_path: Path) -> Path | None:
     api_key = os.environ.get("OPENAI_API_KEY")
     tr = Translator(model, api_key)
 
-    # manufacturer_ja - 辞書優先、なければLLM
+    # manufacturer_ja - 辞書優先、なければLLM→辞書追加
     print("\n📋 Translating manufacturers...")
     uniq_makers = list(set(df["manufacturer"].dropna().astype(str).unique()))
     
@@ -408,16 +409,16 @@ def process_csv(csv_path: Path) -> Path | None:
         if matched:
             maker_ja_map[val] = matched
     
-    # 辞書にないものをLLMで翻訳
+    # 辞書にないものをLLMで翻訳→辞書に追加
     need_llm_makers = [m for m in uniq_makers if m not in maker_ja_map]
     if need_llm_makers:
-        llm_maker_map = translate_with_caches("manufacturer", need_llm_makers, {}, tr)
+        llm_maker_map = translate_with_dict_update("manufacturer", need_llm_makers, {}, tr)
         maker_ja_map.update(llm_maker_map)
     
     # データフレームに適用
     df["manufacturer_ja"] = df["manufacturer"].astype(str).map(lambda x: maker_ja_map.get(x, x))
 
-    # global_name - 辞書優先、なければLLM、最後にピンイン
+    # global_name - 辞書優先、なければLLM→辞書追加、最後にピンイン
     print("\n📋 Translating vehicle names...")
     uniq_names = list(set(df["name"].dropna().astype(str).unique()))
     
@@ -427,10 +428,10 @@ def process_csv(csv_path: Path) -> Path | None:
         if n in DICT_GLOBAL_NAME:
             name_map[n] = DICT_GLOBAL_NAME[n]
     
-    # 辞書にないものをLLMで翻訳
+    # 辞書にないものをLLMで翻訳→辞書に追加
     need_llm_names = [n for n in uniq_names if n not in name_map]
     if need_llm_names:
-        llm_name_map = translate_with_caches("vehicle_name", need_llm_names, DICT_GLOBAL_NAME, tr)
+        llm_name_map = translate_with_dict_update("vehicle_name", need_llm_names, DICT_GLOBAL_NAME, tr)
         name_map.update(llm_name_map)
     
     # ピンインフォールバック（LLMで翻訳できなかった、または中国語のみの場合）
@@ -444,10 +445,6 @@ def process_csv(csv_path: Path) -> Path | None:
     
     insert_at = df.columns.get_loc("name") + 1
     df.insert(insert_at, "global_name", globals_)
-
-    # キャッシュ保存
-    dump_json_safe(CACHE_FILES["manufacturer"], JSON_CACHE["manufacturer"])
-    dump_json_safe(CACHE_FILES["vehicle_name"], JSON_CACHE["vehicle_name"])
 
     # ✅ ファイル名修正：末尾の _with_maker を1回だけ除去
     base = re.sub(r"_with_maker$", "", csv_path.stem)
