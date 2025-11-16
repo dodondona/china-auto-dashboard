@@ -144,14 +144,22 @@ jobs:
             output/koubei/${{ inputs.series_id }}/story.md
             cache/koubei/${{ inputs.series_id }}/*.json
 
-      # ⑨ story.txt と cache/koubei を commit
+# ⑨ story.txt と cache/koubei を commit
       - name: Commit story.txt to repository
         run: |
           set -e
           ID="${{ inputs.series_id }}"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main || true
+          
+          # まず add してから pull する
           git add "output/koubei/${ID}/story.txt" "cache/koubei/${ID}" || true
-          git diff --cached --quiet || git commit -m "Add/Update koubei story & cache for ${ID}"
-          git push || true
+          
+          # 変更がある場合のみ commit
+          if ! git diff --cached --quiet; then
+            git commit -m "Add/Update koubei story & cache for ${ID}"
+          fi
+          
+          # pull してから push
+          git pull --rebase origin main || git pull origin main
+          git push
