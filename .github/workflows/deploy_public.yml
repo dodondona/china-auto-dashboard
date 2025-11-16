@@ -32,23 +32,21 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/${PUBLIC_OWNER}/${PUBLIC_REPO}.git pub
 
-      - name: Copy artifacts (output + public/index.html)
+      - name: Copy artifacts (output + public/* except index.html)
         run: |
           rm -rf pub/*
           mkdir -p pub/output
           # ✅ output配下の全成果物をコピー
           cp -r output/* pub/output/ || true
-          # ✅ public配下のHTMLや静的ファイルもコピー
+          # ✅ public配下のHTMLや静的ファイルをコピー（index.html除外）
           if [ -d "public" ]; then
-            cp -r public/* pub/ || true
-            echo "✅ Copied public/* to pub/"
+            # index.html以外をコピー
+            find public -maxdepth 1 -type f ! -name 'index.html' -exec cp {} pub/ \; || true
+            # サブディレクトリは全てコピー
+            find public -maxdepth 1 -mindepth 1 -type d -exec cp -r {} pub/ \; || true
+            echo "✅ Copied public/* to pub/ (excluding index.html)"
           else
             echo "⚠️ No public/ folder found"
-          fi
-          # 念のためindex.htmlを確実にrootへコピー
-          if [ -f "public/index.html" ]; then
-            cp public/index.html pub/index.html
-            echo "✅ index.html copied to pub root"
           fi
 
       - name: Commit & push to public repo
