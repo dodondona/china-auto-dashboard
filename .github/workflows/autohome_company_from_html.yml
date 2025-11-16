@@ -1,0 +1,35 @@
+name: autohome_company_from_html
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 1 3 * *"   # 毎月3日 01:15 (UTC)
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install beautifulsoup4 lxml
+
+      - name: Run parser
+        run: |
+          python tools/autohome_company_from_html.py
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autohome_company_output
+          path: |
+            output/company/autohome_company_ranking.csv
+            output/company/images/*.png
