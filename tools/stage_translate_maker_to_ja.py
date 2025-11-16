@@ -4,15 +4,16 @@
 # 目的:
 #   - 'manufacturer'列を日本語化して'manufacturer_ja'列を追加
 #   - 'name'列の隣に'global_name'列を追加
-#   - global_nameは辞書優先、なければピンイン補助、最終的に元のnameを使用
+#   - global_nameは辞書優先、なければキャッシュ、最後にLLM翻訳
 #   - 既存動作・出力構造は変更しない
 #
 # 使い方:
 #   python tools/stage_translate_maker_to_ja.py <csv>
 
-import os, sys, re, json
+import os, sys, re, json, time
 from pathlib import Path
 import pandas as pd
+from openai import OpenAI
 
 try:
     sys.stdout.reconfigure(line_buffering=True)
@@ -83,6 +84,150 @@ DICT_ZH_TO_JA = {
     "银河": "銀河（Geely Galaxy）",
     "启源": "啓源（Changan Qiyuan）",
 }
+
+# ==== OpenAI Translator ====
+class Translator:
+    def __init__(self, model: str, api_key: str | None):
+        self.model = model
+        self.client = OpenAI(api_key=api_key) if api_key else None
+        self.batch_size = 60
+        self.retries = 3
+        self.sleep_base = 1.2
+
+    def translate_unique(self, terms: list[str]) -> dict[str, str]:
+        if not self.client:
+            print("⚠️ No OpenAI API key; skipping LLM translation")
+            return {t: t for t in terms}
+        
+        result = {}
+        for i in range(0, len(terms), self.batch_size):
+            batch = terms[i:i + self.batch_size]
+            for attempt in range(self.retries):
+                try:
+                    prompt = self._build_prompt(batch)
+                    resp = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                    )
+                    content = resp.choices[0].message.content or ""
+                    parsed = self._parse_response(content, batch)
+                    result.update(parsed)
+                    break
+                except Exception as e:
+                    print(f"⚠️ LLM translation attempt {attempt+1}/{self.retries} failed: {e}")
+                    if attempt < self.retries - 1:
+                        time.sleep(self.sleep_base ** (attempt + 1))
+                    else:
+                        for t in batch:
+                            result[t] = t
+        return result
+
+    def _build_prompt(self, terms: list[str]) -> str:
+        lines = "\n".join(f"{i+1}. {t}" for i, t in enumerate(terms))
+        return f"""以下の中国語の自動車メーカー名または車名を日本語に翻訳してください。
+可能であれば日本語名と英語表記を併記してください（例: トヨタ（Toyota））。
+元の中国語が既に英語やローマ字の場合はそのまま返してください。
+
+入力:
+{lines}
+
+出力形式（番号: 翻訳結果）:
+1. 翻訳結果1
+2. 翻訳結果2
+..."""
+
+    def _parse_response(self, content: str, batch: list[str]) -> dict[str, str]:
+        result = {}
+        lines = [ln.strip() for ln in content.split("\n") if ln.strip()]
+        for i, line in enumerate(lines):
+            m = re.match(r"^\d+[\.\)]\s*(.+)$", line)
+            if m and i < len(batch):
+                result[batch[i]] = m.group(1).strip()
+        # Fill missing translations
+        for t in batch:
+            if t not in result:
+                result[t] = t
+        return result
+
+# ==== キャッシュ管理 ====
+CACHE_DIR = Path("cache/translations")
+
+def ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
+
+CACHE_FILES = {
+    "manufacturer": CACHE_DIR / "manufacturer_ja.json",
+    "vehicle_name": CACHE_DIR / "vehicle_name_ja.json",
+}
+
+for cf in CACHE_FILES.values():
+    ensure_dir(cf.parent)
+
+def load_json(p: Path) -> dict[str, str]:
+    try:
+        if p.exists():
+            with p.open("r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"⚠️ cache load failed {p}: {e}")
+    return {}
+
+def dump_json_safe(p: Path, data: dict[str, str]):
+    try:
+        ensure_dir(p.parent)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(p)
+    except Exception as e:
+        print(f"⚠️ cache save failed {p}: {e}")
+
+# メモリキャッシュ
+MEM_CACHE = {
+    "manufacturer": {},
+    "vehicle_name": {},
+}
+
+# JSONキャッシュ読み込み
+JSON_CACHE = {
+    "manufacturer": load_json(CACHE_FILES["manufacturer"]),
+    "vehicle_name": load_json(CACHE_FILES["vehicle_name"]),
+}
+
+def translate_with_caches(kind: str, terms: list[str], fixed_map: dict[str, str], tr: Translator) -> dict[str, str]:
+    """
+    優先順: 固定辞書 > JSONキャッシュ > メモリキャッシュ > LLM
+    """
+    out: dict[str, str] = {}
+
+    # 1) 固定辞書
+    for t in terms:
+        if t in fixed_map:
+            out[t] = fixed_map[t]
+
+    # 2) JSONキャッシュ
+    for t in terms:
+        if t not in out and t in JSON_CACHE[kind]:
+            out[t] = JSON_CACHE[kind][t]
+
+    # 3) メモリキャッシュ
+    for t in terms:
+        if t not in out and t in MEM_CACHE[kind]:
+            out[t] = MEM_CACHE[kind][t]
+
+    # 4) LLM
+    need = [t for t in terms if t not in out]
+    if need:
+        print(f"🤖 Translating {len(need)} {kind}(s) with LLM...")
+        llm_map = tr.translate_unique(need)
+        out.update(llm_map)
+        # メモリ・JSONキャッシュに反映
+        for k, v in llm_map.items():
+            MEM_CACHE[kind][k] = v
+            JSON_CACHE[kind][k] = v
+
+    return out
 
 DICT_KEYS_SORTED = sorted(DICT_ZH_TO_JA.keys(), key=len, reverse=True)
 
@@ -247,26 +392,62 @@ def process_csv(csv_path: Path) -> Path | None:
         print("ℹ️ skip (no 'manufacturer' or 'name')")
         return None
 
-    # manufacturer_ja
-    ja_list = []
-    cache = {}
-    for val in df["manufacturer"].astype(str):
-        if val in cache:
-            ja_list.append(cache[val])
-            continue
-        ja = next((DICT_ZH_TO_JA[k] for k in DICT_KEYS_SORTED if k in val), val)
-        cache[val] = ja
-        ja_list.append(ja)
-    df["manufacturer_ja"] = ja_list
+    # OpenAI設定
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    tr = Translator(model, api_key)
 
-    # global_name
+    # manufacturer_ja - 辞書優先、なければLLM
+    print("\n📋 Translating manufacturers...")
+    uniq_makers = list(set(df["manufacturer"].dropna().astype(str).unique()))
+    
+    # まず辞書でマッチング（部分一致）
+    maker_ja_map = {}
+    for val in uniq_makers:
+        matched = next((DICT_ZH_TO_JA[k] for k in DICT_KEYS_SORTED if k in val), None)
+        if matched:
+            maker_ja_map[val] = matched
+    
+    # 辞書にないものをLLMで翻訳
+    need_llm_makers = [m for m in uniq_makers if m not in maker_ja_map]
+    if need_llm_makers:
+        llm_maker_map = translate_with_caches("manufacturer", need_llm_makers, {}, tr)
+        maker_ja_map.update(llm_maker_map)
+    
+    # データフレームに適用
+    df["manufacturer_ja"] = df["manufacturer"].astype(str).map(lambda x: maker_ja_map.get(x, x))
+
+    # global_name - 辞書優先、なければLLM、最後にピンイン
+    print("\n📋 Translating vehicle names...")
+    uniq_names = list(set(df["name"].dropna().astype(str).unique()))
+    
+    # 固定辞書からマッチング
+    name_map = {}
+    for n in uniq_names:
+        if n in DICT_GLOBAL_NAME:
+            name_map[n] = DICT_GLOBAL_NAME[n]
+    
+    # 辞書にないものをLLMで翻訳
+    need_llm_names = [n for n in uniq_names if n not in name_map]
+    if need_llm_names:
+        llm_name_map = translate_with_caches("vehicle_name", need_llm_names, DICT_GLOBAL_NAME, tr)
+        name_map.update(llm_name_map)
+    
+    # ピンインフォールバック（LLMで翻訳できなかった、または中国語のみの場合）
     globals_ = []
     for n in df["name"].astype(str):
-        g = DICT_GLOBAL_NAME.get(n, "")
-        g = add_block_pinyin_inline(n, g)
+        g = name_map.get(n, "")
+        # 中国語のみの場合はピンインを追加
+        if not g or (g == n and re.search(r"[\u4e00-\u9fff]", g) and not re.search(r"[A-Za-z]", g)):
+            g = add_block_pinyin_inline(n, g)
         globals_.append(g)
+    
     insert_at = df.columns.get_loc("name") + 1
     df.insert(insert_at, "global_name", globals_)
+
+    # キャッシュ保存
+    dump_json_safe(CACHE_FILES["manufacturer"], JSON_CACHE["manufacturer"])
+    dump_json_safe(CACHE_FILES["vehicle_name"], JSON_CACHE["vehicle_name"])
 
     # ✅ ファイル名修正：末尾の _with_maker を1回だけ除去
     base = re.sub(r"_with_maker$", "", csv_path.stem)
