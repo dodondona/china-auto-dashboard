@@ -72,6 +72,16 @@ DICT_ZH_TO_JA = {
     "雪佛兰": "シボレー（Chevrolet）",
     "捷途": "捷途（Jetour）",
     "奔腾": "奔騰（Bestune）",
+    "沃尔沃": "ボルボ（Volvo）",
+    "捷达": "ジェッタ（Jetta）",
+    "凯迪拉克": "キャデラック（Cadillac）",
+    "福特": "フォード（Ford）",
+    "现代": "ヒュンダイ（Hyundai）",
+    "smart": "スマート（smart）",
+    "起亚": "キア（Kia）",
+    "林肯": "リンカーン（Lincoln）",
+    "雪铁龙": "シトロエン（Citroën）",
+    "捷豹": "ジャガー（Jaguar）",
 
     # ✅ 新興および外資独資
     "特斯拉": "テスラ（Tesla）",
@@ -233,7 +243,6 @@ def translate_with_dict_update(kind: str, terms: list[str], fixed_map: dict[str,
 DICT_KEYS_SORTED = sorted(DICT_ZH_TO_JA.keys(), key=len, reverse=True)
 
 # ==== グローバル名辞書 ====
-# ==== グローバル名辞書 ====
 DICT_GLOBAL_NAME = {
     # 前10位
     "宏光MINIEV": "宏光MINIEV（Hongguang MINI EV）",
@@ -241,9 +250,9 @@ DICT_GLOBAL_NAME = {
     "星愿": "星願（Xingyuan）",
     "秦PLUS": "秦PLUS",
     "轩逸": "シルフィ",
-    "海狮06新能源": "海狮06新能源（Haishi 06 EV）",
+    "海狮06新能源": "海狮06新能源",
     "博越L": "博越L（Boyue L）",
-    "海豹06新能源": "海豹06新能源（Haibao 06 EV）",
+    "海豹06新能源": "海豹06新能源",
     "秦L": "秦L",
     "元UP": "元UP",
 
@@ -253,7 +262,7 @@ DICT_GLOBAL_NAME = {
     "长安Lumin": "ルミン（Lumin）",
     "小米YU7": "YU7",
     "朗逸": "ラヴィーダ",
-    "海豚": "ドルフィン",
+    "海豚": "ドルフィン（Dolphin）",
     "问界M8": "問界M8（AITO M8）",
     "凯美瑞": "カムリ",
     "Model 3": "モデル3",
@@ -279,9 +288,9 @@ DICT_GLOBAL_NAME = {
     "缤越": "クールレイ（Coolray）",
     "锋兰达": "フロントランダー",
     "艾瑞泽8": "アリゾ8（Arrizo 8）",
-    "宋Pro新能源": "宋Pro新能源（Song Pro EV）",
+    "宋Pro新能源": "宋Pro新能源",
     "雅阁": "アコード",
-    "深蓝S05": "深藍S05（Deepal S05）",
+    "深蓝S05": "深蓝S05",
     "奔驰E级": "Eクラス",
     "熊猫": "パンダ",
     "银河A7": "銀河A7",
@@ -298,14 +307,14 @@ DICT_GLOBAL_NAME = {
     "理想L6": "L6",
     "奥迪Q5L": "Q5L",
     "威兰达": "ウィランダー",
-    "海狮05 EV": "海狮05 EV（Haishi 05 EV）",
+    "海狮05 EV": "海狮05 EV",
     "长安CS75PLUS": "CS75プラス",
     "MG4": "MG4",
     "亚洲龙": "アバロン",
     "奔驰GLC": "GLC",
     "哈弗猛龙新能源": "ラプター（Haval Raptor）",
     "宋PLUS新能源": "宋PLUS新能源（Song PLUS EV）",
-    "乐道L90": "L90（Le Dao L90）",
+    "乐道L90": "乐道L90",
     "零跑C11": "C11",
     "问界M9": "問界M9（AITO M9）",
     "奔驰C级": "Cクラス",
@@ -345,7 +354,32 @@ DICT_GLOBAL_NAME = {
     "别克GL8新能源": "GL8",
     "宝来": "ボーラ（Bora）",
     "传祺GS3": "GS3（Trumpchi GS3）",
-}
+
+    # 追加精査分
+    "ID.4 CROZZ": "ID.4 CROZZ",
+    "ID.4 X": "ID.4 X",
+    "T-ROC探歌": "T-ROC（探歌）",
+    "一汽-大众CC": "CC",
+    "伊兰特": "エラントラ（Elantra）",
+    "凌渡": "ラモンド（Lamando）",
+    "凯迪拉克CT5": "CT5",
+    "凯迪拉克XT4": "XT4",
+    "凯迪拉克XT5": "XT5",
+    "别克E5": "E5",
+    "别克GL8": "GL8",
+    "蒙迪欧": "モンデオ（Mondeo）",
+    "沃尔沃S90": "S90",
+    "沃尔沃XC60": "XC60",
+    "福瑞迪": "フォルテ（Forte）",
+    "赛图斯": "セルトス（Seltos）",
+    "smart精灵#1": "smart精灵#1",
+    "航海家": "ノーチラス（Nautilus）",
+    "锐界": "エッジ（Edge）",
+    "马自达CX-5": "CX-5",
+    "马自达EZ-60": "EZ-60",
+    "皇冠陆放": "クラウンクルーガー（Crown Kluger）",
+    "雷凌": "レビン（Levin）",
+    "高尔夫": "ゴルフ（Golf）",
 }
 
 # ==== ピンイン補助 ====
