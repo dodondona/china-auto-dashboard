@@ -165,4 +165,29 @@ jobs:
             exit 0
           fi
           git commit -m "chore(pipeline-hezi): update output/pipeline/hezi from artifacts [skip ci]"
-          git push
+          
+          # リトライ付きで push（最大5回試行）
+          for i in {1..5}; do
+            echo "Push attempt $i/5..."
+            
+            # まず最新を pull
+            if git pull --rebase origin main; then
+              # push を試行
+              if git push origin main; then
+                echo "✅ Successfully pushed on attempt $i"
+                exit 0
+              fi
+            else
+              # rebase が失敗したら通常の pull を試行
+              git rebase --abort || true
+              git pull origin main
+            fi
+            
+            # 失敗したら少し待つ
+            if [ $i -lt 5 ]; then
+              sleep $((RANDOM % 10 + 5))
+            fi
+          done
+          
+          echo "❌ Failed to push after 5 attempts"
+          exit 1
