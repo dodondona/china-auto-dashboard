@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -20,9 +20,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4 lxml
+          pip install beautifulsoup4 lxml requests
 
-      - name: Run parser
+      - name: Run scraper
         run: |
           python tools/autohome_company_from_html.py
 
@@ -30,6 +30,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: autohome_company_output
-          path: |
-            output/company/autohome_company_ranking.csv
-            output/company/images/*.png
+          path: output/company/**
