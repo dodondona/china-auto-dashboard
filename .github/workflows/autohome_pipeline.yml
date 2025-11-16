@@ -150,19 +150,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # 他の変更があればstashして一時退避
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo "📦 Stashing other changes..."
-            git stash push -u -m "temp stash before pipeline commit"
+          # まず output/pipeline を add
+          git add -A output/pipeline
+          
+          # output/pipeline 以外の変更があればstashして一時退避
+          if ! git diff --quiet; then
+            echo "📦 Stashing other changes (non-pipeline files)..."
+            git stash push -u -m "temp stash before pipeline commit" -- $(git diff --name-only | grep -v '^output/pipeline/')
             STASHED=1
           else
             STASHED=0
           fi
           
-          git add -A output/pipeline
+          # commitチェック
           if git diff --cached --quiet; then
             echo "No changes to commit."
-            # stashを戻す
             if [ "$STASHED" = "1" ]; then
               git stash pop
             fi
@@ -175,31 +177,25 @@ jobs:
           for i in {1..5}; do
             echo "Push attempt $i/5..."
             
-            # まず最新を pull
             if git pull --rebase origin main; then
-              # push を試行
               if git push origin main; then
                 echo "✅ Successfully pushed on attempt $i"
-                # stashを戻す
                 if [ "$STASHED" = "1" ]; then
                   git stash pop || true
                 fi
                 exit 0
               fi
             else
-              # rebase が失敗したら通常の pull を試行
               git rebase --abort || true
               git pull origin main
             fi
             
-            # 失敗したら少し待つ
             if [ $i -lt 5 ]; then
               sleep $((RANDOM % 10 + 5))
             fi
           done
           
           echo "❌ Failed to push after 5 attempts"
-          # stashを戻す
           if [ "$STASHED" = "1" ]; then
             git stash pop || true
           fi
