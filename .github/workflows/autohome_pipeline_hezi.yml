@@ -159,11 +159,26 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # 他の変更があればstashして一時退避
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "📦 Stashing other changes..."
+            git stash push -u -m "temp stash before hezi commit"
+            STASHED=1
+          else
+            STASHED=0
+          fi
+          
           git add -A output/pipeline/hezi
           if git diff --cached --quiet; then
             echo "No changes to commit."
+            # stashを戻す
+            if [ "$STASHED" = "1" ]; then
+              git stash pop
+            fi
             exit 0
           fi
+          
           git commit -m "chore(pipeline-hezi): update output/pipeline/hezi from artifacts [skip ci]"
           
           # リトライ付きで push（最大5回試行）
@@ -175,6 +190,10 @@ jobs:
               # push を試行
               if git push origin main; then
                 echo "✅ Successfully pushed on attempt $i"
+                # stashを戻す
+                if [ "$STASHED" = "1" ]; then
+                  git stash pop || true
+                fi
                 exit 0
               fi
             else
@@ -190,4 +209,8 @@ jobs:
           done
           
           echo "❌ Failed to push after 5 attempts"
+          # stashを戻す
+          if [ "$STASHED" = "1" ]; then
+            git stash pop || true
+          fi
           exit 1
