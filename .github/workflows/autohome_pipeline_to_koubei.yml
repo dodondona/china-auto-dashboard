@@ -185,6 +185,7 @@ jobs:
             cache/koubei/${{ env.SERIES_ID }}/*.json
 
       # ✅ pushロジック（config_to_csv.yml と同一）
+# ✅ pushロジック（改善版）
       - name: Commit repo cache and outputs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -196,8 +197,40 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           mkdir -p "cache/koubei/${ID}" || true
+          
+          # 変更を add
           git add -A "cache/koubei/${ID}/" || true
           git add -A "output/koubei/${ID}/" || true
-          git commit -m "update koubei series ${ID} (story & cache)" || echo "No changes to commit"
-          git pull --rebase || true
-          git push || true
+          
+          # 変更がある場合のみ commit
+          if ! git diff --cached --quiet; then
+            git commit -m "update koubei series ${ID} (story & cache)"
+            
+            # リトライ付きで push（最大5回試行）
+            for i in {1..5}; do
+              echo "Push attempt $i/5..."
+              
+              # まず最新を pull
+              if git pull --rebase origin main; then
+                # push を試行
+                if git push origin main; then
+                  echo "✅ Successfully pushed on attempt $i"
+                  exit 0
+                fi
+              else
+                # rebase が失敗したら通常の pull を試行
+                git rebase --abort || true
+                git pull origin main
+              fi
+              
+              # 失敗したら少し待つ（並列実行の競合を避ける）
+              if [ $i -lt 5 ]; then
+                sleep $((RANDOM % 10 + 5))
+              fi
+            done
+            
+            echo "❌ Failed to push after 5 attempts"
+            exit 1
+          else
+            echo "No changes to commit for ${ID}"
+          fi
