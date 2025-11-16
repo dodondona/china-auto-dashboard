@@ -1,3 +1,4 @@
+# tools/autohome_config_to_csv.py
 import argparse
 import csv
 import re
@@ -43,7 +44,7 @@ def _cell_text_enriched(cell):
         try:
             u = cell.query_selector(sel)
             if u:
-                t = (u.innerinner_text() or "").strip()
+                t = (u.inner_text() or "").strip()
                 if t and t not in ("-", "—"):
                     unit = t
                     break
@@ -175,41 +176,30 @@ def parse_div_layout_to_wide_csv(html: str):
                 label = sub.get_text(" ", strip=True)
                 label = re.sub(r"[●○]", "", label).strip()
                 lines.append(f"{mark} {label}" if label else mark)
-            txt = "\n".join(lines) if lines else "–"
-        else:
-            span = td.select_one("span")
-            if span:
-                parts = []
-                for node in span.children:
-                    if getattr(node, "name", None) == "i":
-                        cls = " ".join(node.get("class", []))
-                        parts.append("●" if "solid" in cls else "○")
-                    else:
-                        t = str(node).strip()
-                        if t:
-                            parts.append(t)
-                combined = " ".join(parts)
-                txt = re.sub(r"\s+", " ", combined).strip() if combined else "–"
-            else:
-                is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
-                is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
-                txt_raw = norm_space(td.get_text(" ", strip=True))
-                if is_solid and not is_outline:
-                    txt = "●" if txt_raw in ("", "●", "○") else f"● {txt_raw}"
-                elif is_outline and not is_solid:
-                    txt = "○" if txt_raw in ("", "●", "○") else f"○ {txt_raw}"
+            return "\n".join(lines) if lines else "–"
+
+        span = td.select_one("span")
+        if span:
+            parts = []
+            for node in span.children:
+                if getattr(node, "name", None) == "i":
+                    cls = " ".join(node.get("class", []))
+                    parts.append("●" if "solid" in cls else "○")
                 else:
-                    txt = txt_raw if txt_raw else "–"
+                    t = str(node).strip()
+                    if t:
+                        parts.append(t)
+            combined = " ".join(parts)
+            return re.sub(r"\s+", " ", combined).strip() if combined else "–"
 
-        # ------------------------------------------------------
-        # ★后側の値が欠けている場合「–」を補完する最小限ロジック
-        # ------------------------------------------------------
-        if "/ 后" in txt:
-            after = txt.split("/ 后", 1)[1]
-            if not any(m in after for m in ("●", "○", "–")):
-                txt = txt + " –"
-
-        return txt
+        is_solid = bool(td.select_one('[class*="style_col_dot_solid__"]'))
+        is_outline = bool(td.select_one('[class*="style_col_dot_outline__"]'))
+        txt = norm_space(td.get_text(" ", strip=True))
+        if is_solid and not is_outline:
+            return "●" if txt in ("", "●", "○") else f"● {txt}"
+        if is_outline and not is_solid:
+            return "○" if txt in ("", "●", "○") else f"○ {txt}"
+        return txt if txt else "–"
 
     records = []
     current_section = ""
