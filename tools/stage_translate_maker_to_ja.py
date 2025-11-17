@@ -245,16 +245,16 @@ DICT_KEYS_SORTED = sorted(DICT_ZH_TO_JA.keys(), key=len, reverse=True)
 # ==== グローバル名辞書 ====
 DICT_GLOBAL_NAME = {
     # 前10位
-    "宏光MINIEV": "宏光MINIEV（Hongguang MINI EV）",
+    "宏光MINIEV": "宏光MINIEV",
     "Model Y": "モデルY",
-    "星愿": "星願（Xingyuan）",
+    "星愿": "星願",
     "秦PLUS": "秦PLUS",
     "轩逸": "シルフィ",
-    "海狮06新能源": "海狮06新能源",
-    "博越L": "博越L（Boyue L）",
-    "海豹06新能源": "海豹06新能源",
+    "海狮06新能源": "Sealion 06",
+    "博越L": "博越L",
+    "海豹06新能源": "Seal 06",
     "秦L": "秦L",
-    "元UP": "元UP",
+    "元UP": "Atto2",
 
     # 11–20
     "海鸥": "シーガル",
