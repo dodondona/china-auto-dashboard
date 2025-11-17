@@ -34,6 +34,12 @@ jobs:
 
       - name: Copy artifacts (output + public/* except index.html)
         run: |
+          # index.htmlを一時退避
+          if [ -f "pub/index.html" ]; then
+            cp pub/index.html /tmp/index.html.backup
+            echo "✅ Backed up existing index.html"
+          fi
+          
           rm -rf pub/*
           mkdir -p pub/output
           # ✅ output配下の全成果物をコピー
@@ -47,6 +53,12 @@ jobs:
             echo "✅ Copied public/* to pub/ (excluding index.html)"
           else
             echo "⚠️ No public/ folder found"
+          fi
+          
+          # index.htmlを復元
+          if [ -f "/tmp/index.html.backup" ]; then
+            cp /tmp/index.html.backup pub/index.html
+            echo "✅ Restored existing index.html"
           fi
 
       - name: Commit & push to public repo
